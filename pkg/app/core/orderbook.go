@@ -110,9 +110,16 @@ func (ob *OrderBook) Cancel(id string) bool {
 }
 
 // Place matches IOC/GTC by price-time. Remaining qty rests only if GTC.
-func (ob *OrderBook) Place(o *Order) []Fill {
+// Validates order against market parameters before matching.
+// Returns error if order violates market rules (invalid tick/lot size, min notional, etc.)
+func (ob *OrderBook) Place(o *Order, market *Market) ([]Fill, error) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
+
+	// Validate order against market parameters
+	if err := market.ValidateOrder(o.Price, o.Qty); err != nil {
+		return nil, err
+	}
 
 	var fills []Fill
 
@@ -177,7 +184,7 @@ func (ob *OrderBook) Place(o *Order) []Fill {
 			ob.addAsk(o.Price, &cp)
 		}
 	}
-	return fills
+	return fills, nil
 }
 
 // GetBidLevels returns all bid price levels sorted high to low (best bid first).

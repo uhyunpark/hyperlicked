@@ -27,7 +27,7 @@ func main() {
 	if logFile == "" {
 		logFile = "data/node.log"
 	}
-	
+
 	logger, err := util.NewLoggerWithFile(logFile)
 	if err != nil {
 		log.Fatalf("logger: %v", err)
@@ -117,7 +117,11 @@ func main() {
 	logInterval := consensus.Height(100)
 	lastLoggedHeight := consensus.Height(0)
 
-	sugar.Infow("node_starting", "validators", len(cfg.Consensus.Validators))
+	sugar.Infow("node_starting",
+		"config_validators", len(cfg.Consensus.Validators),
+		"active_validators", len(ids),
+		"single_node_mode", singleNodeMode,
+		"quorum_need", 2*t+1)
 
 	// Start consensus engine (HotStuff Run loop)
 	// Leader actively proposes, followers reactively respond

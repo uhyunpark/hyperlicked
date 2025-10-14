@@ -22,7 +22,7 @@ type Block struct {
 	Height   Height
 	View     View
 	Parent   Hash
-	AppHash  Hash      // Hash of application state after executing this block
+	AppHash  Hash // Hash of application state after executing this block
 	Payload  []byte
 	Proposer NodeID
 	Time     time.Time
@@ -30,8 +30,8 @@ type Block struct {
 
 type Certificate struct {
 	View    View
-	H       Hash   // Consensus hash (transactions)
-	AppHash Hash   // Application state hash (state after execution)
+	H       Hash // Consensus hash (transactions)
+	AppHash Hash // Application state hash (state after execution)
 	Sig     []byte
 }
 
@@ -39,8 +39,8 @@ type DoubleCert struct{ C1, C2 Certificate }
 
 type Vote struct {
 	View     View
-	H        Hash   // Consensus hash (transactions)
-	AppHash  Hash   // Application state hash (state after execution)
+	H        Hash // Consensus hash (transactions)
+	AppHash  Hash // Application state hash (state after execution)
 	SigShare []byte
 	From     NodeID
 }
@@ -57,10 +57,10 @@ type Locked struct {
 //   - Proposer and timestamp
 //
 // IMPORTANT: AppHash is NOT included in this hash. Why?
-//   1. Blocks are proposed BEFORE execution (AppHash unknown at proposal time)
-//   2. Certificate.H commits to consensus data, not application state
-//   3. AppHash is verified separately by validators after execution
-//   4. This separation allows pipelined execution in BFT consensus
+//  1. Blocks are proposed BEFORE execution (AppHash unknown at proposal time)
+//  2. Certificate.H commits to consensus data, not application state
+//  3. AppHash is verified separately by validators after execution
+//  4. This separation allows pipelined execution in BFT consensus
 //
 // State verification happens via:
 //   - Validators execute block deterministically

@@ -8,20 +8,42 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/uhyunpark/hyperlicked/pkg/abci"
 	"github.com/uhyunpark/hyperlicked/pkg/app/core"
 )
 
 type App struct {
-	mempool *core.Mempool
-	books   map[string]*core.OrderBook
+	mempool        *core.Mempool
+	registry       *core.MarketRegistry
+	books          map[string]*core.OrderBook
+	accountManager *core.AccountManager
 }
 
 func NewApp() *App {
-	return &App{
-		mempool: core.NewMempool(),
-		books:   map[string]*core.OrderBook{"PERP-USD": core.NewOrderBook()},
+	app := &App{
+		mempool:        core.NewMempool(),
+		registry:       core.NewMarketRegistry(),
+		books:          make(map[string]*core.OrderBook),
+		accountManager: core.NewAccountManager(),
 	}
+
+	// Register HYPL-USDC perpetual market with default parameters
+	hyplMarket, err := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	if err != nil {
+		log.Fatalf("[app] failed to create HYPL-USDC market: %v", err)
+	}
+	if err := app.registry.RegisterMarket(hyplMarket); err != nil {
+		log.Fatalf("[app] failed to register HYPL-USDC market: %v", err)
+	}
+	app.books["HYPL-USDC"] = core.NewOrderBook()
+
+	// Keep legacy PERP-USD for backward compatibility (can remove later)
+	app.books["PERP-USD"] = core.NewOrderBook()
+
+	log.Printf("[app] initialized with markets: %v", app.registry.ListMarkets())
+
+	return app
 }
 
 func (a *App) PushTx(b []byte) { a.mempool.PushRaw(b) }
@@ -120,9 +142,45 @@ func (a *App) applyTx(s string) int {
 			side = core.Sell
 		}
 		o := &core.Order{ID: idStr, Symbol: sym, Side: side, Price: price, Qty: qty, Type: typ, OwnerHex: owner}
-		fills := a.getBook(sym).Place(o)
 
+		// Get market for validation
+		market, err := a.registry.GetMarket(sym)
+		if err != nil {
+			log.Printf("[app] market not found for %s: %v", sym, err)
+			return 0
+		}
+
+		// Parse owner address (if provided)
+		var ownerAddr common.Address
+		if owner != "" {
+			if !common.IsHexAddress(owner) {
+				log.Printf("[app] invalid owner address: %s", owner)
+				return 0
+			}
+			ownerAddr = common.HexToAddress(owner)
+
+			// Check and lock margin for order
+			requiredMargin := market.RequiredInitialMargin(price, qty)
+			if err := a.accountManager.LockCollateral(ownerAddr, requiredMargin); err != nil {
+				log.Printf("[app] insufficient margin: %v (required=%d)", err, requiredMargin)
+				return 0
+			}
+
+			// TODO: If order is GTC and not fully filled, keep margin locked
+			// For now: unlock immediately after matching (simplified)
+			defer a.accountManager.UnlockCollateral(ownerAddr, requiredMargin)
+		}
+
+		// Place order with market validation
+		fills, err := a.getBook(sym).Place(o, market)
+		if err != nil {
+			log.Printf("[app] order rejected: %v", err)
+			return 0
+		}
+
+		// Process all fills (update positions, apply fees)
 		for _, f := range fills {
+			a.processFill(f, market)
 			log.Printf("[fill] %s taker=%s maker=%s px=%d qty=%d", sym, f.TakerID, f.MakerID, f.Price, f.Qty)
 		}
 
@@ -133,16 +191,91 @@ func (a *App) applyTx(s string) int {
 	return 0
 }
 
+// processFill updates positions and applies fees for a trade fill
+func (a *App) processFill(fill core.Fill, market *core.Market) {
+	// TODO: Support fills without owner addresses (for backward compat with test txs)
+	// For now, skip fills without owner info
+
+	// Note: In production, we need to track which order ID belongs to which address
+	// For prototype: we'll extract addresses from order IDs if they start with "0x"
+
+	// Extract taker and maker addresses from order IDs
+	// Format: order IDs should be "0xADDRESS-orderId" or just use raw address
+	takerAddr, takerOk := a.parseOwnerFromOrderID(fill.TakerID)
+	makerAddr, makerOk := a.parseOwnerFromOrderID(fill.MakerID)
+
+	if !takerOk || !makerOk {
+		// Skip position/fee processing if addresses not available
+		return
+	}
+
+	// Calculate notional value
+	notional := fill.Price * fill.Qty
+
+	// 1. Apply fees
+	// Taker pays fee: notional × TakerFeeBps / 10000
+	takerFee := (notional * market.TakerFeeBps) / 10000
+	if takerFee != 0 {
+		if err := a.accountManager.ApplyFees(takerAddr, -takerFee); err != nil {
+			log.Printf("[app] failed to apply taker fee: %v", err)
+		}
+	}
+
+	// Maker earns rebate: notional × (-MakerFeeBps) / 10000
+	makerRebate := (notional * -market.MakerFeeBps) / 10000
+	if makerRebate != 0 {
+		if err := a.accountManager.ApplyFees(makerAddr, makerRebate); err != nil {
+			log.Printf("[app] failed to apply maker rebate: %v", err)
+		}
+	}
+
+	// 2. Update positions
+	// Taker increases position (buy = +ve, sell = -ve)
+	// Determine taker's position delta from fill
+	// Note: We need to know taker's side - for now infer from orderbook context
+	// TODO: Add Side field to Fill struct
+
+	// For prototype: assume taker is always the one taking liquidity
+	// We'll need better tracking in production
+
+	// 3. Record trade statistics
+	if err := a.accountManager.RecordTrade(takerAddr, notional); err != nil {
+		log.Printf("[app] failed to record taker trade: %v", err)
+	}
+	if err := a.accountManager.RecordTrade(makerAddr, notional); err != nil {
+		log.Printf("[app] failed to record maker trade: %v", err)
+	}
+}
+
+// parseOwnerFromOrderID extracts address from order ID
+// Supports formats: "0xADDRESS", "0xADDRESS-suffix", or plain orderID (returns false)
+func (a *App) parseOwnerFromOrderID(orderID string) (common.Address, bool) {
+	// Check if it starts with 0x (hex address)
+	if !strings.HasPrefix(orderID, "0x") {
+		return common.Address{}, false
+	}
+
+	// Extract just the address part (before any '-')
+	parts := strings.Split(orderID, "-")
+	addrStr := parts[0]
+
+	if !common.IsHexAddress(addrStr) {
+		return common.Address{}, false
+	}
+
+	return common.HexToAddress(addrStr), true
+}
+
 // computeStateHash computes a deterministic hash of the entire application state.
 // Ethereum-style: 0x-prefixed 32-byte hex output.
 //
 // State components hashed (in order):
-//   1. Block height (8 bytes, big-endian) - ensures uniqueness per block
-//   2. Block timestamp (8 bytes, big-endian) - additional entropy and ordering
-//   3. Orderbook state for each symbol (sorted):
-//      - Symbol name
-//      - Bid levels (price → qty, sorted high to low)
-//      - Ask levels (price → qty, sorted low to high)
+//  1. Block height (8 bytes, big-endian) - ensures uniqueness per block
+//  2. Block timestamp (8 bytes, big-endian) - additional entropy and ordering
+//  3. Orderbook state for each symbol (sorted):
+//     - Symbol name
+//     - Bid levels (price → qty, sorted high to low)
+//     - Ask levels (price → qty, sorted low to high)
 //
 // Extension points (update this hash when adding features):
 //   - [ ] Account balances (address → balance map, sorted by address)

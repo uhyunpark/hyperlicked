@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	topicPropose  = "hs2-propose"
-	topicPrepare  = "hs2-prepare"
-	protocolVote  = protocol.ID("/hs2/vote/1.0.0")
+	topicPropose = "hs2-propose"
+	topicPrepare = "hs2-prepare"
+	protocolVote = protocol.ID("/hs2/vote/1.0.0")
 )
 
 type Libp2pNet struct {
@@ -32,11 +32,15 @@ type Libp2pNet struct {
 	self consensus.NodeID
 	q    consensus.Quorum
 
-	tPropose, tPrepare *pubsub.Topic
+	tPropose, tPrepare     *pubsub.Topic
 	subPropose, subPrepare *pubsub.Subscription
 
 	muVotes sync.Mutex
 	votes   map[consensus.View]map[consensus.Hash][]consensus.Vote // Leader collects votes here
+
+	// Channel-based reactive vote collection (eliminates polling)
+	// When a vote arrives, we signal voteArrivedCh to wake up CollectVotes immediately
+	voteArrivedCh chan struct{}
 
 	muPrep  sync.Mutex
 	prepByV map[consensus.View]struct {
@@ -77,7 +81,8 @@ func NewLibp2pNet(ctx context.Context, cfg Libp2pConfig) (*Libp2pNet, error) {
 	net := &Libp2pNet{
 		h: h, ps: ps, log: cfg.Logger,
 		self: cfg.SelfID, q: cfg.Quorum,
-		votes: make(map[consensus.View]map[consensus.Hash][]consensus.Vote),
+		votes:         make(map[consensus.View]map[consensus.Hash][]consensus.Vote),
+		voteArrivedCh: make(chan struct{}, 100), // Buffered to avoid blocking vote handlers
 		prepByV: make(map[consensus.View]struct {
 			c consensus.Certificate
 			b consensus.Block
@@ -154,10 +159,14 @@ func (n *Libp2pNet) BroadcastPropose(ctx context.Context, p consensus.Propose) e
 
 func (n *Libp2pNet) BroadcastPrepare(ctx context.Context, cert consensus.Certificate) error {
 	cb, _ := gobEncode(cert)
+
+	n.muPrep.Lock()
 	var blk consensus.Block
 	if entry, ok := n.prepByV[cert.View]; ok && entry.c.H == cert.H {
 		blk = entry.b
 	}
+	n.muPrep.Unlock()
+
 	bb, _ := gobEncode(blk)
 	data, err := gobEncode(PrepareWire{Cert: cb, Block: bb})
 	if err != nil {
@@ -172,11 +181,18 @@ func (n *Libp2pNet) SendVote(ctx context.Context, to consensus.NodeID, v consens
 	// Case 1: Sending to self (single-node or leader voting for own propose)
 	if to == n.self {
 		n.muVotes.Lock()
-		defer n.muVotes.Unlock()
 		if n.votes[v.View] == nil {
 			n.votes[v.View] = make(map[consensus.Hash][]consensus.Vote)
 		}
 		n.votes[v.View][v.H] = append(n.votes[v.View][v.H], v)
+		n.muVotes.Unlock()
+
+		// Signal vote arrival (wake up CollectVotes immediately)
+		select {
+		case n.voteArrivedCh <- struct{}{}:
+		default:
+			// Channel full, skip signal (collector will check periodically anyway)
+		}
 		return nil
 	}
 
@@ -211,17 +227,30 @@ func (n *Libp2pNet) SendVote(ctx context.Context, to consensus.NodeID, v consens
 	return err
 }
 
+// CollectVotes: Channel-based reactive collection (eliminates polling)
+// Performance improvement: instant wake-up when threshold reached (was 0-50ms random delay)
 func (n *Libp2pNet) CollectVotes(ctx context.Context, view consensus.View, h consensus.Hash, need int) ([]consensus.Vote, error) {
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
-	tick := time.NewTicker(50 * time.Millisecond)
-	defer tick.Stop()
 
+	// Check immediately if we already have enough votes (fast path)
+	n.muVotes.Lock()
+	got := n.votes[view][h]
+	if len(got) >= need {
+		result := make([]consensus.Vote, need)
+		copy(result, got[:need])
+		n.muVotes.Unlock()
+		return result, nil
+	}
+	n.muVotes.Unlock()
+
+	// Reactive wait: wake up on vote arrival or timeout
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline.C:
+			// Timeout: return what we have if threshold met, else error
 			n.muVotes.Lock()
 			out := append([]consensus.Vote(nil), n.votes[view][h]...)
 			n.muVotes.Unlock()
@@ -229,13 +258,18 @@ func (n *Libp2pNet) CollectVotes(ctx context.Context, view consensus.View, h con
 				return out[:need], nil
 			}
 			return nil, errors.New("timeout collecting votes")
-		case <-tick.C:
+		case <-n.voteArrivedCh:
+			// Vote arrived: check if we have enough now
 			n.muVotes.Lock()
 			got := n.votes[view][h]
-			n.muVotes.Unlock()
 			if len(got) >= need {
-				return got[:need], nil
+				result := make([]consensus.Vote, need)
+				copy(result, got[:need])
+				n.muVotes.Unlock()
+				return result, nil
 			}
+			n.muVotes.Unlock()
+			// Not enough yet, continue waiting
 		}
 	}
 }
@@ -321,9 +355,16 @@ func (n *Libp2pNet) handleVoteStream(s network.Stream) {
 
 	// Store vote (leader collects votes)
 	n.muVotes.Lock()
-	defer n.muVotes.Unlock()
 	if n.votes[v.View] == nil {
 		n.votes[v.View] = make(map[consensus.Hash][]consensus.Vote)
 	}
 	n.votes[v.View][v.H] = append(n.votes[v.View][v.H], v)
+	n.muVotes.Unlock()
+
+	// Signal vote arrival (wake up CollectVotes immediately)
+	select {
+	case n.voteArrivedCh <- struct{}{}:
+	default:
+		// Channel full, skip signal (collector will eventually timeout and check)
+	}
 }

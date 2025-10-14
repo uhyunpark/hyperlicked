@@ -42,7 +42,7 @@ func Default() Config {
 			Delta:      50 * time.Millisecond,
 		},
 		Node: Node{
-			SingleNode: true,
+			SingleNode:   true,
 			MinBlockTime: 200 * time.Millisecond, // Devnet default: prevent log spam
 		},
 	}
@@ -78,7 +78,7 @@ func LoadFromEnv(envPath string) Config {
 			cfg.Node.MinBlockTime = time.Duration(ms) * time.Millisecond
 		}
 	}
-	if singleNode := os.Getenv("NODE_SINGLE_NODE"); singleNode != "" {
+	if singleNode := os.Getenv("SINGLE_NODE"); singleNode != "" {
 		cfg.Node.SingleNode = singleNode == "true"
 	}
 

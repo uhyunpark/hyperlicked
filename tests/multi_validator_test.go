@@ -120,7 +120,7 @@ func TestFourValidators(t *testing.T) {
 				}
 			}
 			if allReady {
-				cancel() // Stop all validators
+				cancel()                           // Stop all validators
 				time.Sleep(100 * time.Millisecond) // Let them finish
 				goto done
 			}

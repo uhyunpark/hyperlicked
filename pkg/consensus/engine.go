@@ -22,7 +22,7 @@ type Engine struct {
 	EnableBLS bool                         // when true, use crypto.BLS to sign/aggregate
 	PubKeys   map[NodeID]*crypto.BLSPubKey // validator pubkeys (same message aggregation)
 
-	Logger        *zap.SugaredLogger
+	Logger         *zap.SugaredLogger
 	VerboseLogging bool // if false, only log commits and errors
 
 	// Optional: pluggable storage/WAL (proto: in-memory)
