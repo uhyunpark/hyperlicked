@@ -10,6 +10,7 @@ import (
 
 	"github.com/uhyunpark/hyperlicked/params"
 	"github.com/uhyunpark/hyperlicked/pkg/abci"
+	"github.com/uhyunpark/hyperlicked/pkg/api"
 	"github.com/uhyunpark/hyperlicked/pkg/app/perp"
 	"github.com/uhyunpark/hyperlicked/pkg/consensus"
 	"github.com/uhyunpark/hyperlicked/pkg/crypto"
@@ -36,14 +37,12 @@ func main() {
 	sugar := logger.Sugar()
 	sugar.Infow("logger_initialized", "log_file", logFile)
 
-	// ---- App: Perp DEX (prototype) ----
+	// ---- App: Perp DEX (production) ----
 	app := perp.NewApp()
-	// 샘플 TX: Non-order -> Cancel -> Orders 순으로 정렬되어 블록에 실림
-	app.PushTx([]byte("O:GTC:PERP-USD:BUY:price=100:qty=5:id=o1"))
-	app.PushTx([]byte("N:param-update"))
-	app.PushTx([]byte("O:IOC:PERP-USD:SELL:price=99:qty=3:id=o2"))
-	app.PushTx([]byte("C:PERP-USD:o1"))
-	app.PushTx([]byte("O:GTC:PERP-USD:SELL:price=101:qty=2:id=o3"))
+	// Market initialized in NewApp(): BTC-USDT only
+	//
+	// NOTE: Sample transactions removed - all orders must be signed (EIP-712).
+	// Use frontend wallet or TxFeeder (ENABLE_TXGEN=true) to generate orders.
 
 	bridge := &abci.Bridge{App: app}
 
@@ -103,6 +102,7 @@ func main() {
 	engine := consensus.NewEngine(state, safety, pm, bridge, net, elec, signer)
 	engine.Logger = sugar
 	engine.Store = storage.NewInMemoryBlockStore()
+	engine.MinBlockTime = cfg.Node.MinBlockTime // Apply block time throttle from config
 
 	// Control logging verbosity via env var (default: quiet)
 	if os.Getenv("VERBOSE") == "true" {
@@ -110,8 +110,33 @@ func main() {
 		sugar.Info("verbose logging enabled")
 	}
 
+	sugar.Infow("block_time_config", "min_block_time_ms", cfg.Node.MinBlockTime.Milliseconds())
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// ---- Transaction Feeder (optional) ----
+	// Enable with: ENABLE_TXGEN=true TXGEN_MODE=default|high|hyperliquid
+	if os.Getenv("ENABLE_TXGEN") == "true" {
+		var txCfg perp.TxFeederConfig
+		mode := os.Getenv("TXGEN_MODE")
+		switch mode {
+		case "high":
+			txCfg = perp.HighLoadConfig()
+			sugar.Infow("txgen_enabled", "mode", "high_load", "target_tps", txCfg.TxPerSecond)
+		case "hyperliquid":
+			txCfg = perp.HyperliquidConfig()
+			sugar.Infow("txgen_enabled", "mode", "hyperliquid", "target_tps", txCfg.TxPerSecond)
+		default:
+			txCfg = perp.DefaultFeederConfig()
+			sugar.Infow("txgen_enabled", "mode", "default", "target_tps", txCfg.TxPerSecond)
+		}
+
+		cancelFeeder := perp.StartTxFeeder(ctx, app, txCfg)
+		defer cancelFeeder()
+	} else {
+		sugar.Info("txgen_disabled - using sample transactions only")
+	}
 
 	// Logging control: log every N blocks to reduce noise
 	logInterval := consensus.Height(100)
@@ -122,6 +147,26 @@ func main() {
 		"active_validators", len(ids),
 		"single_node_mode", singleNodeMode,
 		"quorum_need", 2*t+1)
+
+	// ---- API Server ----
+	// Start HTTP/WebSocket server for frontend
+	apiServer := api.NewServer(app)
+	apiAddr := os.Getenv("API_ADDR")
+	if apiAddr == "" {
+		apiAddr = ":8080"
+	}
+
+	go func() {
+		sugar.Infow("api_server_starting", "addr", apiAddr)
+		if err := apiServer.Start(apiAddr); err != nil {
+			sugar.Fatalw("api_server_failed", "err", err)
+		}
+	}()
+
+	// Hook API server to consensus: broadcast orderbook on every block commit
+	engine.OnBlockCommit = func(height consensus.Height) {
+		apiServer.BroadcastOrderbook("BTC-USDT", int64(height))
+	}
 
 	// Start consensus engine (HotStuff Run loop)
 	// Leader actively proposes, followers reactively respond

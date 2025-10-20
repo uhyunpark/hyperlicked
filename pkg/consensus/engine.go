@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/uhyunpark/hyperlicked/pkg/crypto"
 
@@ -28,6 +29,14 @@ type Engine struct {
 	// Optional: pluggable storage/WAL (proto: in-memory)
 	Store BlockStore
 	WAL   WAL
+
+	// MinBlockTime throttles block production (prevents excessive empty blocks)
+	// Set to 0 to disable throttling (production), or 100-200ms for devnet
+	MinBlockTime time.Duration
+	lastBlockTime time.Time
+
+	// OnBlockCommit is called after a block is committed (for API broadcasts)
+	OnBlockCommit func(height Height)
 }
 
 func NewEngine(state *State, safety *Safety, pm *Pacemaker, app AppHook, net Network, elec LeaderElector, signer interface{}) *Engine {
@@ -62,10 +71,22 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 
 		if leader == e.ID {
+			// Throttle block production if MinBlockTime is set
+			if e.MinBlockTime > 0 {
+				elapsed := time.Since(e.lastBlockTime)
+				if elapsed < e.MinBlockTime {
+					time.Sleep(e.MinBlockTime - elapsed)
+				}
+			}
+
 			// I am leader: actively propose
 			if err := e.leaderRound(ctx, v); err != nil {
 				return err
 			}
+
+			// Update last block time
+			e.lastBlockTime = time.Now()
+
 			// Leader advances view after getting QC
 			e.State.View = v
 		} else {
@@ -176,6 +197,12 @@ func (e *Engine) onPrepare(ctx context.Context, cert Certificate, blk Block) {
 	} // 현재 블록 모르면 커밋 판단 보류
 
 	if childBlk.Parent != prevCert.H {
+		if e.Logger != nil && e.VerboseLogging {
+			e.Logger.Debugw("commit_skip_chain_mismatch",
+				"view", cert.View,
+				"child_parent", childBlk.Parent.String(),
+				"prev_cert_h", prevCert.H.String())
+		}
 		return
 	}
 
@@ -205,7 +232,26 @@ func (e *Engine) onPrepare(ctx context.Context, cert Certificate, blk Block) {
 	}
 
 	if e.Logger != nil {
-		e.Logger.Infow("commit", "height", e.State.Height, "committed_view", prevBlk.View, "apphash", fmt.Sprintf("0x%x", appHash[:]))
+		txCount := len(prevBlk.Payload)
+		if txCount > 0 {
+			// Count actual transactions (payload split by 0x00 delimiter)
+			txCount = 0
+			for _, b := range prevBlk.Payload {
+				if b == 0x00 {
+					txCount++
+				}
+			}
+		}
+		e.Logger.Infow("commit",
+			"height", e.State.Height,
+			"committed_view", prevBlk.View,
+			"txs", txCount,
+			"apphash", fmt.Sprintf("0x%x", appHash[:])) // Full hash
+	}
+
+	// Trigger API broadcast callback (for WebSocket updates)
+	if e.OnBlockCommit != nil {
+		e.OnBlockCommit(e.State.Height)
 	}
 }
 

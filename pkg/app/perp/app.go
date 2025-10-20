@@ -3,6 +3,7 @@ package perp
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/uhyunpark/hyperlicked/pkg/abci"
 	"github.com/uhyunpark/hyperlicked/pkg/app/core"
+	"github.com/uhyunpark/hyperlicked/pkg/consensus"
 )
 
 type App struct {
@@ -18,6 +20,7 @@ type App struct {
 	registry       *core.MarketRegistry
 	books          map[string]*core.OrderBook
 	accountManager *core.AccountManager
+	txVerifier     *TxVerifier // Signature verifier for signed transactions
 }
 
 func NewApp() *App {
@@ -26,22 +29,20 @@ func NewApp() *App {
 		registry:       core.NewMarketRegistry(),
 		books:          make(map[string]*core.OrderBook),
 		accountManager: core.NewAccountManager(),
+		txVerifier:     NewTxVerifier(), // Initialize transaction verifier
 	}
 
-	// Register HYPL-USDC perpetual market with default parameters
-	hyplMarket, err := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	// Register single market: BTC-USDT perpetual
+	market, err := core.NewMarketWithDefaults("BTC-USDT", "BTC", "USDT")
 	if err != nil {
-		log.Fatalf("[app] failed to create HYPL-USDC market: %v", err)
+		log.Fatalf("[app] failed to create BTC-USDT market: %v", err)
 	}
-	if err := app.registry.RegisterMarket(hyplMarket); err != nil {
-		log.Fatalf("[app] failed to register HYPL-USDC market: %v", err)
+	if err := app.registry.RegisterMarket(market); err != nil {
+		log.Fatalf("[app] failed to register BTC-USDT market: %v", err)
 	}
-	app.books["HYPL-USDC"] = core.NewOrderBook()
+	app.books["BTC-USDT"] = core.NewOrderBook()
 
-	// Keep legacy PERP-USD for backward compatibility (can remove later)
-	app.books["PERP-USD"] = core.NewOrderBook()
-
-	log.Printf("[app] initialized with markets: %v", app.registry.ListMarkets())
+	log.Printf("[app] initialized with market: BTC-USDT")
 
 	return app
 }
@@ -58,15 +59,17 @@ func (a *App) ProcessProposal(_ abci.RequestProcessProposal) abci.ResponseProces
 func (a *App) FinalizeBlock(req abci.RequestFinalizeBlock) abci.ResponseFinalizeBlock {
 	totalFills := 0
 	for _, tx := range req.Txs {
-		totalFills += a.applyTx(string(tx))
+		// Use new signature-verified transaction processor
+		totalFills += a.applyTxV2(tx, a.txVerifier)
 	}
 
 	// Compute state hash after executing all transactions (includes height, timestamp, orderbook state)
 	appHash := a.computeStateHash(req.Height, req.Timestamp)
 
-	// Quiet logging: only log non-empty blocks
+	// Log block execution summary
 	if len(req.Txs) > 0 || totalFills > 0 {
-		log.Printf("[app] FinalizeBlock: txs=%d fills=%d apphash=0x%x", len(req.Txs), totalFills, appHash[:])
+		log.Printf("[app] FinalizeBlock h=%d txs=%d fills=%d apphash=%s",
+			req.Height, len(req.Txs), totalFills, formatHash(appHash))
 	}
 
 	return abci.ResponseFinalizeBlock{
@@ -159,10 +162,22 @@ func (a *App) applyTx(s string) int {
 			}
 			ownerAddr = common.HexToAddress(owner)
 
-			// Check and lock margin for order
+			// Calculate position delta from this order
+			sizeDelta := qty
+			if side == core.Sell {
+				sizeDelta = -qty
+			}
+
+			// PRE-TRADE MARGIN CHECK: Verify account has sufficient margin and won't exceed leverage
+			if err := a.accountManager.CheckMarginRequirement(ownerAddr, market, price, sizeDelta); err != nil {
+				log.Printf("[app] margin check failed: %v", err)
+				return 0
+			}
+
+			// Lock margin for order
 			requiredMargin := market.RequiredInitialMargin(price, qty)
 			if err := a.accountManager.LockCollateral(ownerAddr, requiredMargin); err != nil {
-				log.Printf("[app] insufficient margin: %v (required=%d)", err, requiredMargin)
+				log.Printf("[app] failed to lock margin: %v (required=%d)", err, requiredMargin)
 				return 0
 			}
 
@@ -266,6 +281,12 @@ func (a *App) parseOwnerFromOrderID(orderID string) (common.Address, bool) {
 	return common.HexToAddress(addrStr), true
 }
 
+// formatHash returns a short hex representation of hash for logging
+func formatHash(h consensus.Hash) string {
+	// Show first 8 bytes for readability (0xabcd1234...)
+	return fmt.Sprintf("0x%x", h[:8])
+}
+
 // computeStateHash computes a deterministic hash of the entire application state.
 // Ethereum-style: 0x-prefixed 32-byte hex output.
 //
@@ -338,4 +359,33 @@ func (a *App) computeStateHash(height, timestamp int64) [32]byte {
 	}
 
 	return sha256.Sum256(h.Sum(nil))
+}
+
+// ==============================
+// Public API Accessors
+// ==============================
+
+// GetOrderbook returns the orderbook for a symbol (thread-safe read)
+func (a *App) GetOrderbook(symbol string) *core.OrderBook {
+	return a.getBook(symbol)
+}
+
+// GetMarket returns market details for a symbol
+func (a *App) GetMarket(symbol string) (*core.Market, error) {
+	return a.registry.GetMarket(symbol)
+}
+
+// ListMarkets returns all registered markets
+func (a *App) ListMarkets() []*core.Market {
+	return a.registry.ListMarkets()
+}
+
+// GetAccount returns account details for an address (creates if not exists)
+func (a *App) GetAccount(addr common.Address) *core.Account {
+	return a.accountManager.GetAccount(addr)
+}
+
+// GetMempoolSize returns current mempool transaction count
+func (a *App) GetMempoolSize() int {
+	return a.mempool.Len()
 }

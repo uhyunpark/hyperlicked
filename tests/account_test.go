@@ -1,11 +1,39 @@
 package tests
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/uhyunpark/hyperlicked/pkg/app/core"
 )
+
+// newTestAccountManager creates an account manager with a temporary database
+// Each test gets a unique database path to avoid Pebble lock conflicts
+func newTestAccountManager(t *testing.T) *core.AccountManager {
+	dbPath := fmt.Sprintf("./tmp_test_accounts_%s.db", t.Name())
+
+	// Cleanup old database if exists
+	os.RemoveAll(dbPath)
+
+	// Register cleanup to remove database after test
+	t.Cleanup(func() {
+		os.RemoveAll(dbPath)
+	})
+
+	am, err := core.NewAccountManagerWithPath(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create account manager: %v", err)
+	}
+
+	// Register cleanup to close database
+	t.Cleanup(func() {
+		am.Close()
+	})
+
+	return am
+}
 
 var (
 	alice = common.HexToAddress("0xAA00000000000000000000000000000000000000")
@@ -32,7 +60,7 @@ func TestAccountCreation(t *testing.T) {
 
 // TestAccountManagerDeposit tests deposit functionality
 func TestAccountManagerDeposit(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 
 	// Deposit $1000 (100,000 cents)
 	err := am.Deposit(alice, 100000)
@@ -57,7 +85,7 @@ func TestAccountManagerDeposit(t *testing.T) {
 
 // TestAccountManagerWithdraw tests withdrawal functionality
 func TestAccountManagerWithdraw(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000) // $1000
 
 	// Withdraw $500
@@ -86,7 +114,7 @@ func TestAccountManagerWithdraw(t *testing.T) {
 
 // TestAccountManagerLockCollateral tests margin locking
 func TestAccountManagerLockCollateral(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000) // $1000
 
 	// Lock $200 for margin
@@ -121,7 +149,7 @@ func TestAccountManagerLockCollateral(t *testing.T) {
 
 // TestAccountManagerUnlockCollateral tests margin unlocking
 func TestAccountManagerUnlockCollateral(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000)
 	am.LockCollateral(alice, 50000)
 
@@ -148,7 +176,7 @@ func TestAccountManagerUnlockCollateral(t *testing.T) {
 
 // TestAccountManagerUpdatePosition tests position updates
 func TestAccountManagerUpdatePosition(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000) // $1000
 
 	// Open long position: buy 100 lots (1 HYPL) at $50
@@ -191,7 +219,7 @@ func TestAccountManagerUpdatePosition(t *testing.T) {
 
 // TestAccountManagerPositionClose tests closing positions
 func TestAccountManagerPositionClose(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000)
 
 	// Open long: buy 100 lots at $50
@@ -219,7 +247,7 @@ func TestAccountManagerPositionClose(t *testing.T) {
 
 // TestAccountManagerShortPosition tests short positions
 func TestAccountManagerShortPosition(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000)
 
 	// Open short: sell 100 lots at $50
@@ -247,7 +275,7 @@ func TestAccountManagerShortPosition(t *testing.T) {
 
 // TestAccountManagerFees tests fee accounting
 func TestAccountManagerFees(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 	am.Deposit(alice, 100000)
 
 	// Pay taker fee: $5 (500 cents)
@@ -279,7 +307,7 @@ func TestAccountManagerFees(t *testing.T) {
 
 // TestAccountValidation tests account invariants
 func TestAccountValidation(t *testing.T) {
-	am := core.NewAccountManager()
+	am := newTestAccountManager(t)
 
 	// Valid account
 	am.Deposit(alice, 100000)

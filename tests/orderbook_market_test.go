@@ -3,26 +3,27 @@ package tests
 import (
 	"testing"
 
-	"github.com/uhyunpark/hyperlicked/pkg/app/core"
+	"github.com/uhyunpark/hyperlicked/pkg/app/core/market"
+	"github.com/uhyunpark/hyperlicked/pkg/app/core/orderbook"
 )
 
 // TestOrderBookMarketValidation tests that orderbook respects market parameters
 func TestOrderBookMarketValidation(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
-	book := core.NewOrderBook()
+	mkt, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	book := orderbook.NewOrderBook()
 
 	tests := []struct {
 		name    string
-		order   *core.Order
+		order   *orderbook.Order
 		wantErr bool
 		reason  string
 	}{
 		{
 			name: "valid order",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order1",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  50000, // $50.00
 				Qty:    100,   // 1 HYPL
 				Type:   "GTC",
@@ -31,10 +32,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "zero price",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order2",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  0,
 				Qty:    100,
 				Type:   "GTC",
@@ -44,10 +45,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "zero quantity",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order3",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  50000,
 				Qty:    0,
 				Type:   "GTC",
@@ -57,10 +58,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "below min order size",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order4",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  50000,
 				Qty:    0, // Below min (1 lot)
 				Type:   "GTC",
@@ -70,10 +71,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "above max order size",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order5",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  50000,
 				Qty:    2000000, // Above max (1,000,000 lots)
 				Type:   "GTC",
@@ -83,10 +84,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "below min notional",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order6",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  1,  // $0.001
 				Qty:    1,  // 0.01 HYPL
 				Type:   "GTC",
@@ -96,10 +97,10 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		},
 		{
 			name: "market not active (paused)",
-			order: &core.Order{
+			order: &orderbook.Order{
 				ID:     "order7",
 				Symbol: "HYPL-USDC",
-				Side:   core.Buy,
+				Side:   orderbook.Buy,
 				Price:  50000,
 				Qty:    100,
 				Type:   "GTC",
@@ -112,16 +113,16 @@ func TestOrderBookMarketValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Special case: test paused market
 			if tt.name == "market not active (paused)" {
-				market.Status = core.Paused
-				_, err := book.Place(tt.order, market)
+				mkt.Status = market.Paused
+				_, err := book.Place(tt.order, mkt)
 				if err == nil {
 					t.Errorf("expected error for paused market, got nil")
 				}
-				market.Status = core.Active // Reset for other tests
+				mkt.Status = market.Active // Reset for other tests
 				return
 			}
 
-			_, err := book.Place(tt.order, market)
+			_, err := book.Place(tt.order, mkt)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Place() error = %v, wantErr %v (reason: %s)", err, tt.wantErr, tt.reason)
 			}
@@ -131,19 +132,19 @@ func TestOrderBookMarketValidation(t *testing.T) {
 
 // TestOrderBookMarketMatching tests that valid orders still match correctly
 func TestOrderBookMarketMatching(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
-	book := core.NewOrderBook()
+	mkt, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	book := orderbook.NewOrderBook()
 
 	// Place a valid bid
-	bid := &core.Order{
+	bid := &orderbook.Order{
 		ID:     "bid1",
 		Symbol: "HYPL-USDC",
-		Side:   core.Buy,
+		Side:   orderbook.Buy,
 		Price:  50000, // $50.00
 		Qty:    100,   // 1 HYPL
 		Type:   "GTC",
 	}
-	fills, err := book.Place(bid, market)
+	fills, err := book.Place(bid, mkt)
 	if err != nil {
 		t.Fatalf("failed to place bid: %v", err)
 	}
@@ -152,15 +153,15 @@ func TestOrderBookMarketMatching(t *testing.T) {
 	}
 
 	// Place a matching ask
-	ask := &core.Order{
+	ask := &orderbook.Order{
 		ID:     "ask1",
 		Symbol: "HYPL-USDC",
-		Side:   core.Sell,
+		Side:   orderbook.Sell,
 		Price:  50000, // Same price, should match
 		Qty:    100,   // Full fill
 		Type:   "IOC",
 	}
-	fills, err = book.Place(ask, market)
+	fills, err = book.Place(ask, mkt)
 	if err != nil {
 		t.Fatalf("failed to place ask: %v", err)
 	}
@@ -187,20 +188,20 @@ func TestOrderBookMarketMatching(t *testing.T) {
 // TestMultiMarketValidation tests that different markets have different rules
 func TestMultiMarketValidation(t *testing.T) {
 	// Create two markets with different parameters
-	hyplMarket, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	hyplMarket, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 
 	// Create custom market with 20x leverage (less than HYPL's 50x)
-	customParams := core.CustomPerpetual(1, 100, 20) // 20x leverage
-	btcMarket, _ := core.NewMarket("BTC-USDC", "BTC", "USDC", customParams)
+	customParams := market.CustomPerpetual(1, 100, 20) // 20x leverage
+	btcMarket, _ := market.NewMarket("BTC-USDC", "BTC", "USDC", customParams)
 
-	hyplBook := core.NewOrderBook()
-	btcBook := core.NewOrderBook()
+	hyplBook := orderbook.NewOrderBook()
+	btcBook := orderbook.NewOrderBook()
 
 	// Order that's valid for HYPL (50x leverage)
-	order := &core.Order{
+	order := &orderbook.Order{
 		ID:     "order1",
 		Symbol: "HYPL-USDC",
-		Side:   core.Buy,
+		Side:   orderbook.Buy,
 		Price:  50000,
 		Qty:    100,
 		Type:   "GTC",

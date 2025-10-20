@@ -4,24 +4,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/uhyunpark/hyperlicked/pkg/app/core"
+	"github.com/uhyunpark/hyperlicked/pkg/app/core/market"
 )
 
 // TestMarketCreation tests basic market creation and validation
 func TestMarketCreation(t *testing.T) {
-	market, err := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	mkt, err := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 	if err != nil {
 		t.Fatalf("failed to create market: %v", err)
 	}
 
-	if market.Symbol != "HYPL-USDC" {
-		t.Errorf("expected symbol HYPL-USDC, got %s", market.Symbol)
+	if mkt.Symbol != "HYPL-USDC" {
+		t.Errorf("expected symbol HYPL-USDC, got %s", mkt.Symbol)
 	}
-	if market.Type != core.Perpetual {
-		t.Errorf("expected Perpetual type, got %v", market.Type)
+	if mkt.Type != market.Perpetual {
+		t.Errorf("expected Perpetual type, got %v", mkt.Type)
 	}
-	if market.Status != core.Active {
-		t.Errorf("expected Active status, got %v", market.Status)
+	if mkt.Status != market.Active {
+		t.Errorf("expected Active status, got %v", mkt.Status)
 	}
 }
 
@@ -29,18 +29,18 @@ func TestMarketCreation(t *testing.T) {
 func TestMarketValidation(t *testing.T) {
 	tests := []struct {
 		name    string
-		params  core.MarketParams
+		params  market.MarketParams
 		wantErr bool
 	}{
 		{
 			name:    "valid default params",
-			params:  core.DefaultHYPLUSDC,
+			params:  market.DefaultHYPLUSDC,
 			wantErr: false,
 		},
 		{
 			name: "negative tick size",
-			params: core.MarketParams{
-				Type:                 core.Perpetual,
+			params: market.MarketParams{
+				Type:                 market.Perpetual,
 				TickSize:             -1,
 				LotSize:              100,
 				MaxLeverage:          50,
@@ -55,8 +55,8 @@ func TestMarketValidation(t *testing.T) {
 		},
 		{
 			name: "maintenance margin > initial margin",
-			params: core.MarketParams{
-				Type:                 core.Perpetual,
+			params: market.MarketParams{
+				Type:                 market.Perpetual,
 				TickSize:             1,
 				LotSize:              100,
 				MaxLeverage:          50,
@@ -71,8 +71,8 @@ func TestMarketValidation(t *testing.T) {
 		},
 		{
 			name: "leverage inconsistent with margin",
-			params: core.MarketParams{
-				Type:                 core.Perpetual,
+			params: market.MarketParams{
+				Type:                 market.Perpetual,
 				TickSize:             1,
 				LotSize:              100,
 				MaxLeverage:          1000, // 1000x leverage
@@ -89,7 +89,7 @@ func TestMarketValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := core.NewMarket("TEST", "TEST", "USDC", tt.params)
+			_, err := market.NewMarket("TEST", "TEST", "USDC", tt.params)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("wantErr=%v, got err=%v", tt.wantErr, err)
 			}
@@ -99,7 +99,7 @@ func TestMarketValidation(t *testing.T) {
 
 // TestPriceConversions tests tick/USDC conversions
 func TestPriceConversions(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	market, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 
 	tests := []struct {
 		ticks int64
@@ -129,7 +129,7 @@ func TestPriceConversions(t *testing.T) {
 
 // TestSizeConversions tests lot/base asset conversions
 func TestSizeConversions(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	market, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 
 	tests := []struct {
 		lots int64
@@ -159,7 +159,7 @@ func TestSizeConversions(t *testing.T) {
 
 // TestMarginCalculations tests margin requirement calculations
 func TestMarginCalculations(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	market, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 
 	// Test case: 100 HYPL (10000 lots) at $50 (50000 ticks)
 	// Notional = 50000 × 10000 = 500,000,000
@@ -190,7 +190,7 @@ func TestMarginCalculations(t *testing.T) {
 
 // TestOrderValidation tests order parameter validation
 func TestOrderValidation(t *testing.T) {
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	market, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 
 	tests := []struct {
 		name    string
@@ -242,10 +242,10 @@ func TestOrderValidation(t *testing.T) {
 
 // TestMarketRegistry tests multi-market management
 func TestMarketRegistry(t *testing.T) {
-	registry := core.NewMarketRegistry()
+	registry := market.NewMarketRegistry()
 
 	// Test registration
-	market1, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	market1, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
 	err := registry.RegisterMarket(market1)
 	if err != nil {
 		t.Fatalf("failed to register market: %v", err)
@@ -286,36 +286,36 @@ func TestMarketRegistry(t *testing.T) {
 
 // TestMarketStatusTransitions tests status updates
 func TestMarketStatusTransitions(t *testing.T) {
-	registry := core.NewMarketRegistry()
-	market, _ := core.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
-	registry.RegisterMarket(market)
+	registry := market.NewMarketRegistry()
+	mkt, _ := market.NewMarketWithDefaults("HYPL-USDC", "HYPL", "USDC")
+	registry.RegisterMarket(mkt)
 
 	// Active → Paused
-	err := registry.UpdateMarketStatus("HYPL-USDC", core.Paused)
+	err := registry.UpdateMarketStatus("HYPL-USDC", market.Paused)
 	if err != nil {
 		t.Errorf("Active → Paused failed: %v", err)
 	}
 
 	// Paused → Active
-	err = registry.UpdateMarketStatus("HYPL-USDC", core.Active)
+	err = registry.UpdateMarketStatus("HYPL-USDC", market.Active)
 	if err != nil {
 		t.Errorf("Paused → Active failed: %v", err)
 	}
 
 	// Active → Settling
-	err = registry.UpdateMarketStatus("HYPL-USDC", core.Settling)
+	err = registry.UpdateMarketStatus("HYPL-USDC", market.Settling)
 	if err != nil {
 		t.Errorf("Active → Settling failed: %v", err)
 	}
 
 	// Settling → Settled
-	err = registry.UpdateMarketStatus("HYPL-USDC", core.Settled)
+	err = registry.UpdateMarketStatus("HYPL-USDC", market.Settled)
 	if err != nil {
 		t.Errorf("Settling → Settled failed: %v", err)
 	}
 
 	// Settled → * (should fail)
-	err = registry.UpdateMarketStatus("HYPL-USDC", core.Active)
+	err = registry.UpdateMarketStatus("HYPL-USDC", market.Active)
 	if err == nil {
 		t.Error("expected error for Settled → Active, got nil")
 	}
@@ -324,7 +324,7 @@ func TestMarketStatusTransitions(t *testing.T) {
 // TestCustomPerpetual tests custom market creation
 func TestCustomPerpetual(t *testing.T) {
 	// Create 20x leverage market (5% initial margin)
-	params := core.CustomPerpetual(1, 100, 20)
+	params := market.CustomPerpetual(1, 100, 20)
 
 	if params.MaxLeverage != 20 {
 		t.Errorf("expected leverage=20, got %d", params.MaxLeverage)
