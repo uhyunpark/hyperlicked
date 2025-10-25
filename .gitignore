@@ -1,8 +1,47 @@
+# Project-specific
 CLAUDE.md
 reference
 data
-.DS_Store
 docs
 tmp
 .claude
+
+# Environment
 .env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+bin/
+vendor/
+
+# Next.js / Frontend
+web/node_modules/
+web/.next/
+web/out/
+web/build/
+web/.turbo/
+web/.vercel/
+
+# Logs
+*.log
+data/*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
