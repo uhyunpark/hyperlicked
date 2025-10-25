@@ -70,7 +70,15 @@ export interface SignedTransaction {
     leverage: number
     owner: string     // Address
   }
+  cancel?: {
+    order_id: string  // Order ID to cancel
+    symbol: string
+    nonce: string     // BigInt as string
+    owner: string     // Address
+  }
   signature: string   // Hex-encoded signature
+  agent_mode?: boolean
+  delegation_id?: string
 }
 
 // Helper to convert API units to display units
@@ -111,6 +119,7 @@ export async function getPositions(address: string): Promise<ApiPosition[]> {
   return res.json()
 }
 
+// Cancel order with signed transaction (deprecated - use submitSignedTransaction instead)
 export async function cancelOrder(orderId: string, address: string): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/orders/cancel`, {
     method: 'POST',
@@ -121,6 +130,26 @@ export async function cancelOrder(orderId: string, address: string): Promise<{ s
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(error.message || error.error || 'Failed to cancel order')
+  }
+
+  return res.json()
+}
+
+// Submit a signed cancel transaction (EIP-712 format)
+export async function submitCancelOrder(signedCancel: SignedTransaction): Promise<{ status: string; orderId: string }> {
+  if (signedCancel.type !== 'cancel') {
+    throw new Error('Transaction type must be "cancel"')
+  }
+
+  const res = await fetch(`${API_BASE}/orders/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(signedCancel)
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(error.message || error.error || 'Failed to submit cancel order')
   }
 
   return res.json()
@@ -137,6 +166,40 @@ export async function submitSignedTransaction(signedTx: SignedTransaction): Prom
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(error.message || error.error || 'Failed to submit signed transaction')
+  }
+
+  return res.json()
+}
+
+// ==============================
+// Agent Delegation API
+// ==============================
+
+export interface RegisterDelegationRequest {
+  wallet: string       // Main wallet address (0x...)
+  agent: string        // Agent key address (0x...)
+  expiration: string   // Unix timestamp (BigInt as string)
+  nonce: string        // Nonce (BigInt as string)
+  signature: string    // EIP-712 signature from wallet (0x...)
+}
+
+export interface RegisterDelegationResponse {
+  status: string        // "registered"
+  delegationId: string  // ID to use in agent-signed orders
+  message: string
+}
+
+// Register an agent key delegation with the backend
+export async function registerDelegation(req: RegisterDelegationRequest): Promise<RegisterDelegationResponse> {
+  const res = await fetch(`${API_BASE}/delegations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req)
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(error.message || error.error || 'Failed to register delegation')
   }
 
   return res.json()

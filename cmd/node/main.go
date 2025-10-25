@@ -163,9 +163,14 @@ func main() {
 		}
 	}()
 
-	// Hook API server to consensus: broadcast orderbook on every block commit
+	// Hook API server to consensus and app: broadcast updates on every block commit
 	engine.OnBlockCommit = func(height consensus.Height) {
 		apiServer.BroadcastOrderbook("BTC-USDT", int64(height))
+	}
+
+	// Hook app to API server: broadcast trades when they execute
+	app.OnTrade = func(symbol string, price, size int64, side string, timestamp int64) {
+		apiServer.BroadcastTrade(symbol, price, size, side, timestamp)
 	}
 
 	// Start consensus engine (HotStuff Run loop)

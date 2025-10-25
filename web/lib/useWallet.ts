@@ -1,8 +1,18 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { BrowserProvider, JsonRpcSigner } from 'ethers'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { BrowserProvider, JsonRpcSigner, Wallet, HDNodeWallet, hashMessage } from 'ethers'
 import { config } from './config'
+import {
+  generateAgentKey,
+  storeAgentKey,
+  loadAgentKey,
+  getStoredDelegation,
+  hasValidAgentKey,
+  clearAgentKey,
+  getDelegationTimeRemaining,
+  type AgentDelegation
+} from './agentKey'
 
 // EIP-712 Domain for HyperLicked (from config)
 export const EIP712_DOMAIN = config.eip712
@@ -22,6 +32,26 @@ export const EIP712_ORDER_TYPES = {
   ]
 }
 
+// EIP-712 Types for Agent Delegation
+export const EIP712_DELEGATION_TYPES = {
+  AgentDelegation: [
+    { name: 'wallet', type: 'address' },
+    { name: 'agent', type: 'address' },
+    { name: 'expiration', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' }
+  ]
+}
+
+// EIP-712 Types for Cancel Order
+export const EIP712_CANCEL_TYPES = {
+  CancelOrder: [
+    { name: 'orderId', type: 'string' },
+    { name: 'symbol', type: 'string' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'owner', type: 'address' }
+  ]
+}
+
 export interface WalletState {
   isConnected: boolean
   address: string | null
@@ -29,6 +59,10 @@ export interface WalletState {
   signer: JsonRpcSigner | null
   isRabby: boolean
   chainId: number | null
+  // Agent key state
+  tradingEnabled: boolean // True if agent key is active
+  agentAddress: string | null // Agent key address (if enabled)
+  delegationExpiry: string | null // Time remaining (e.g., "6d 12h")
 }
 
 export interface OrderToSign {
@@ -43,6 +77,13 @@ export interface OrderToSign {
   owner: string // Address
 }
 
+export interface CancelToSign {
+  orderId: string
+  symbol: string
+  nonce: string // BigInt as string
+  owner: string // Address
+}
+
 export function useWallet() {
   const [wallet, setWallet] = useState<WalletState>({
     isConnected: false,
@@ -50,8 +91,21 @@ export function useWallet() {
     provider: null,
     signer: null,
     isRabby: false,
-    chainId: null
+    chainId: null,
+    tradingEnabled: false,
+    agentAddress: null,
+    delegationExpiry: null
   })
+
+  const [agentWallet, setAgentWallet] = useState<Wallet | HDNodeWallet | null>(null)
+
+  // CRITICAL FIX: Use ref to avoid stale closure in signOrderSmart
+  const agentWalletRef = useRef<Wallet | HDNodeWallet | null>(null)
+
+  // Sync ref with state
+  useEffect(() => {
+    agentWalletRef.current = agentWallet
+  }, [agentWallet])
 
   // Detect if Rabby Wallet is installed
   const detectRabby = useCallback(() => {
@@ -101,7 +155,10 @@ export function useWallet() {
         provider,
         signer,
         isRabby,
-        chainId
+        chainId,
+        tradingEnabled: false,
+        agentAddress: null,
+        delegationExpiry: null
       })
 
       return { address, isRabby, chainId }
@@ -114,13 +171,19 @@ export function useWallet() {
   // Disconnect wallet
   const disconnect = useCallback(() => {
     console.log('[wallet] Disconnected')
+    // Also clear agent key on disconnect
+    clearAgentKey()
+    setAgentWallet(null)
     setWallet({
       isConnected: false,
       address: null,
       provider: null,
       signer: null,
       isRabby: false,
-      chainId: null
+      chainId: null,
+      tradingEnabled: false,
+      agentAddress: null,
+      delegationExpiry: null
     })
   }, [])
 
@@ -212,11 +275,14 @@ export function useWallet() {
 
     const handleAccountsChanged = (accounts: string[]) => {
       console.log('[wallet] Accounts changed:', accounts)
-      if (accounts.length === 0) {
-        disconnect()
-      } else {
-        // Reconnect with new account
-        connect()
+
+      // SECURITY: Always disconnect when wallet changes
+      // New wallet must explicitly connect and sign delegation
+      disconnect()
+
+      if (accounts.length > 0) {
+        // Show notification to user
+        alert('Wallet changed. Please reconnect to continue trading.')
       }
     }
 
@@ -255,11 +321,216 @@ export function useWallet() {
       })
   }, [connect])
 
+  // Check for existing agent key on mount and when wallet connects
+  useEffect(() => {
+    if (!wallet.address) return
+
+    if (hasValidAgentKey()) {
+      const agent = loadAgentKey()
+
+      if (agent) {
+        setAgentWallet(agent)
+        setWallet(prev => ({
+          ...prev,
+          tradingEnabled: true,
+          agentAddress: agent.address,
+          delegationExpiry: getDelegationTimeRemaining()
+        }))
+        console.log('[wallet] Loaded existing agent key:', agent.address)
+      }
+    }
+  }, [wallet.address])
+
+  // Enable trading: create agent key and sign delegation
+  const enableTrading = useCallback(async (durationDays: number = 7): Promise<void> => {
+    if (!wallet.signer || !wallet.address) {
+      throw new Error('Wallet not connected')
+    }
+
+    try {
+      console.log(`[wallet] Enabling trading for ${durationDays} days...`)
+
+      // Generate new agent key
+      const agent = generateAgentKey()
+      console.log('[wallet] Generated agent key:', agent.address)
+
+      // Create delegation
+      const expiration = BigInt(Math.floor(Date.now() / 1000) + durationDays * 86400)
+      const nonce = BigInt(Date.now()) // Simple nonce (timestamp)
+
+      const delegation: Omit<AgentDelegation, 'signature'> = {
+        wallet: wallet.address,
+        agent: agent.address,
+        expiration: expiration.toString(),
+        nonce: nonce.toString()
+      }
+
+      console.log('[wallet] Requesting MetaMask signature for delegation...')
+
+      // Sign delegation with MetaMask (ONE-TIME signature)
+      const signature = await wallet.signer.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_DELEGATION_TYPES,
+        delegation
+      )
+
+      console.log('[wallet] Delegation signed!')
+
+      const fullDelegation: AgentDelegation = {
+        ...delegation,
+        signature
+      }
+
+      // Store agent key locally
+      storeAgentKey(agent, fullDelegation)
+
+      // Register delegation with backend
+      console.log('[wallet] Registering delegation with backend...')
+      const { registerDelegation } = await import('@/lib/api')
+
+      const delegationId = `${wallet.address}-${nonce.toString()}`
+      const response = await registerDelegation({
+        wallet: wallet.address,
+        agent: agent.address,
+        expiration: expiration.toString(),
+        nonce: nonce.toString(),
+        signature
+      })
+
+      console.log('[wallet] Backend registration successful:', response.delegationId)
+
+      // Update state
+      setAgentWallet(agent)
+      setWallet(prev => ({
+        ...prev,
+        tradingEnabled: true,
+        agentAddress: agent.address,
+        delegationExpiry: getDelegationTimeRemaining()
+      }))
+
+      console.log('[wallet] Trading enabled! Agent key stored and delegation registered.')
+    } catch (error: any) {
+      console.error('[wallet] Enable trading failed:', error)
+      throw error
+    }
+  }, [wallet.signer, wallet.address, setAgentWallet, setWallet])
+
+  // Disable trading: clear agent key
+  const disableTrading = useCallback(() => {
+    clearAgentKey()
+    setAgentWallet(null)
+    setWallet(prev => ({
+      ...prev,
+      tradingEnabled: false,
+      agentAddress: null,
+      delegationExpiry: null
+    }))
+    console.log('[wallet] Trading disabled')
+  }, [])
+
+  // Sign order with agent key (if enabled) or MetaMask (if not)
+  const signOrderSmart = useCallback(async (order: OrderToSign): Promise<{ signature: string; agentMode: boolean; delegationId?: string }> => {
+    // Use ref to get latest agent wallet (avoids stale closure)
+    const currentAgentWallet = agentWalletRef.current
+
+    // Debug: Log current state
+    console.log('[wallet] signOrderSmart called:', {
+      tradingEnabled: wallet.tradingEnabled,
+      agentWalletExists: !!currentAgentWallet,
+      agentAddress: currentAgentWallet?.address
+    })
+
+    // If trading enabled, use agent key
+    if (wallet.tradingEnabled && currentAgentWallet) {
+      console.log('[wallet] Signing order with agent key (no MetaMask popup!)')
+
+      const orderMessage = JSON.stringify(order)
+      const signature = await currentAgentWallet.signMessage(orderMessage)
+
+      const delegation = getStoredDelegation()!
+
+      return {
+        signature,
+        agentMode: true,
+        delegationId: `${delegation.wallet}-${delegation.nonce}`
+      }
+    }
+
+    // Otherwise, use MetaMask
+    console.log('[wallet] Signing order with MetaMask (popup required)')
+    const signature = await signOrder(order)
+    return {
+      signature,
+      agentMode: false
+    }
+  }, [wallet.tradingEnabled, signOrder])
+
+  // Sign cancel order using EIP-712 (MetaMask only, no agent key)
+  const signCancel = useCallback(async (cancel: CancelToSign): Promise<string> => {
+    if (!wallet.signer) {
+      throw new Error('Wallet not connected')
+    }
+
+    try {
+      console.log('[wallet] Signing cancel order with EIP-712...', cancel)
+
+      // Sign typed data (EIP-712)
+      const signature = await wallet.signer.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_CANCEL_TYPES,
+        cancel
+      )
+
+      console.log('[wallet] Cancel order signed successfully!')
+      return signature
+    } catch (error: any) {
+      console.error('[wallet] Cancel signing failed:', error)
+      throw error
+    }
+  }, [wallet.signer])
+
+  // Sign cancel order with agent key (if enabled) or MetaMask (if not)
+  const signCancelSmart = useCallback(async (cancel: CancelToSign): Promise<{ signature: string; agentMode: boolean; delegationId?: string }> => {
+    // Use ref to get latest agent wallet (avoids stale closure)
+    const currentAgentWallet = agentWalletRef.current
+
+    // If trading enabled, use agent key
+    if (wallet.tradingEnabled && currentAgentWallet) {
+      console.log('[wallet] Signing cancel with agent key (no MetaMask popup!)')
+
+      const cancelMessage = JSON.stringify(cancel)
+      const signature = await currentAgentWallet.signMessage(cancelMessage)
+
+      const delegation = getStoredDelegation()!
+
+      return {
+        signature,
+        agentMode: true,
+        delegationId: `${delegation.wallet}-${delegation.nonce}`
+      }
+    }
+
+    // Otherwise, use MetaMask
+    console.log('[wallet] Signing cancel with MetaMask (popup required)')
+    const signature = await signCancel(cancel)
+    return {
+      signature,
+      agentMode: false
+    }
+  }, [wallet.tradingEnabled, signCancel])
+
   return {
     ...wallet,
     connect,
     disconnect,
     signOrder,
-    switchNetwork
+    signCancel,
+    switchNetwork,
+    // Agent key methods
+    enableTrading,
+    disableTrading,
+    signOrderSmart,
+    signCancelSmart,
+    agentWallet
   }
 }

@@ -3,14 +3,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart, ColorType, IChartApi, CandlestickData, Time, CandlestickSeries } from 'lightweight-charts'
 import { useTradingStore } from '@/lib/store'
+import { CandlestickAggregator, Interval } from '@/lib/candlestickAggregator'
+import { convertPrice, convertSize } from '@/lib/api'
 
 export function Chart() {
   const { selectedSymbol, currentPrice, trades } = useTradingStore()
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<any>(null)
-  const [interval, setInterval] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1d'>('1m')
-  const [useRealData, setUseRealData] = useState(false) // Toggle between mock and real data
+  const aggregatorRef = useRef<CandlestickAggregator>(new CandlestickAggregator('1m'))
+  const [interval, setInterval] = useState<Interval>('1m')
+  const [useRealData, setUseRealData] = useState(true) // Now defaulting to real data!
 
   // Initialize chart
   useEffect(() => {
@@ -55,9 +58,15 @@ export function Chart() {
       wickDownColor: '#ef4444',
     })
 
-    // Generate sample data
-    const data: CandlestickData[] = generateSampleData(currentPrice)
-    candleSeries.setData(data)
+    // Initialize with existing candles (if any)
+    const initialCandles = aggregatorRef.current.getCandles()
+    if (initialCandles.length > 0) {
+      candleSeries.setData(initialCandles)
+    } else {
+      // If no real data yet, show sample data as placeholder
+      const sampleData = generateSampleData(currentPrice)
+      candleSeries.setData(sampleData)
+    }
 
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
@@ -80,31 +89,45 @@ export function Chart() {
     }
   }, [currentPrice])
 
-  // Update with new trades (real data mode)
+  // Update with new trades (real data)
   useEffect(() => {
-    if (!useRealData || !candleSeriesRef.current || trades.length === 0) return
+    if (!candleSeriesRef.current || trades.length === 0) return
 
-    // TODO: Implement real-time candlestick aggregation
-    // For now, this is a placeholder showing how it would work:
-    const lastTrade = trades[0]
+    const lastTrade = trades[0] // Most recent trade (trades are prepended)
 
-    // In production, you would:
-    // 1. Determine which candle bucket this trade belongs to (based on interval)
-    // 2. Update that candle's OHLC values
-    // 3. Call candleSeriesRef.current.update() with the updated candle
-
-    // Example (simplified - needs proper bucketing):
-    const bucketTime = Math.floor(lastTrade.timestamp / (60 * 1000)) * 60 // 1-minute buckets
-    const timeInSeconds = Math.floor(bucketTime / 1000) as Time
-
-    candleSeriesRef.current.update({
-      time: timeInSeconds,
-      open: lastTrade.price, // Should be first trade in bucket
-      high: lastTrade.price, // Should be max in bucket
-      low: lastTrade.price,  // Should be min in bucket
-      close: lastTrade.price, // Should be last trade in bucket
+    // Add trade to aggregator and get updated candle
+    const updatedCandle = aggregatorRef.current.addTrade({
+      price: lastTrade.price,    // Already in cents from WebSocket
+      size: lastTrade.size,      // Already in sats from WebSocket
+      timestamp: lastTrade.timestamp,
+      side: lastTrade.side,
     })
-  }, [trades, useRealData, interval])
+
+    if (updatedCandle) {
+      // Update chart with the modified candle
+      candleSeriesRef.current.update({
+        time: updatedCandle.time,
+        open: updatedCandle.open,
+        high: updatedCandle.high,
+        low: updatedCandle.low,
+        close: updatedCandle.close,
+      })
+    }
+  }, [trades])
+
+  // Handle interval changes
+  useEffect(() => {
+    if (!candleSeriesRef.current) return
+
+    // Update aggregator interval
+    aggregatorRef.current.setInterval(interval)
+
+    // Re-render chart with new interval data
+    const candles = aggregatorRef.current.getCandles()
+    if (candles.length > 0) {
+      candleSeriesRef.current.setData(candles)
+    }
+  }, [interval])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -113,7 +136,7 @@ export function Chart() {
         <div className="flex items-center gap-4">
           <h3 className="text-sm font-semibold text-text-primary">{selectedSymbol}</h3>
           <div className="flex gap-1">
-            {(['1m', '5m', '15m', '1h', '4h', '1d'] as const).map((int) => (
+            {(['1m', '5m', '15m', '1h', '4h', '1d'] as Interval[]).map((int) => (
               <button
                 key={int}
                 onClick={() => setInterval(int)}

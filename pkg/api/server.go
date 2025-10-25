@@ -1,18 +1,22 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"github.com/uhyunpark/hyperlicked/pkg/app/perp"
+	"github.com/uhyunpark/hyperlicked/pkg/crypto"
 )
 
 // Server handles REST API and WebSocket connections
@@ -74,6 +78,9 @@ func (s *Server) setupRoutes() {
 	// Order submission
 	api.HandleFunc("/orders", s.handleSubmitOrder).Methods("POST")
 	api.HandleFunc("/orders/cancel", s.handleCancelOrder).Methods("POST")
+
+	// Agent delegation
+	api.HandleFunc("/delegations", s.handleRegisterDelegation).Methods("POST")
 
 	// WebSocket endpoint
 	s.router.HandleFunc("/ws", s.handleWebSocket)
@@ -378,6 +385,87 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, response)
 }
 
+func (s *Server) handleRegisterDelegation(w http.ResponseWriter, r *http.Request) {
+	var req RegisterDelegationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body", err.Error())
+		return
+	}
+
+	// Validate request
+	if req.Wallet == "" || req.Agent == "" || req.Signature == "" {
+		respondError(w, http.StatusBadRequest, "missing required fields", "wallet, agent, and signature are required")
+		return
+	}
+
+	// Parse delegation
+	expiration, ok := new(big.Int).SetString(req.Expiration, 10)
+	if !ok {
+		respondError(w, http.StatusBadRequest, "invalid expiration", "must be valid BigInt")
+		return
+	}
+
+	nonce, ok := new(big.Int).SetString(req.Nonce, 10)
+	if !ok {
+		respondError(w, http.StatusBadRequest, "invalid nonce", "must be valid BigInt")
+		return
+	}
+
+	walletAddr := common.HexToAddress(req.Wallet)
+	agentAddr := common.HexToAddress(req.Agent)
+
+	delegation := &crypto.AgentDelegation{
+		Wallet:     walletAddr,
+		Agent:      agentAddr,
+		Expiration: expiration,
+		Nonce:      nonce,
+	}
+
+	// Decode signature
+	sigBytes, err := hex.DecodeString(strings.TrimPrefix(req.Signature, "0x"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid signature hex", err.Error())
+		return
+	}
+
+	// Verify delegation signature
+	agentSigner := crypto.NewAgentSigner(crypto.DefaultDomain())
+	valid, err := agentSigner.VerifyDelegation(delegation, sigBytes)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "delegation verification failed", err.Error())
+		return
+	}
+
+	if !valid {
+		respondError(w, http.StatusBadRequest, "invalid delegation signature", "signature does not match wallet")
+		return
+	}
+
+	// Generate delegation ID (wallet + nonce)
+	delegationID := fmt.Sprintf("%s-%s", req.Wallet, req.Nonce)
+
+	// Store delegation in app
+	s.app.StoreDelegation(delegationID, delegation, sigBytes)
+
+	log.Printf("[api] delegation registered: id=%s wallet=%s agent=%s", delegationID, req.Wallet, req.Agent)
+
+	// Log to file
+	s.logTransaction("DELEGATION_REGISTER", map[string]interface{}{
+		"delegation_id": delegationID,
+		"wallet":        req.Wallet,
+		"agent":         req.Agent,
+		"expiration":    req.Expiration,
+	})
+
+	response := RegisterDelegationResponse{
+		Status:       "registered",
+		DelegationID: delegationID,
+		Message:      "Agent key delegation registered successfully",
+	}
+
+	respondJSON(w, response)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, map[string]string{"status": "ok"})
 }
@@ -416,6 +504,21 @@ func (s *Server) BroadcastOrderbook(symbol string, height int64) {
 	}
 
 	s.hub.BroadcastToChannel("orderbook:"+symbol, update)
+}
+
+// BroadcastTrade broadcasts a trade execution to WebSocket clients
+func (s *Server) BroadcastTrade(symbol string, price, size int64, side string, timestamp int64) {
+	update := TradeUpdate{
+		Type:      "trade",
+		Symbol:    symbol,
+		Price:     price,
+		Size:      size,
+		Side:      side,
+		Timestamp: timestamp,
+	}
+
+	// Broadcast to both trades channel and orderbook channel (for convenience)
+	s.hub.BroadcastToChannel("trades:"+symbol, update)
 }
 
 // ==============================

@@ -67,18 +67,20 @@ export function TradePanel() {
         owner: wallet.address
       }
 
-      console.log('[order] Signing order with Rabby/MetaMask...', orderToSign)
+      console.log('[order] Signing order...', orderToSign)
 
-      // Sign order with wallet (Rabby/MetaMask)
-      const signature = await wallet.signOrder(orderToSign)
+      // Sign order with agent key (if enabled) or MetaMask (if not)
+      const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
 
-      console.log('[order] Order signed! Signature:', signature)
+      console.log(`[order] Order signed! Mode: ${agentMode ? 'Agent Key (no popup!)' : 'MetaMask'}, Signature:`, signature)
 
       // Create signed transaction
       const signedTx = {
         type: 'order' as const,
         order: orderToSign,
-        signature
+        signature,
+        agent_mode: agentMode,
+        delegation_id: delegationId
       }
 
       console.log('[order] Submitting signed transaction...')
@@ -89,7 +91,11 @@ export function TradePanel() {
       console.log('[order] Response:', response)
 
       if (response.status === 'submitted') {
-        alert(`Order submitted successfully!\n\nOrder ID: ${response.orderId}\nSigned with: ${wallet.isRabby ? 'Rabby Wallet' : 'MetaMask'}`)
+        const signingMethod = agentMode
+          ? '✅ Agent Key (no popup needed!)'
+          : `${wallet.isRabby ? 'Rabby Wallet' : 'MetaMask'}`
+
+        alert(`Order submitted successfully!\n\nOrder ID: ${response.orderId}\nSigned with: ${signingMethod}`)
         // Increment nonce for next order
         setNonce(nonce + 1)
         // Clear form

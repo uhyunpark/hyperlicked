@@ -61,6 +61,35 @@ export function Header() {
         <div>
           {wallet.isConnected && wallet.address ? (
             <div className="flex items-center gap-3">
+              {/* Trading status */}
+              {wallet.tradingEnabled ? (
+                <div className="flex items-center gap-2 rounded border border-accent bg-accent/10 px-3 py-2">
+                  <div className="h-2 w-2 rounded-full bg-accent animate-pulse" />
+                  <div className="text-xs font-semibold text-accent">Trading Enabled</div>
+                  <div className="text-xs text-text-muted">({wallet.delegationExpiry})</div>
+                  <button
+                    onClick={() => wallet.disableTrading()}
+                    className="ml-2 text-xs text-text-muted hover:text-red-sell"
+                  >
+                    Disable
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={async () => {
+                    try {
+                      await wallet.enableTrading(7) // 7 days
+                      alert('Trading enabled! You can now trade without signing every order.')
+                    } catch (error: any) {
+                      alert(`Failed to enable trading: ${error.message}`)
+                    }
+                  }}
+                  className="rounded border border-accent bg-accent/10 px-4 py-2 text-sm font-semibold text-accent transition-colors hover:bg-accent/20"
+                >
+                  Enable Trading (7d)
+                </button>
+              )}
+
               {/* Wallet indicator */}
               <div className="flex items-center gap-2 rounded border border-border bg-bg-tertiary px-3 py-2">
                 {wallet.isRabby && (

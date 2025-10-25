@@ -8,12 +8,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/uhyunpark/hyperlicked/pkg/abci"
 	"github.com/uhyunpark/hyperlicked/pkg/app/core"
 	"github.com/uhyunpark/hyperlicked/pkg/consensus"
+	"github.com/uhyunpark/hyperlicked/pkg/crypto"
 )
+
+// TradeBroadcaster is called when a trade executes
+type TradeBroadcaster func(symbol string, price, size int64, side string, timestamp int64)
+
+// StoredDelegation represents a delegation stored on the backend
+type StoredDelegation struct {
+	Delegation *crypto.AgentDelegation
+	Signature  []byte // EIP-712 signature from wallet
+}
 
 type App struct {
 	mempool        *core.Mempool
@@ -21,6 +32,13 @@ type App struct {
 	books          map[string]*core.OrderBook
 	accountManager *core.AccountManager
 	txVerifier     *TxVerifier // Signature verifier for signed transactions
+
+	// Agent key delegations: delegationID -> delegation
+	delegations   map[string]*StoredDelegation
+	delegationsMu sync.RWMutex
+
+	// Callbacks for external integrations (WebSocket, etc.)
+	OnTrade TradeBroadcaster
 }
 
 func NewApp() *App {
@@ -30,6 +48,7 @@ func NewApp() *App {
 		books:          make(map[string]*core.OrderBook),
 		accountManager: core.NewAccountManager(),
 		txVerifier:     NewTxVerifier(), // Initialize transaction verifier
+		delegations:    make(map[string]*StoredDelegation),
 	}
 
 	// Register single market: BTC-USDT perpetual
@@ -57,10 +76,22 @@ func (a *App) ProcessProposal(_ abci.RequestProcessProposal) abci.ResponseProces
 	return abci.ResponseProcessProposal{Accept: true}
 }
 func (a *App) FinalizeBlock(req abci.RequestFinalizeBlock) abci.ResponseFinalizeBlock {
+	// Track fills for broadcasting
+	var allFills []fillWithMetadata
 	totalFills := 0
+
 	for _, tx := range req.Txs {
 		// Use new signature-verified transaction processor
-		totalFills += a.applyTxV2(tx, a.txVerifier)
+		fills := a.applyTxV2WithFills(tx, a.txVerifier)
+		totalFills += len(fills)
+		allFills = append(allFills, fills...)
+	}
+
+	// Broadcast trades to WebSocket clients (if callback registered)
+	if a.OnTrade != nil {
+		for _, f := range allFills {
+			a.OnTrade(f.Symbol, f.Price, f.Qty, f.Side, req.Timestamp)
+		}
 	}
 
 	// Compute state hash after executing all transactions (includes height, timestamp, orderbook state)
@@ -76,6 +107,14 @@ func (a *App) FinalizeBlock(req abci.RequestFinalizeBlock) abci.ResponseFinalize
 		Events:  []string{"commit"},
 		AppHash: appHash,
 	}
+}
+
+// fillWithMetadata wraps a Fill with its symbol and side for broadcasting
+type fillWithMetadata struct {
+	Symbol string
+	Price  int64
+	Qty    int64
+	Side   string // "buy" or "sell" (taker side)
 }
 
 func (a *App) getBook(sym string) *core.OrderBook {
@@ -388,4 +427,31 @@ func (a *App) GetAccount(addr common.Address) *core.Account {
 // GetMempoolSize returns current mempool transaction count
 func (a *App) GetMempoolSize() int {
 	return a.mempool.Len()
+}
+
+// ==============================
+// Agent Delegation Management
+// ==============================
+
+// StoreDelegation stores an agent key delegation
+func (a *App) StoreDelegation(delegationID string, delegation *crypto.AgentDelegation, signature []byte) {
+	a.delegationsMu.Lock()
+	defer a.delegationsMu.Unlock()
+
+	a.delegations[delegationID] = &StoredDelegation{
+		Delegation: delegation,
+		Signature:  signature,
+	}
+
+	log.Printf("[app] delegation stored: id=%s wallet=%s agent=%s",
+		delegationID, delegation.Wallet.Hex(), delegation.Agent.Hex())
+}
+
+// GetDelegation retrieves a delegation by ID
+func (a *App) GetDelegation(delegationID string) (*StoredDelegation, bool) {
+	a.delegationsMu.RLock()
+	defer a.delegationsMu.RUnlock()
+
+	delegation, ok := a.delegations[delegationID]
+	return delegation, ok
 }

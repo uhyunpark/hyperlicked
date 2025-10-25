@@ -178,3 +178,23 @@ type ErrorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 }
+
+// ==============================
+// Agent Delegation Types
+// ==============================
+
+// RegisterDelegationRequest is sent by frontend to register an agent key delegation
+type RegisterDelegationRequest struct {
+	Wallet     string `json:"wallet"`     // Main wallet address (0x...)
+	Agent      string `json:"agent"`      // Agent key address (0x...)
+	Expiration string `json:"expiration"` // Unix timestamp (BigInt as string)
+	Nonce      string `json:"nonce"`      // Nonce (BigInt as string)
+	Signature  string `json:"signature"`  // EIP-712 signature from wallet (0x...)
+}
+
+// RegisterDelegationResponse is returned after successful registration
+type RegisterDelegationResponse struct {
+	Status       string `json:"status"`        // "registered"
+	DelegationID string `json:"delegationId"`  // ID to use in agent-signed orders
+	Message      string `json:"message"`
+}

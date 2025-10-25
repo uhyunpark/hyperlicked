@@ -34,6 +34,14 @@ type OrderEIP712 struct {
 	Owner    common.Address // Order owner address
 }
 
+// CancelEIP712 represents a cancel order request for EIP-712 signing
+type CancelEIP712 struct {
+	OrderID string         // Order ID to cancel
+	Symbol  string         // Market symbol (e.g., "BTC-USDT")
+	Nonce   *big.Int       // Nonce for replay protection
+	Owner   common.Address // Order owner address
+}
+
 // EIP712Signer handles EIP-712 typed data signing for orders
 type EIP712Signer struct {
 	domain EIP712Domain
@@ -261,4 +269,74 @@ func Uint8ToOrderType(orderType uint8) string {
 	default:
 		return "unknown"
 	}
+}
+
+// HashCancel hashes a cancel order according to EIP-712 spec
+// Returns the digest that should be signed
+func (e *EIP712Signer) HashCancel(cancel *CancelEIP712) ([]byte, error) {
+	// Build EIP-712 typed data
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"CancelOrder": []apitypes.Type{
+				{Name: "orderId", Type: "string"},
+				{Name: "symbol", Type: "string"},
+				{Name: "nonce", Type: "uint256"},
+				{Name: "owner", Type: "address"},
+			},
+		},
+		PrimaryType: "CancelOrder",
+		Domain: apitypes.TypedDataDomain{
+			Name:              e.domain.Name,
+			Version:           e.domain.Version,
+			ChainId:           (*math.HexOrDecimal256)(e.domain.ChainID),
+			VerifyingContract: e.domain.VerifyingContract.Hex(),
+		},
+		Message: apitypes.TypedDataMessage{
+			"orderId": cancel.OrderID,
+			"symbol":  cancel.Symbol,
+			"nonce":   cancel.Nonce.String(),
+			"owner":   cancel.Owner.Hex(),
+		},
+	}
+
+	// Compute EIP-712 hash
+	domainSeparator, err := typedData.HashStruct("EIP712Domain", typedData.Domain.Map())
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash domain: %w", err)
+	}
+
+	typedDataHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash message: %w", err)
+	}
+
+	// Final digest: keccak256("\x19\x01" || domainSeparator || typedDataHash)
+	rawData := []byte(fmt.Sprintf("\x19\x01%s%s", string(domainSeparator), string(typedDataHash)))
+	digest := crypto.Keccak256Hash(rawData)
+
+	return digest.Bytes(), nil
+}
+
+// VerifyCancelSignature verifies that a cancel order signature is valid
+// Returns true if signature matches the cancel request and claimed owner
+func (e *EIP712Signer) VerifyCancelSignature(cancel *CancelEIP712, signature []byte) (bool, error) {
+	hash, err := e.HashCancel(cancel)
+	if err != nil {
+		return false, fmt.Errorf("failed to hash cancel: %w", err)
+	}
+
+	// Recover signer address from signature
+	recoveredAddr, err := RecoverAddress(hash, signature)
+	if err != nil {
+		return false, fmt.Errorf("failed to recover address: %w", err)
+	}
+
+	// Check if recovered address matches cancel owner
+	return recoveredAddr == cancel.Owner, nil
 }
