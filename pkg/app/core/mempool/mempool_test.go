@@ -35,6 +35,26 @@ func TestClassifyRaw_SignedJSON(t *testing.T) {
 			tx:       "",
 			expected: TxOrderGTC,
 		},
+		{
+			name:     "GTC order (type=1, limit order)",
+			tx:       `{"type":"order","order":{"symbol":"BTC-USDT","type":1},"signature":"0x1234"}`,
+			expected: TxOrderGTC,
+		},
+		{
+			name:     "IOC order (type=2, market order)",
+			tx:       `{"type":"order","order":{"symbol":"BTC-USDT","type":2},"signature":"0x1234"}`,
+			expected: TxOrderIOC,
+		},
+		{
+			name:     "ALO order (type=3, add liquidity only)",
+			tx:       `{"type":"order","order":{"symbol":"BTC-USDT","type":3},"signature":"0x1234"}`,
+			expected: TxOrderGTC,
+		},
+		{
+			name:     "order without type field defaults to GTC",
+			tx:       `{"type":"order","order":{"symbol":"BTC-USDT"},"signature":"0x1234"}`,
+			expected: TxOrderGTC,
+		},
 	}
 
 	for _, tt := range tests {

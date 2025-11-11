@@ -12,9 +12,10 @@ import (
 // Handles deposits, withdrawals, margin locking/unlocking, and position updates
 // Uses in-memory cache + Pebble persistence for durability
 type AccountManager struct {
-	mu       sync.RWMutex
-	accounts map[common.Address]*Account // address -> account (in-memory cache)
-	store    *Store                      // Pebble persistence layer
+	mu              sync.RWMutex
+	accounts        map[common.Address]*Account   // address -> account (in-memory cache)
+	activePositions map[common.Address]struct{}   // accounts with open positions (for efficient liquidation checks)
+	store           *Store                        // Pebble persistence layer
 }
 
 // NewAccountManager creates an account manager with Pebble persistence
@@ -25,8 +26,9 @@ func NewAccountManager(dbPath string) (*AccountManager, error) {
 	}
 
 	return &AccountManager{
-		accounts: make(map[common.Address]*Account),
-		store:    store,
+		accounts:        make(map[common.Address]*Account),
+		activePositions: make(map[common.Address]struct{}),
+		store:           store,
 	}, nil
 }
 
@@ -301,6 +303,9 @@ func (am *AccountManager) UpdatePosition(addr common.Address, symbol string, siz
 		}
 	}
 
+	// Update activePositions set
+	am.updateActivePositionsLocked(acc)
+
 	return nil
 }
 
@@ -350,6 +355,22 @@ func (am *AccountManager) ListAccounts() []*Account {
 	accounts := make([]*Account, 0, len(am.accounts))
 	for _, acc := range am.accounts {
 		accounts = append(accounts, acc)
+	}
+	return accounts
+}
+
+// ListActiveAccounts returns only accounts with open positions
+// More efficient than ListAccounts for liquidation checks
+// Returns a snapshot copy to avoid holding the lock
+func (am *AccountManager) ListActiveAccounts() []*Account {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	accounts := make([]*Account, 0, len(am.activePositions))
+	for addr := range am.activePositions {
+		if acc, ok := am.accounts[addr]; ok {
+			accounts = append(accounts, acc)
+		}
 	}
 	return accounts
 }
@@ -555,8 +576,30 @@ func (am *AccountManager) Liquidate(addr common.Address, markets map[string]*mar
 		acc.USDCBalance = 0 // Bankrupt, zero out balance
 	}
 
+	// Remove from activePositions after liquidation
+	am.updateActivePositionsLocked(acc)
+
 	finalBalance := acc.USDCBalance
 	return finalBalance, deficit, nil
+}
+
+// updateActivePositionsLocked updates the activePositions set for an account
+// Adds account if it has any open positions, removes if no positions
+// MUST be called with am.mu held (Lock or RLock)
+func (am *AccountManager) updateActivePositionsLocked(acc *Account) {
+	hasPosition := false
+	for _, pos := range acc.Positions {
+		if pos.Size != 0 {
+			hasPosition = true
+			break
+		}
+	}
+
+	if hasPosition {
+		am.activePositions[acc.Address] = struct{}{}
+	} else {
+		delete(am.activePositions, acc.Address)
+	}
 }
 
 // absInt64 returns absolute value of int64

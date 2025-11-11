@@ -48,9 +48,27 @@ func ClassifyRaw(b []byte) TxType {
 	case "cancel":
 		return TxCancel
 	case "order":
-		// TODO: Check order.type field for IOC vs GTC distinction
-		// For now, all signed orders are classified as GTC
-		return TxOrderGTC
+		// Parse order.type field for IOC vs GTC distinction
+		var orderEnvelope struct {
+			Order struct {
+				Type uint8 `json:"type"` // 1=GTC, 2=IOC, 3=ALO
+			} `json:"order"`
+		}
+
+		if err := json.Unmarshal(b, &orderEnvelope); err != nil {
+			// Malformed order payload - default to GTC
+			return TxOrderGTC
+		}
+
+		switch orderEnvelope.Order.Type {
+		case 2: // IOC (market orders)
+			return TxOrderIOC
+		case 1, 3: // GTC (limit) or ALO (add liquidity only)
+			return TxOrderGTC
+		default:
+			// Unknown order type - default to GTC
+			return TxOrderGTC
+		}
 	default:
 		// Unknown transaction type - default to order
 		return TxOrderGTC
