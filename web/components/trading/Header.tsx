@@ -2,6 +2,7 @@
 
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
+import { config } from '@/lib/config'
 
 export function Header() {
   const { selectedSymbol, currentPrice } = useTradingStore()
@@ -12,8 +13,52 @@ export function Header() {
   const priceChangePercent = 2.53
   const isPositive = priceChangePercent >= 0
 
+  // Check if on wrong network
+  const isWrongNetwork = wallet.isConnected && wallet.chainId !== config.network.chainId
+
   return (
     <header className="border-b border-border bg-bg-secondary">
+      {/* Error/Warning Banner */}
+      {(wallet.error || isWrongNetwork) && (
+        <div className="flex items-center justify-between bg-red-sell/20 px-6 py-2">
+          <div className="flex items-center gap-2">
+            <span className="text-red-sell">⚠️</span>
+            <span className="text-sm text-red-sell">
+              {wallet.error || `Wrong network. Please switch to ${config.network.chainName}`}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {isWrongNetwork && (
+              <button
+                onClick={() => wallet.switchNetwork(config.network.chainId)}
+                className="rounded bg-red-sell px-3 py-1 text-xs font-medium text-white hover:bg-red-sell/80"
+              >
+                Switch Network
+              </button>
+            )}
+            {wallet.needsReconnect && (
+              <button
+                onClick={() => {
+                  wallet.clearError()
+                  wallet.connect()
+                }}
+                className="rounded bg-accent px-3 py-1 text-xs font-medium text-white hover:bg-accent/80"
+              >
+                Reconnect
+              </button>
+            )}
+            {wallet.error && !wallet.needsReconnect && (
+              <button
+                onClick={() => wallet.clearError()}
+                className="text-xs text-red-sell hover:text-red-sell/80"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between px-6 py-3">
         {/* Left: Logo + Market Info */}
         <div className="flex items-center gap-8">

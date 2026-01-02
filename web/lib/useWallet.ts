@@ -63,6 +63,9 @@ export interface WalletState {
   tradingEnabled: boolean // True if agent key is active
   agentAddress: string | null // Agent key address (if enabled)
   delegationExpiry: string | null // Time remaining (e.g., "6d 12h")
+  // Error/warning state
+  error: string | null // Current error message
+  needsReconnect: boolean // True if wallet changed and needs reconnection
 }
 
 export interface OrderToSign {
@@ -94,7 +97,9 @@ export function useWallet() {
     chainId: null,
     tradingEnabled: false,
     agentAddress: null,
-    delegationExpiry: null
+    delegationExpiry: null,
+    error: null,
+    needsReconnect: false
   })
 
   const [agentWallet, setAgentWallet] = useState<Wallet | HDNodeWallet | null>(null)
@@ -158,7 +163,9 @@ export function useWallet() {
         chainId,
         tradingEnabled: false,
         agentAddress: null,
-        delegationExpiry: null
+        delegationExpiry: null,
+        error: null,
+        needsReconnect: false
       })
 
       return { address, isRabby, chainId }
@@ -169,8 +176,8 @@ export function useWallet() {
   }, [detectRabby])
 
   // Disconnect wallet
-  const disconnect = useCallback(() => {
-    console.log('[wallet] Disconnected')
+  const disconnect = useCallback((reason?: string) => {
+    console.log('[wallet] Disconnected', reason ? `(${reason})` : '')
     // Also clear agent key on disconnect
     clearAgentKey()
     setAgentWallet(null)
@@ -183,8 +190,15 @@ export function useWallet() {
       chainId: null,
       tradingEnabled: false,
       agentAddress: null,
-      delegationExpiry: null
+      delegationExpiry: null,
+      error: reason || null,
+      needsReconnect: !!reason
     })
+  }, [])
+
+  // Clear error
+  const clearError = useCallback(() => {
+    setWallet(prev => ({ ...prev, error: null, needsReconnect: false }))
   }, [])
 
   // Sign an order using EIP-712
@@ -266,7 +280,15 @@ export function useWallet() {
     }
   }, [])
 
-  // Listen for account changes
+  // Track previous address to detect actual changes
+  const prevAddressRef = useRef<string | null>(null)
+
+  // Sync prev address ref
+  useEffect(() => {
+    prevAddressRef.current = wallet.address
+  }, [wallet.address])
+
+  // Listen for account and chain changes
   useEffect(() => {
     if (typeof window === 'undefined') return
 
@@ -276,20 +298,54 @@ export function useWallet() {
     const handleAccountsChanged = (accounts: string[]) => {
       console.log('[wallet] Accounts changed:', accounts)
 
-      // SECURITY: Always disconnect when wallet changes
-      // New wallet must explicitly connect and sign delegation
-      disconnect()
+      if (accounts.length === 0) {
+        // User disconnected wallet
+        disconnect('Wallet disconnected')
+        return
+      }
 
-      if (accounts.length > 0) {
-        // Show notification to user
-        alert('Wallet changed. Please reconnect to continue trading.')
+      const newAddress = accounts[0].toLowerCase()
+      const prevAddress = prevAddressRef.current?.toLowerCase()
+
+      // Only disconnect if address actually changed (not just reconnecting)
+      if (prevAddress && prevAddress !== newAddress) {
+        console.log('[wallet] Address changed from', prevAddress, 'to', newAddress)
+        disconnect('Wallet address changed. Please reconnect.')
+      } else if (!prevAddress) {
+        // No previous address - this is initial connection or after page load
+        // Let auto-connect handle it
+        console.log('[wallet] Initial connection detected')
       }
     }
 
-    const handleChainChanged = (chainId: string) => {
-      console.log('[wallet] Chain changed:', chainId)
-      // Reload page on chain change (recommended by MetaMask/Rabby)
-      window.location.reload()
+    const handleChainChanged = (chainIdHex: string) => {
+      const newChainId = parseInt(chainIdHex, 16)
+      console.log('[wallet] Chain changed to:', newChainId)
+
+      // Update chainId in state without full reload
+      setWallet(prev => {
+        if (!prev.isConnected) return prev
+
+        // Check if this is the expected chain
+        const expectedChainId = config.network.chainId
+        if (newChainId !== expectedChainId) {
+          console.log(`[wallet] Wrong network. Expected ${expectedChainId}, got ${newChainId}`)
+          return {
+            ...prev,
+            chainId: newChainId,
+            error: `Wrong network. Please switch to ${config.network.chainName} (Chain ID: ${expectedChainId})`,
+            needsReconnect: false
+          }
+        }
+
+        // Correct chain - clear any network errors
+        return {
+          ...prev,
+          chainId: newChainId,
+          error: null,
+          needsReconnect: false
+        }
+      })
     }
 
     ethereum.on('accountsChanged', handleAccountsChanged)
@@ -299,7 +355,7 @@ export function useWallet() {
       ethereum.removeListener('accountsChanged', handleAccountsChanged)
       ethereum.removeListener('chainChanged', handleChainChanged)
     }
-  }, [connect, disconnect])
+  }, [disconnect])
 
   // Auto-connect if previously connected
   useEffect(() => {
@@ -526,6 +582,7 @@ export function useWallet() {
     signOrder,
     signCancel,
     switchNetwork,
+    clearError,
     // Agent key methods
     enableTrading,
     disableTrading,
