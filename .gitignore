@@ -16,7 +16,7 @@ tmp
 Thumbs.db
 
 # Rust
-rust/target/
+target/
 
 # Go
 *.exe
