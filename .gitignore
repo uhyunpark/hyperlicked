@@ -15,6 +15,9 @@ tmp
 .DS_Store
 Thumbs.db
 
+# Rust
+rust/target/
+
 # Go
 *.exe
 *.exe~
