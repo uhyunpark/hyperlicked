@@ -27,7 +27,7 @@ target/
 *.test
 *.out
 coverage.out
-bin/
+/bin/
 vendor/
 
 # Next.js / Frontend

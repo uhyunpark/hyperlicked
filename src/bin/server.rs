@@ -17,11 +17,12 @@ use std::time::Duration;
 use anyhow::Result;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, debug, warn};
+use tracing::info;
 
 use hyperlicked::api::{create_router, SharedState, WebSocketHandler};
 use hyperlicked::api::state::PriceLevel;
 use hyperlicked::app::AppState;
+use hyperlicked::config::Config;
 use hyperlicked::consensus::AppHook;
 use hyperlicked::types::Block;
 
@@ -39,28 +40,36 @@ async fn main() -> Result<()> {
         .with_target(true)
         .init();
 
+    // Initialize config from environment
+    let config = Config::global();
+
     println!("╔════════════════════════════════════════╗");
     println!("║     Hyperlicked Server v0.1.0          ║");
     println!("║     REST + WebSocket + Consensus       ║");
     println!("╚════════════════════════════════════════╝");
     println!();
 
-    // Port: CLI arg > env var > default 8080
+    // Port: CLI arg > config
     let args: Vec<String> = std::env::args().collect();
     let port: u16 = args
         .iter()
         .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
-        .or_else(|| std::env::var("PORT").ok().and_then(|s| s.parse().ok()))
-        .unwrap_or(8080);
+        .unwrap_or(config.port);
 
     // Create shared state
     let app_state = AppState::new();
     let shared_state = SharedState::new(app_state);
 
     println!("Configuration:");
+    println!("  Mode: {} {}", config.mode, if config.mode.is_dev() { "(faucet enabled)" } else { "" });
     println!("  Port: {}", port);
+    println!("  Block time: {}ms", config.block_time_ms);
+    println!("  Log blocks: {}", config.log_all_blocks);
+    if config.mode.is_dev() {
+        println!("  Faucet: ${:.2} per account", config.faucet_amount as f64 / 100.0);
+    }
     println!("  Markets: BTC-USDT");
     println!();
 
@@ -107,15 +116,9 @@ async fn main() -> Result<()> {
 /// Run consensus loop in background
 /// This simulates block production and executes pending transactions
 async fn run_consensus_loop(state: SharedState) {
-    // Configuration from environment
-    let block_time_ms: u64 = std::env::var("BLOCK_TIME_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100);
-
-    let log_all_blocks = std::env::var("LOG_BLOCKS")
-        .map(|s| s == "true" || s == "1")
-        .unwrap_or(false);
+    let config = Config::global();
+    let block_time_ms = config.block_time_ms;
+    let log_all_blocks = config.log_all_blocks;
 
     let mut height = 0u64;
     let mut view = 0u64;
@@ -124,6 +127,7 @@ async fn run_consensus_loop(state: SharedState) {
     info!(
         block_time_ms,
         log_all_blocks,
+        mode = %config.mode,
         "Consensus loop started"
     );
 
@@ -217,11 +221,11 @@ async fn run_consensus_loop(state: SharedState) {
                 );
             } else if log_all_blocks {
                 // Log empty blocks only if LOG_BLOCKS=true
-                debug!(
+                info!(
                     height,
                     view,
                     hash = %hex::encode(&app_hash[..4]),
-                    "📦 Heartbeat block"
+                    "💓 Heartbeat block"
                 );
             }
 

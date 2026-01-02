@@ -151,10 +151,25 @@ impl AccountManager {
     }
 
     /// Get or create account
+    /// New accounts get initial balance from config (dev mode only)
     pub fn get_or_create(&mut self, address: &str) -> &mut Account {
         self.accounts
             .entry(address.to_string())
-            .or_insert_with(|| Account::new(address))
+            .or_insert_with(|| {
+                let mut account = Account::new(address);
+                // Auto-fund new accounts in dev mode
+                let config = crate::config::Config::global();
+                if config.mode.is_dev() && config.faucet_amount > 0 {
+                    account.balance = config.faucet_amount;
+                    tracing::info!(
+                        address,
+                        balance = config.faucet_amount,
+                        mode = %config.mode,
+                        "🚰 New account created with faucet funds"
+                    );
+                }
+                account
+            })
     }
 
     /// Get account (read-only)
