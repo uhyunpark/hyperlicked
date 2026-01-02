@@ -5,9 +5,9 @@
 //!
 //! Run with: cargo test --test e2e
 
-use hyperliquid::app::{AppState, OrderType, Side, Transaction};
-use hyperliquid::consensus::{Engine, MemoryBlockStore};
-use hyperliquid::types::ConsensusConfig;
+use hyperlicked::app::{AppState, OrderType, Side, Transaction};
+use hyperlicked::consensus::{Engine, MemoryBlockStore};
+use hyperlicked::types::ConsensusConfig;
 
 // =============================================================================
 // Phase 1: Consensus Tests
@@ -135,7 +135,7 @@ fn test_order_matching() {
     }).unwrap();
 
     // Execute block to process transactions
-    let block = hyperliquid::types::Block {
+    let block = hyperlicked::types::Block {
         view: 0,
         height: 1,
         parent: [0u8; 32],
@@ -145,7 +145,7 @@ fn test_order_matching() {
         timestamp: 1000,
     };
 
-    use hyperliquid::consensus::AppHook;
+    use hyperlicked::consensus::AppHook;
     state.execute(&block);
 
     // Verify positions
@@ -202,7 +202,7 @@ fn test_position_updates() {
     }).unwrap();
 
     // Execute
-    let block = hyperliquid::types::Block {
+    let block = hyperlicked::types::Block {
         view: 0,
         height: 1,
         parent: [0u8; 32],
@@ -212,7 +212,7 @@ fn test_position_updates() {
         timestamp: 1000,
     };
 
-    use hyperliquid::consensus::AppHook;
+    use hyperlicked::consensus::AppHook;
     state.execute(&block);
 
     // Alice should have 1 BTC (partial fill), with remaining order on book
@@ -290,9 +290,9 @@ fn test_full_flow() {
 #[test]
 fn test_mempool_3_bucket_ordering() {
     // Transactions should be ordered: deposits → cancels → orders
-    use hyperliquid::app::Mempool;
+    use hyperlicked::app::Mempool;
 
-    let mut mempool = hyperliquid::app::Mempool::default();
+    let mut mempool = hyperlicked::app::Mempool::default();
 
     // Add in wrong order
     mempool.add(Transaction::PlaceOrder {

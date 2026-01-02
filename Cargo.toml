@@ -1,8 +1,8 @@
 [package]
-name = "hyperliquid"
+name = "hyperlicked"
 version = "0.1.0"
 edition = "2021"
-description = "Hyperliquid clone - high-performance perpetual futures exchange"
+description = "Hyperlicked - high-performance perpetual futures exchange"
 
 [[bin]]
 name = "hl-node"

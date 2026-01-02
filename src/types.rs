@@ -1,4 +1,4 @@
-//! Core types for the Hyperliquid consensus and application layers.
+//! Core types for the Hyperlicked consensus and application layers.
 //!
 //! All types here are designed for determinism:
 //! - Integer math only (no floats)

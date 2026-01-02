@@ -46,7 +46,6 @@ impl ApiState {
     }
 }
 
-/// Create the API router (matches Go frontend)
 pub fn create_router(state: SharedState) -> Router {
     let api_state = ApiState::new(state);
 

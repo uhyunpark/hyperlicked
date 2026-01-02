@@ -8,9 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use hyperliquid::app::AppState;
-use hyperliquid::consensus::{Engine, MemoryBlockStore};
-use hyperliquid::types::{hash_short, ConsensusConfig};
+use hyperlicked::app::AppState;
+use hyperlicked::consensus::{Engine, MemoryBlockStore};
+use hyperlicked::types::{hash_short, ConsensusConfig};
 
 fn main() {
     // Initialize logging
@@ -20,7 +20,7 @@ fn main() {
         .init();
 
     println!("╔════════════════════════════════════════╗");
-    println!("║      Hyperliquid-RS Node v0.1.0        ║");
+    println!("║      Hyperlicked    Node v0.1.0        ║");
     println!("║      HotStuff-2 Consensus Engine       ║");
     println!("╚════════════════════════════════════════╝");
     println!();

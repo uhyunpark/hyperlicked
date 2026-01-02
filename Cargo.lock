@@ -1134,7 +1134,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyperliquid"
+name = "hyperlicked"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",

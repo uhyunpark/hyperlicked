@@ -19,11 +19,11 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{info, debug, warn};
 
-use hyperliquid::api::{create_router, SharedState, WebSocketHandler};
-use hyperliquid::api::state::PriceLevel;
-use hyperliquid::app::AppState;
-use hyperliquid::consensus::AppHook;
-use hyperliquid::types::Block;
+use hyperlicked::api::{create_router, SharedState, WebSocketHandler};
+use hyperlicked::api::state::PriceLevel;
+use hyperlicked::app::AppState;
+use hyperlicked::consensus::AppHook;
+use hyperlicked::types::Block;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         .init();
 
     println!("╔════════════════════════════════════════╗");
-    println!("║     Hyperliquid-RS Server v0.1.0       ║");
+    println!("║     Hyperlicked Server v0.1.0          ║");
     println!("║     REST + WebSocket + Consensus       ║");
     println!("╚════════════════════════════════════════╝");
     println!();

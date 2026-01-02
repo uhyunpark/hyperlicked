@@ -1,5 +1,6 @@
 //! Hyperliquid Clone
 //!
+//! A mock implementation of Hyperlicked for testing and development.
 //! A high-performance perpetual futures exchange built with HotStuff-2 consensus.
 //!
 //! ## Architecture
@@ -14,8 +15,8 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use hyperliquid::consensus::{Engine, MemoryBlockStore, NoOpApp};
-//! use hyperliquid::types::ConsensusConfig;
+//! use hyperlicked::consensus::{Engine, MemoryBlockStore, NoOpApp};
+//! use hyperlicked::types::ConsensusConfig;
 //!
 //! // Create single-node engine
 //! let config = ConsensusConfig::single_node();

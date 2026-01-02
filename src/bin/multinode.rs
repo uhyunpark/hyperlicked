@@ -10,10 +10,10 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use hyperliquid::app::AppState;
-use hyperliquid::consensus::ConsensusRunner;
-use hyperliquid::network::{NetworkConfig, TcpNetwork};
-use hyperliquid::types::{hash_short, ConsensusConfig};
+use hyperlicked::app::AppState;
+use hyperlicked::consensus::ConsensusRunner;
+use hyperlicked::network::{NetworkConfig, TcpNetwork};
+use hyperlicked::types::{hash_short, ConsensusConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
