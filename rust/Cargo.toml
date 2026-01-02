@@ -1,0 +1,59 @@
+[package]
+name = "hyperliquid"
+version = "0.1.0"
+edition = "2021"
+description = "Hyperliquid clone - high-performance perpetual futures exchange"
+
+[[bin]]
+name = "hl-node"
+path = "src/bin/node.rs"
+
+[[bin]]
+name = "multinode"
+path = "src/bin/multinode.rs"
+
+[[bin]]
+name = "hl-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Environment
+dotenvy = "0.15"
+
+# Crypto
+sha2 = "0.10"
+hex = "0.4"
+alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-sol-types = "0.8"
+k256 = { version = "0.13", features = ["ecdsa"] }
+
+# HTTP/WebSocket
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+futures = "0.3"
+
+# Dependencies to add later:
+# ethers = "2.0"              # EIP-712 signing
+# blst = "0.3"                # BLS signatures
+# libp2p = "0.54"             # P2P networking
+# rocksdb = "0.22"            # Storage
+
+[dev-dependencies]
+tokio-test = "0.4"
