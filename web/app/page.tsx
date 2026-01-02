@@ -7,17 +7,36 @@ import { Chart } from '@/components/trading/Chart'
 import { TradePanel } from '@/components/trading/TradePanel'
 import { BottomTabs } from '@/components/trading/BottomTabs'
 import { useWebSocket } from '@/lib/useWebSocket'
+import { useTradingStore } from '@/lib/store'
 
 export default function TradingPage() {
   const [isConnected, setIsConnected] = useState(false)
+  const orderbook = useTradingStore((state) => state.orderbook)
 
   // Connect to WebSocket for real-time updates
   const ws = useWebSocket()
 
+  // Check connection based on receiving orderbook data
   useEffect(() => {
-    if (ws) {
-      setIsConnected(ws.readyState === WebSocket.OPEN)
+    // Connected if we have orderbook data (proves WebSocket is working)
+    if (orderbook && (orderbook.bids.length > 0 || orderbook.asks.length > 0)) {
+      setIsConnected(true)
     }
+  }, [orderbook])
+
+  // Also check WebSocket state directly with polling
+  useEffect(() => {
+    const checkConnection = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        setIsConnected(true)
+      }
+    }
+
+    // Check immediately and then every 500ms
+    checkConnection()
+    const interval = setInterval(checkConnection, 500)
+
+    return () => clearInterval(interval)
   }, [ws])
 
   return (
