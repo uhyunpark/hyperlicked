@@ -27,5 +27,5 @@ Configure via `.env`:
 PORT=8080
 RUST_LOG=info
 BLOCK_TIME_MS=100
-LOG_BLOCKS=false
+LOG_BLOCKS=true
 ```
