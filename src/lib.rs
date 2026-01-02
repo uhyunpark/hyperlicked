@@ -32,6 +32,7 @@
 
 pub mod api;
 pub mod app;
+pub mod config;
 pub mod consensus;
 pub mod crypto;
 pub mod network;
