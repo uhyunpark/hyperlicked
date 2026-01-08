@@ -2,8 +2,9 @@
 //!
 //! Thread-safe state shared between API handlers and consensus.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::app::AppState;
 
@@ -44,13 +45,173 @@ pub struct PriceLevel {
     pub size: i64,
 }
 
+// =============================================================================
+// User-specific Events (sent only to subscribed users)
+// =============================================================================
+
+/// Events sent to specific users (not broadcast to all)
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum UserEvent {
+    /// User's order was filled (partially or fully)
+    #[serde(rename = "userFill")]
+    UserFill {
+        symbol: String,
+        order_id: String,
+        side: String,
+        price: i64,
+        size: i64,
+        fee: i64,
+        is_maker: bool,
+        timestamp: u64,
+    },
+    /// User's order status changed
+    #[serde(rename = "orderUpdate")]
+    OrderUpdate {
+        order_id: String,
+        symbol: String,
+        status: String,        // "open", "partial", "filled", "cancelled"
+        filled: i64,           // Total filled so far
+        remaining: i64,        // Remaining size
+        timestamp: u64,
+    },
+    /// User's position changed
+    #[serde(rename = "positionUpdate")]
+    PositionUpdate {
+        symbol: String,
+        size: i64,             // New position size (negative = short)
+        entry_price: i64,
+        mark_price: i64,
+        unrealized_pnl: i64,
+        timestamp: u64,
+    },
+}
+
+/// User subscription info
+pub struct UserSubscription {
+    pub sender: mpsc::UnboundedSender<UserEvent>,
+}
+
+/// Registry of user subscriptions by address
+pub struct UserRegistry {
+    subscriptions: RwLock<HashMap<String, Vec<mpsc::UnboundedSender<UserEvent>>>>,
+}
+
+impl UserRegistry {
+    pub fn new() -> Self {
+        Self {
+            subscriptions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Subscribe a user connection
+    pub async fn subscribe(&self, address: &str) -> mpsc::UnboundedReceiver<UserEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let address_lower = address.to_lowercase();
+
+        let mut subs = self.subscriptions.write().await;
+        subs.entry(address_lower)
+            .or_insert_with(Vec::new)
+            .push(tx);
+
+        rx
+    }
+
+    /// Unsubscribe a user connection (called when WebSocket closes)
+    pub async fn unsubscribe(&self, address: &str, sender: &mpsc::UnboundedSender<UserEvent>) {
+        let address_lower = address.to_lowercase();
+        let mut subs = self.subscriptions.write().await;
+
+        if let Some(senders) = subs.get_mut(&address_lower) {
+            senders.retain(|s| !s.same_channel(sender));
+            if senders.is_empty() {
+                subs.remove(&address_lower);
+            }
+        }
+    }
+
+    /// Send event to a specific user (all their connections)
+    pub async fn send_to_user(&self, address: &str, event: UserEvent) {
+        let address_lower = address.to_lowercase();
+        let subs = self.subscriptions.read().await;
+
+        if let Some(senders) = subs.get(&address_lower) {
+            for sender in senders {
+                let _ = sender.send(event.clone());
+            }
+        }
+    }
+
+    /// Send fill events to both maker and taker
+    pub async fn notify_fill(
+        &self,
+        maker: &str,
+        taker: &str,
+        symbol: &str,
+        order_id: &str,
+        side: &str,
+        price: i64,
+        size: i64,
+        maker_fee: i64,
+        taker_fee: i64,
+        timestamp: u64,
+    ) {
+        // Notify maker
+        self.send_to_user(maker, UserEvent::UserFill {
+            symbol: symbol.to_string(),
+            order_id: order_id.to_string(),
+            side: side.to_string(),
+            price,
+            size,
+            fee: maker_fee,
+            is_maker: true,
+            timestamp,
+        }).await;
+
+        // Notify taker
+        self.send_to_user(taker, UserEvent::UserFill {
+            symbol: symbol.to_string(),
+            order_id: format!("{}-taker", order_id),
+            side: if side == "buy" { "sell" } else { "buy" }.to_string(),
+            price,
+            size,
+            fee: taker_fee,
+            is_maker: false,
+            timestamp,
+        }).await;
+    }
+
+    /// Send position update to a user
+    pub async fn notify_position_update(
+        &self,
+        address: &str,
+        symbol: &str,
+        size: i64,
+        entry_price: i64,
+        mark_price: i64,
+        unrealized_pnl: i64,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::PositionUpdate {
+            symbol: symbol.to_string(),
+            size,
+            entry_price,
+            mark_price,
+            unrealized_pnl,
+            timestamp,
+        }).await;
+    }
+}
+
 /// Shared state accessible by API handlers
 #[derive(Clone)]
 pub struct SharedState {
     /// Application state (orderbooks, accounts, mempool)
     pub app: Arc<RwLock<AppState>>,
-    /// Event broadcaster for WebSocket clients
+    /// Event broadcaster for WebSocket clients (public events)
     pub events: broadcast::Sender<Event>,
+    /// User-specific event registry
+    pub users: Arc<UserRegistry>,
 }
 
 impl SharedState {
@@ -60,6 +221,7 @@ impl SharedState {
         Self {
             app: Arc::new(RwLock::new(app)),
             events,
+            users: Arc::new(UserRegistry::new()),
         }
     }
 
@@ -69,8 +231,13 @@ impl SharedState {
         let _ = self.events.send(event);
     }
 
-    /// Subscribe to events
+    /// Subscribe to public events
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Subscribe to user-specific events
+    pub async fn subscribe_user(&self, address: &str) -> mpsc::UnboundedReceiver<UserEvent> {
+        self.users.subscribe(address).await
     }
 }

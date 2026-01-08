@@ -170,11 +170,48 @@ async fn run_consensus_loop(state: SharedState) {
 
             // Execute block (processes mempool transactions)
             let exec_start = std::time::Instant::now();
-            let app_hash = {
+            let (app_hash, fills) = {
                 let mut app = state.app.write().await;
-                app.execute(&block)
+                let hash = app.execute(&block);
+                let fills = app.take_pending_fills();
+                (hash, fills)
             };
             let exec_time = exec_start.elapsed();
+
+            // Emit user events for fills
+            for fill in &fills {
+                let side = match fill.side {
+                    hyperlicked::app::Side::Bid => "buy",
+                    hyperlicked::app::Side::Ask => "sell",
+                };
+
+                // Get fees from config (simplified)
+                let maker_fee = (fill.price * fill.size / 100_000_000) * 2 / 10000; // 0.02%
+                let taker_fee = (fill.price * fill.size / 100_000_000) * 5 / 10000; // 0.05%
+
+                state.users.notify_fill(
+                    &fill.maker,
+                    &fill.taker,
+                    &fill.symbol,
+                    &fill.maker_order_id,
+                    side,
+                    fill.price,
+                    fill.size,
+                    maker_fee,
+                    taker_fee,
+                    block.timestamp,
+                ).await;
+
+                // Also broadcast public trade event
+                WebSocketHandler::broadcast_trade(
+                    &state,
+                    &fill.symbol,
+                    fill.price,
+                    fill.size,
+                    side,
+                    block.timestamp,
+                );
+            }
 
             // Broadcast block committed event
             WebSocketHandler::broadcast_block(

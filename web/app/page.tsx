@@ -7,18 +7,14 @@ import { Chart } from '@/components/trading/Chart'
 import { TradePanel } from '@/components/trading/TradePanel'
 import { BottomTabs } from '@/components/trading/BottomTabs'
 import { useWebSocket } from '@/lib/useWebSocket'
-import { useUserData } from '@/lib/useUserData'
 import { useTradingStore } from '@/lib/store'
 
 export default function TradingPage() {
   const [isConnected, setIsConnected] = useState(false)
   const orderbook = useTradingStore((state) => state.orderbook)
 
-  // Connect to WebSocket for real-time updates
+  // Connect to WebSocket for real-time updates (also handles user data)
   const ws = useWebSocket()
-
-  // Fetch user data (orders, positions) when wallet is connected
-  useUserData()
 
   // Check connection based on receiving orderbook data
   useEffect(() => {

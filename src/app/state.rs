@@ -30,6 +30,8 @@ pub struct AppState {
     mark_prices: HashMap<Symbol, Price>,
     /// Current timestamp
     timestamp: u64,
+    /// Fills from the last block execution (for event emission)
+    pending_fills: Vec<Fill>,
 }
 
 impl AppState {
@@ -41,6 +43,7 @@ impl AppState {
             configs: HashMap::new(),
             mark_prices: HashMap::new(),
             timestamp: 0,
+            pending_fills: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -214,6 +217,21 @@ impl AppState {
         }
         orders
     }
+
+    /// Take pending fills (clears the list)
+    pub fn take_pending_fills(&mut self) -> Vec<Fill> {
+        std::mem::take(&mut self.pending_fills)
+    }
+
+    /// Get account for position updates
+    pub fn accounts(&self) -> &AccountManager {
+        &self.accounts
+    }
+
+    /// Get market config
+    pub fn market_config(&self, symbol: &str) -> Option<&MarketConfig> {
+        self.configs.get(symbol)
+    }
 }
 
 impl Default for AppState {
@@ -233,13 +251,22 @@ impl AppHook for AppState {
     fn execute(&mut self, block: &Block) -> Hash {
         self.timestamp = block.timestamp;
 
+        // Clear pending fills from previous block
+        self.pending_fills.clear();
+
         // Get transactions for this block from mempool
         let txs = self.mempool.prepare_block(1000);
 
         // Execute each transaction
         for tx in txs {
-            if let Err(e) = self.execute_tx(tx) {
-                tracing::warn!(error = %e, "Transaction failed");
+            match self.execute_tx(tx) {
+                Ok(fills) => {
+                    // Collect fills for event emission
+                    self.pending_fills.extend(fills);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Transaction failed");
+                }
             }
         }
 
