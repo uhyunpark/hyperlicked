@@ -43,6 +43,7 @@ impl EIP712Domain {
         encoded.extend_from_slice(name_hash.as_slice());
         encoded.extend_from_slice(version_hash.as_slice());
         encoded.extend_from_slice(&U256::from(self.chain_id).to_be_bytes::<32>());
+        encoded.extend_from_slice(&[0u8; 12]); // address padding (32 bytes total)
         encoded.extend_from_slice(self.verifying_contract.as_slice());
 
         keccak256(&encoded)

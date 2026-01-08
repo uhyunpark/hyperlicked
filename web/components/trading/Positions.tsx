@@ -1,6 +1,7 @@
 'use client'
 
 import { useTradingStore } from '@/lib/store'
+import { toast } from '@/components/ui/Toast'
 
 export function Positions() {
   const { positions } = useTradingStore()
@@ -8,7 +9,7 @@ export function Positions() {
   const handleClose = (symbol: string, size: number) => {
     console.log('Closing position:', symbol, size)
     // TODO: Submit market order to close
-    alert(`Closing ${Math.abs(size).toFixed(4)} ${symbol}`)
+    toast.info('Closing Position', `Closing ${Math.abs(size).toFixed(4)} ${symbol}`)
   }
 
   return (

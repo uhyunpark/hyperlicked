@@ -98,9 +98,9 @@ input[type="range"] {
 }
 
 input[type="range"]::-webkit-slider-track {
-  background: var(--bg-tertiary);
-  height: 4px;
-  border-radius: 2px;
+  background: #374151;
+  height: 6px;
+  border-radius: 3px;
 }
 
 input[type="range"]::-webkit-slider-thumb {
@@ -114,9 +114,9 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 input[type="range"]::-moz-range-track {
-  background: var(--bg-tertiary);
-  height: 4px;
-  border-radius: 2px;
+  background: #374151;
+  height: 6px;
+  border-radius: 3px;
 }
 
 input[type="range"]::-moz-range-thumb {
@@ -125,4 +125,20 @@ input[type="range"]::-moz-range-thumb {
   width: 16px;
   border-radius: 50%;
   border: none;
+}
+
+/* Toast animation */
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
 }

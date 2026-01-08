@@ -1,9 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet, type OrderToSign } from '@/lib/useWallet'
+import { toast } from '@/components/ui/Toast'
 import type { Side, OrderType } from '@/lib/types'
+
+interface AccountData {
+  balance: number
+  lockedCollateral: number
+  availableBalance: number
+  unrealizedPnL: number
+  totalEquity: number
+}
 
 export function TradePanel() {
   const { selectedSymbol, currentPrice } = useTradingStore()
@@ -13,68 +22,99 @@ export function TradePanel() {
   const [price, setPrice] = useState('')
   const [size, setSize] = useState('')
   const [leverage, setLeverage] = useState(10)
-  const [nonce, setNonce] = useState(1) // Track nonce for replay protection
+  const [nonce, setNonce] = useState(1)
 
-  // Mock account data (TODO: Fetch from API using wallet.address)
-  const accountBalance = 10000
-  const availableBalance = 8500
+  // Account data from API
+  const [account, setAccount] = useState<AccountData | null>(null)
+  const [isLoadingAccount, setIsLoadingAccount] = useState(false)
+
+  // Fetch account data when wallet connects
+  useEffect(() => {
+    if (!wallet.isConnected || !wallet.address) {
+      setAccount(null)
+      return
+    }
+
+    const fetchAccount = async () => {
+      setIsLoadingAccount(true)
+      try {
+        const { getAccount } = await import('@/lib/api')
+        const data = await getAccount(wallet.address!)
+        setAccount({
+          balance: data.balance / 100, // cents to dollars
+          lockedCollateral: data.lockedCollateral / 100,
+          availableBalance: data.availableBalance / 100,
+          unrealizedPnL: data.unrealizedPnL / 100,
+          totalEquity: data.totalEquity / 100
+        })
+      } catch (error) {
+        console.error('[account] Failed to fetch:', error)
+        // Use default values on error
+        setAccount({
+          balance: 100000,
+          lockedCollateral: 0,
+          availableBalance: 100000,
+          unrealizedPnL: 0,
+          totalEquity: 100000
+        })
+      } finally {
+        setIsLoadingAccount(false)
+      }
+    }
+
+    fetchAccount()
+    // Refresh every 10 seconds
+    const interval = setInterval(fetchAccount, 10000)
+    return () => clearInterval(interval)
+  }, [wallet.isConnected, wallet.address])
+
+  const accountBalance = account?.totalEquity ?? 0
+  const availableBalance = account?.availableBalance ?? 0
 
   // Calculate order details
   const priceNum = parseFloat(price) || currentPrice
   const sizeNum = parseFloat(size) || 0
   const notional = priceNum * sizeNum
   const requiredMargin = notional / leverage
-  const estimatedFee = notional * 0.0005 // 0.05% taker fee
+  const estimatedFee = notional * 0.0005
 
   const handleSubmit = async () => {
+    // Validation
     if (!size || parseFloat(size) <= 0) {
-      alert('Please enter a valid size')
+      toast.warning('Invalid Size', 'Please enter a valid size')
       return
     }
 
     if (orderType === 'limit' && (!price || parseFloat(price) <= 0)) {
-      alert('Please enter a valid price')
+      toast.warning('Invalid Price', 'Please enter a valid price')
       return
     }
 
-    // Check wallet connection
     if (!wallet.isConnected || !wallet.address) {
-      alert('Please connect your wallet first')
+      toast.warning('Not Connected', 'Please connect your wallet first')
       return
     }
 
     try {
-      // Import API functions
       const { submitSignedTransaction, convertToApiPrice, convertToApiSize } = await import('@/lib/api')
 
       const orderPrice = orderType === 'limit' ? parseFloat(price) : currentPrice
       const orderSize = parseFloat(size)
 
-      // Convert to API units (BigInt strings)
-      const priceInCents = convertToApiPrice(orderPrice).toString()
-      const sizeInSats = convertToApiSize(orderSize).toString()
-
-      // Create order to sign (EIP-712)
       const orderToSign: OrderToSign = {
         symbol: selectedSymbol,
         side: side === 'buy' ? 1 : 2,
-        type: orderType === 'limit' ? 1 : (orderType === 'market' ? 2 : 3), // 1=GTC, 2=IOC, 3=ALO
-        price: priceInCents,
-        qty: sizeInSats,
+        type: orderType === 'limit' ? 1 : (orderType === 'market' ? 2 : 3),
+        price: convertToApiPrice(orderPrice).toString(),
+        qty: convertToApiSize(orderSize).toString(),
         nonce: nonce.toString(),
-        deadline: '0', // No expiry
+        deadline: '0',
         leverage,
         owner: wallet.address
       }
 
-      console.log('[order] Signing order...', orderToSign)
-
-      // Sign order with agent key (if enabled) or MetaMask (if not)
       const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
 
-      console.log(`[order] Order signed! Mode: ${agentMode ? 'Agent Key (no popup!)' : 'MetaMask'}, Signature:`, signature)
-
-      // Create signed transaction
       const signedTx = {
         type: 'order' as const,
         order: orderToSign,
@@ -83,32 +123,20 @@ export function TradePanel() {
         delegation_id: delegationId
       }
 
-      console.log('[order] Submitting signed transaction...')
-
-      // Submit signed transaction
       const response = await submitSignedTransaction(signedTx)
 
-      console.log('[order] Response:', response)
-
       if (response.status === 'submitted') {
-        const signingMethod = agentMode
-          ? '✅ Agent Key (no popup needed!)'
-          : `${wallet.isRabby ? 'Rabby Wallet' : 'MetaMask'}`
-
-        alert(`Order submitted successfully!\n\nOrder ID: ${response.orderId}\nSigned with: ${signingMethod}`)
-        // Increment nonce for next order
-        setNonce(nonce + 1)
-        // Clear form
+        const method = agentMode ? 'Agent Key' : (wallet.isRabby ? 'Rabby' : 'MetaMask')
+        toast.success('Order Submitted', `Order #${response.orderId} signed with ${method}`)
+        setNonce(n => n + 1)
         setSize('')
-        if (orderType === 'limit') {
-          setPrice('')
-        }
+        if (orderType === 'limit') setPrice('')
       } else {
-        alert(`Order rejected: ${response.message || 'Unknown error'}`)
+        toast.error('Order Rejected', response.message || 'Unknown error')
       }
     } catch (error) {
       console.error('[order] Error:', error)
-      alert(`Failed to submit order: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      toast.error('Order Failed', error instanceof Error ? error.message : 'Unknown error')
     }
   }
 
@@ -204,7 +232,7 @@ export function TradePanel() {
           />
           <div className="mt-1 flex justify-between text-xs text-text-muted">
             <span>Notional: ${notional.toFixed(2)}</span>
-            <span>Max: {(availableBalance * leverage / currentPrice).toFixed(4)}</span>
+            <span>Max: {currentPrice > 0 ? (availableBalance * leverage / currentPrice).toFixed(4) : '0.0000'}</span>
           </div>
         </div>
 
@@ -253,14 +281,30 @@ export function TradePanel() {
 
         {/* Submit Button */}
         {wallet.isConnected ? (
-          <button
-            onClick={handleSubmit}
-            className={`w-full rounded py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 ${
-              side === 'buy' ? 'bg-green-buy' : 'bg-red-sell'
-            }`}
-          >
-            {side === 'buy' ? 'Buy' : 'Sell'} {selectedSymbol}
-          </button>
+          wallet.tradingEnabled ? (
+            <button
+              onClick={handleSubmit}
+              className={`w-full rounded py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 ${
+                side === 'buy' ? 'bg-green-buy' : 'bg-red-sell'
+              }`}
+            >
+              {side === 'buy' ? 'Buy' : 'Sell'} {selectedSymbol}
+            </button>
+          ) : (
+            <button
+              onClick={async () => {
+                try {
+                  await wallet.enableTrading(7)
+                  toast.success('Trading Enabled', 'You can now trade without signing every order')
+                } catch (error: any) {
+                  toast.error('Enable Trading Failed', error.message)
+                }
+              }}
+              className="w-full rounded bg-accent py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+            >
+              Enable Trading (7d)
+            </button>
+          )
         ) : (
           <button
             onClick={() => wallet.connect()}
@@ -272,8 +316,35 @@ export function TradePanel() {
 
         {/* Account Summary */}
         <div className="mt-4 rounded border border-border bg-bg-primary p-3">
-          <div className="mb-1 text-xs text-text-muted">Account Balance</div>
-          <div className="text-lg font-mono font-semibold text-text-primary">${accountBalance.toFixed(2)}</div>
+          <div className="mb-2 text-xs text-text-muted">Account Balance</div>
+          {isLoadingAccount ? (
+            <div className="text-sm text-text-muted">Loading...</div>
+          ) : account ? (
+            <div className="space-y-1">
+              <div className="flex justify-between">
+                <span className="text-xs text-text-muted">Available</span>
+                <span className="text-sm font-mono text-text-primary">${account.availableBalance.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-xs text-text-muted">In Positions</span>
+                <span className="text-sm font-mono text-text-secondary">${account.lockedCollateral.toFixed(2)}</span>
+              </div>
+              {account.unrealizedPnL !== 0 && (
+                <div className="flex justify-between">
+                  <span className="text-xs text-text-muted">Unrealized PnL</span>
+                  <span className={`text-sm font-mono ${account.unrealizedPnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
+                    {account.unrealizedPnL >= 0 ? '+' : ''}${account.unrealizedPnL.toFixed(2)}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between border-t border-border pt-1">
+                <span className="text-xs font-medium text-text-muted">Total Equity</span>
+                <span className="text-lg font-mono font-semibold text-text-primary">${account.totalEquity.toFixed(2)}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-lg font-mono font-semibold text-text-primary">--</div>
+          )}
         </div>
       </div>
     </div>

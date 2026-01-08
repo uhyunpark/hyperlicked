@@ -1,6 +1,78 @@
 import { create } from 'zustand'
 import type { OrderbookData, Trade, Position, Order } from './types'
 
+// =============================================================================
+// Wallet Store (shared across all components)
+// =============================================================================
+
+interface WalletStoreState {
+  isConnected: boolean
+  address: string | null
+  isRabby: boolean
+  chainId: number | null
+  tradingEnabled: boolean
+  agentAddress: string | null
+  delegationExpiry: string | null
+  error: string | null
+  needsReconnect: boolean
+
+  // Actions
+  setConnected: (address: string, chainId: number, isRabby: boolean) => void
+  setDisconnected: () => void
+  setTradingEnabled: (enabled: boolean, agentAddress?: string | null, expiry?: string | null) => void
+  setError: (error: string | null, needsReconnect?: boolean) => void
+  setChainId: (chainId: number) => void
+}
+
+export const useWalletStore = create<WalletStoreState>((set) => ({
+  isConnected: false,
+  address: null,
+  isRabby: false,
+  chainId: null,
+  tradingEnabled: false,
+  agentAddress: null,
+  delegationExpiry: null,
+  error: null,
+  needsReconnect: false,
+
+  setConnected: (address, chainId, isRabby) => set({
+    isConnected: true,
+    address,
+    chainId,
+    isRabby,
+    error: null,
+    needsReconnect: false
+  }),
+
+  setDisconnected: () => set({
+    isConnected: false,
+    address: null,
+    chainId: null,
+    tradingEnabled: false,
+    agentAddress: null,
+    delegationExpiry: null,
+    error: null,
+    needsReconnect: false
+  }),
+
+  setTradingEnabled: (enabled, agentAddress = null, expiry = null) => set({
+    tradingEnabled: enabled,
+    agentAddress: enabled ? agentAddress : null,
+    delegationExpiry: enabled ? expiry : null
+  }),
+
+  setError: (error, needsReconnect = false) => set({
+    error,
+    needsReconnect
+  }),
+
+  setChainId: (chainId) => set({ chainId })
+}))
+
+// =============================================================================
+// Trading Store
+// =============================================================================
+
 interface TradingState {
   // Market data
   orderbook: OrderbookData

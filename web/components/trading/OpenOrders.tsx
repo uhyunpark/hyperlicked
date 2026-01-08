@@ -1,6 +1,7 @@
 'use client'
 
 import { useTradingStore } from '@/lib/store'
+import { toast } from '@/components/ui/Toast'
 
 export function OpenOrders() {
   const { openOrders } = useTradingStore()
@@ -8,7 +9,7 @@ export function OpenOrders() {
   const handleCancel = (orderId: string) => {
     console.log('Cancelling order:', orderId)
     // TODO: Submit cancel to backend
-    alert(`Cancelled order ${orderId}`)
+    toast.info('Order Cancelled', `Order ${orderId} has been cancelled`)
   }
 
   return (

@@ -3,6 +3,7 @@
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
 import { config } from '@/lib/config'
+import { toast } from '@/components/ui/Toast'
 
 export function Header() {
   const { selectedSymbol, currentPrice } = useTradingStore()
@@ -123,10 +124,10 @@ export function Header() {
                 <button
                   onClick={async () => {
                     try {
-                      await wallet.enableTrading(7) // 7 days
-                      alert('Trading enabled! You can now trade without signing every order.')
+                      await wallet.enableTrading(7)
+                      toast.success('Trading Enabled', 'You can now trade without signing every order')
                     } catch (error: any) {
-                      alert(`Failed to enable trading: ${error.message}`)
+                      toast.error('Enable Trading Failed', error.message)
                     }
                   }}
                   className="rounded border border-accent bg-accent/10 px-4 py-2 text-sm font-semibold text-accent transition-colors hover:bg-accent/20"

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { BrowserProvider, JsonRpcSigner, Wallet, HDNodeWallet, hashMessage } from 'ethers'
 import { config } from './config'
+import { useWalletStore } from './store'
 import {
   generateAgentKey,
   storeAgentKey,
@@ -88,16 +89,21 @@ export interface CancelToSign {
 }
 
 export function useWallet() {
-  const [wallet, setWallet] = useState<WalletState>({
+  // Shared trading state from Zustand store (syncs across all components)
+  const {
+    tradingEnabled,
+    agentAddress,
+    delegationExpiry,
+    setTradingEnabled
+  } = useWalletStore()
+
+  const [wallet, setWallet] = useState<Omit<WalletState, 'tradingEnabled' | 'agentAddress' | 'delegationExpiry'>>({
     isConnected: false,
     address: null,
     provider: null,
     signer: null,
     isRabby: false,
     chainId: null,
-    tradingEnabled: false,
-    agentAddress: null,
-    delegationExpiry: null,
     error: null,
     needsReconnect: false
   })
@@ -161,9 +167,6 @@ export function useWallet() {
         signer,
         isRabby,
         chainId,
-        tradingEnabled: false,
-        agentAddress: null,
-        delegationExpiry: null,
         error: null,
         needsReconnect: false
       })
@@ -181,6 +184,7 @@ export function useWallet() {
     // Also clear agent key on disconnect
     clearAgentKey()
     setAgentWallet(null)
+    setTradingEnabled(false) // Clear shared trading state
     setWallet({
       isConnected: false,
       address: null,
@@ -188,13 +192,10 @@ export function useWallet() {
       signer: null,
       isRabby: false,
       chainId: null,
-      tradingEnabled: false,
-      agentAddress: null,
-      delegationExpiry: null,
       error: reason || null,
       needsReconnect: !!reason
     })
-  }, [])
+  }, [setTradingEnabled])
 
   // Clear error
   const clearError = useCallback(() => {
@@ -386,16 +387,11 @@ export function useWallet() {
 
       if (agent) {
         setAgentWallet(agent)
-        setWallet(prev => ({
-          ...prev,
-          tradingEnabled: true,
-          agentAddress: agent.address,
-          delegationExpiry: getDelegationTimeRemaining()
-        }))
+        setTradingEnabled(true, agent.address, getDelegationTimeRemaining())
         console.log('[wallet] Loaded existing agent key:', agent.address)
       }
     }
-  }, [wallet.address])
+  }, [wallet.address, setTradingEnabled])
 
   // Enable trading: create agent key and sign delegation
   const enableTrading = useCallback(async (durationDays: number = 7): Promise<void> => {
@@ -457,32 +453,22 @@ export function useWallet() {
 
       // Update state
       setAgentWallet(agent)
-      setWallet(prev => ({
-        ...prev,
-        tradingEnabled: true,
-        agentAddress: agent.address,
-        delegationExpiry: getDelegationTimeRemaining()
-      }))
+      setTradingEnabled(true, agent.address, getDelegationTimeRemaining())
 
       console.log('[wallet] Trading enabled! Agent key stored and delegation registered.')
     } catch (error: any) {
       console.error('[wallet] Enable trading failed:', error)
       throw error
     }
-  }, [wallet.signer, wallet.address, setAgentWallet, setWallet])
+  }, [wallet.signer, wallet.address, setTradingEnabled])
 
   // Disable trading: clear agent key
   const disableTrading = useCallback(() => {
     clearAgentKey()
     setAgentWallet(null)
-    setWallet(prev => ({
-      ...prev,
-      tradingEnabled: false,
-      agentAddress: null,
-      delegationExpiry: null
-    }))
+    setTradingEnabled(false)
     console.log('[wallet] Trading disabled')
-  }, [])
+  }, [setTradingEnabled])
 
   // Sign order with agent key (if enabled) or MetaMask (if not)
   const signOrderSmart = useCallback(async (order: OrderToSign): Promise<{ signature: string; agentMode: boolean; delegationId?: string }> => {
@@ -491,13 +477,13 @@ export function useWallet() {
 
     // Debug: Log current state
     console.log('[wallet] signOrderSmart called:', {
-      tradingEnabled: wallet.tradingEnabled,
+      tradingEnabled,
       agentWalletExists: !!currentAgentWallet,
       agentAddress: currentAgentWallet?.address
     })
 
     // If trading enabled, use agent key
-    if (wallet.tradingEnabled && currentAgentWallet) {
+    if (tradingEnabled && currentAgentWallet) {
       console.log('[wallet] Signing order with agent key (no MetaMask popup!)')
 
       const orderMessage = JSON.stringify(order)
@@ -519,7 +505,7 @@ export function useWallet() {
       signature,
       agentMode: false
     }
-  }, [wallet.tradingEnabled, signOrder])
+  }, [tradingEnabled, signOrder])
 
   // Sign cancel order using EIP-712 (MetaMask only, no agent key)
   const signCancel = useCallback(async (cancel: CancelToSign): Promise<string> => {
@@ -551,7 +537,7 @@ export function useWallet() {
     const currentAgentWallet = agentWalletRef.current
 
     // If trading enabled, use agent key
-    if (wallet.tradingEnabled && currentAgentWallet) {
+    if (tradingEnabled && currentAgentWallet) {
       console.log('[wallet] Signing cancel with agent key (no MetaMask popup!)')
 
       const cancelMessage = JSON.stringify(cancel)
@@ -573,10 +559,15 @@ export function useWallet() {
       signature,
       agentMode: false
     }
-  }, [wallet.tradingEnabled, signCancel])
+  }, [tradingEnabled, signCancel])
 
   return {
     ...wallet,
+    // Trading state from shared store (syncs across components)
+    tradingEnabled,
+    agentAddress,
+    delegationExpiry,
+    // Methods
     connect,
     disconnect,
     signOrder,
