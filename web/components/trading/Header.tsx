@@ -1,13 +1,42 @@
 'use client'
 
+import { useState } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
 import { config } from '@/lib/config'
 import { toast } from '@/components/ui/Toast'
 
+interface NavTabProps {
+  label: string
+  active?: boolean
+  disabled?: boolean
+}
+
+function NavTab({ label, active, disabled }: NavTabProps) {
+  return (
+    <button
+      disabled={disabled}
+      className={`relative px-4 py-2 text-sm font-medium transition-colors ${
+        disabled
+          ? 'cursor-not-allowed text-text-muted/40'
+          : active
+            ? 'text-text-primary'
+            : 'text-text-muted hover:text-text-secondary'
+      }`}
+      title={disabled ? 'Coming Soon' : undefined}
+    >
+      {label}
+      {active && (
+        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent" />
+      )}
+    </button>
+  )
+}
+
 export function Header() {
-  const { selectedSymbol, currentPrice } = useTradingStore()
+  const { selectedSymbol, currentPrice, isConnected: wsConnected } = useTradingStore()
   const wallet = useWallet()
+  const [showWalletDropdown, setShowWalletDropdown] = useState(false)
 
   // Calculate 24h change (mock for now)
   const priceChange24h = 1234.56
@@ -60,50 +89,105 @@ export function Header() {
         </div>
       )}
 
-      <div className="flex items-center justify-between px-6 py-3">
-        {/* Left: Logo + Market Info */}
-        <div className="flex items-center gap-8">
-          <div className="flex items-center gap-3">
-            <div className="text-xl font-bold text-text-primary">HyperLicked</div>
-          </div>
-
-          <div className="h-8 w-px bg-border" />
-
-          {/* Market selector */}
-          <div className="flex items-center gap-6">
-            <div>
-              <div className="text-sm font-medium text-text-primary">{selectedSymbol}</div>
-              <div className="text-xs text-text-muted">Perpetual</div>
-            </div>
-
-            {/* Mark Price */}
-            <div>
-              <div className="text-xs text-text-muted">Mark Price</div>
-              <div className={`text-lg font-mono font-semibold ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
-                ${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </div>
-            </div>
-
-            {/* 24h Change */}
-            <div>
-              <div className="text-xs text-text-muted">24h Change</div>
-              <div className={`text-sm font-mono ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
-                {isPositive ? '+' : ''}{priceChangePercent.toFixed(2)}%
-                <span className="ml-1 text-xs">
-                  ({isPositive ? '+' : ''}${priceChange24h.toLocaleString()})
-                </span>
-              </div>
-            </div>
-
-            {/* 24h Volume */}
-            <div>
-              <div className="text-xs text-text-muted">24h Volume</div>
-              <div className="text-sm font-mono text-text-primary">$1.2B</div>
-            </div>
+      {/* Top Row: Logo + Navigation + Wallet */}
+      <div className="flex items-center justify-between border-b border-border px-6 py-2">
+        {/* Left: Logo + Online indicator */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="h-2 w-2 rounded-full bg-green-500" title={wsConnected ? 'Online' : 'Connecting...'} />
+            <div className="text-lg font-bold text-text-primary">HyperLicked</div>
           </div>
         </div>
 
-        {/* Right: Wallet */}
+        {/* Center: Navigation */}
+        <nav className="flex items-center">
+          <NavTab label="Trade" active />
+          <NavTab label="Vaults" disabled />
+          <NavTab label="Portfolio" disabled />
+          <NavTab label="Staking" disabled />
+        </nav>
+
+        {/* Right: Wallet Address Dropdown */}
+        <div className="relative">
+          {wallet.isConnected && wallet.address ? (
+            <>
+              <button
+                onClick={() => setShowWalletDropdown(!showWalletDropdown)}
+                className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-mono font-medium text-white transition-opacity hover:opacity-90"
+              >
+                {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {showWalletDropdown && (
+                <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border bg-bg-primary shadow-lg">
+                  <div className="border-b border-border px-4 py-2">
+                    <div className="text-xs text-text-muted">Connected</div>
+                    <div className="font-mono text-sm text-text-primary">
+                      {wallet.address.slice(0, 8)}...{wallet.address.slice(-6)}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      wallet.disconnect()
+                      setShowWalletDropdown(false)
+                    }}
+                    className="w-full px-4 py-2 text-left text-sm text-red-sell transition-colors hover:bg-red-sell/10"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <button
+              onClick={() => wallet.connect()}
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+            >
+              Connect Wallet
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Second Row: Market Info + Wallet Actions */}
+      <div className="flex items-center justify-between px-6 py-2">
+        {/* Left: Market Info */}
+        <div className="flex items-center gap-6">
+          {/* Market selector */}
+          <div>
+            <div className="text-sm font-medium text-text-primary">{selectedSymbol}</div>
+            <div className="text-xs text-text-muted">Perpetual</div>
+          </div>
+
+          {/* Mark Price */}
+          <div>
+            <div className="text-xs text-text-muted">Mark Price</div>
+            <div className={`text-lg font-mono font-semibold ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
+              ${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+          </div>
+
+          {/* 24h Change */}
+          <div>
+            <div className="text-xs text-text-muted">24h Change</div>
+            <div className={`text-sm font-mono ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
+              {isPositive ? '+' : ''}{priceChangePercent.toFixed(2)}%
+              <span className="ml-1 text-xs">
+                ({isPositive ? '+' : ''}${priceChange24h.toLocaleString()})
+              </span>
+            </div>
+          </div>
+
+          {/* 24h Volume */}
+          <div>
+            <div className="text-xs text-text-muted">24h Volume</div>
+            <div className="text-sm font-mono text-text-primary">$1.2B</div>
+          </div>
+        </div>
+
+        {/* Right: Trading Status */}
         <div>
           {wallet.isConnected && wallet.address ? (
             <div className="flex items-center gap-3">
@@ -135,30 +219,13 @@ export function Header() {
                   Enable Trading (7d)
                 </button>
               )}
-
-              {/* Wallet indicator */}
-              <div className="flex items-center gap-2 rounded border border-border bg-bg-tertiary px-3 py-2">
-                {wallet.isRabby && (
-                  <div className="text-xs font-semibold text-accent">🐰 Rabby</div>
-                )}
-                <div className="text-sm font-mono text-text-primary">
-                  {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
-                </div>
-              </div>
-              {/* Disconnect button */}
-              <button
-                onClick={() => wallet.disconnect()}
-                className="rounded border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-muted transition-colors hover:bg-bg-tertiary/80 hover:text-red-sell"
-              >
-                Disconnect
-              </button>
             </div>
           ) : (
             <button
               onClick={() => wallet.connect()}
               className="rounded border border-accent bg-bg-tertiary px-4 py-2 text-sm font-medium text-accent transition-colors hover:bg-accent hover:text-white"
             >
-              Connect {wallet.isRabby ? 'Rabby' : 'Wallet'}
+              Connect Wallet
             </button>
           )}
         </div>

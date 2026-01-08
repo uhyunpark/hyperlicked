@@ -333,6 +333,30 @@ impl OrderBook {
         &self.symbol
     }
 
+    /// Get all orders for a specific trader
+    pub fn orders_by_trader(&self, trader: &str) -> Vec<&Order> {
+        let trader_lower = trader.to_lowercase();
+        let mut orders = Vec::new();
+
+        for order_list in self.bids.values() {
+            for order in order_list {
+                if order.trader.to_lowercase() == trader_lower {
+                    orders.push(order);
+                }
+            }
+        }
+
+        for order_list in self.asks.values() {
+            for order in order_list {
+                if order.trader.to_lowercase() == trader_lower {
+                    orders.push(order);
+                }
+            }
+        }
+
+        orders
+    }
+
     // --- Private helpers ---
 
     fn validate_order(&self, order: &Order, config: &MarketConfig) -> Result<(), OrderBookError> {

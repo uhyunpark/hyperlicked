@@ -228,18 +228,30 @@ pub struct AccountInfo {
 async fn get_account(
     State(state): State<ApiState>,
     Path(address): Path<String>,
-) -> Result<Json<AccountInfo>, StatusCode> {
+) -> Json<AccountInfo> {
     let app = state.shared.app.read().await;
-    let account = app.account(&address).ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(AccountInfo {
+    // Return zero balance if account doesn't exist (new user)
+    let account = match app.account(&address) {
+        Some(acc) => acc,
+        None => return Json(AccountInfo {
+            address: address.clone(),
+            balance: 0,
+            locked_collateral: 0,
+            available_balance: 0,
+            unrealized_pnl: 0,
+            total_equity: 0,
+        }),
+    };
+
+    Json(AccountInfo {
         address: account.address.clone(),
         balance: account.balance,
         locked_collateral: account.locked,
         available_balance: account.balance,
         unrealized_pnl: 0, // TODO: Calculate
         total_equity: account.balance + account.locked,
-    }))
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -261,9 +273,14 @@ pub struct PositionInfo {
 async fn get_positions(
     State(state): State<ApiState>,
     Path(address): Path<String>,
-) -> Result<Json<Vec<PositionInfo>>, StatusCode> {
+) -> Json<Vec<PositionInfo>> {
     let app = state.shared.app.read().await;
-    let account = app.account(&address).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Return empty array if account doesn't exist (new user)
+    let account = match app.account(&address) {
+        Some(acc) => acc,
+        None => return Json(vec![]),
+    };
 
     let positions: Vec<PositionInfo> = account
         .positions
@@ -284,12 +301,64 @@ async fn get_positions(
         })
         .collect();
 
-    Ok(Json(positions))
+    Json(positions)
 }
 
-async fn get_orders(Path(_address): Path<String>) -> Json<Vec<serde_json::Value>> {
-    // TODO: Implement order tracking
-    Json(vec![])
+#[derive(Debug, Serialize)]
+pub struct OrderInfo {
+    pub id: String,
+    pub symbol: String,
+    pub side: String,
+    #[serde(rename = "type")]
+    pub order_type: String,
+    pub price: i64,
+    pub size: i64,
+    pub filled: i64,
+    pub status: String,
+    pub timestamp: u64,
+}
+
+async fn get_orders(
+    State(state): State<ApiState>,
+    Path(address): Path<String>,
+) -> Json<Vec<OrderInfo>> {
+    let app = state.shared.app.read().await;
+    let orders = app.orders_by_address(&address);
+
+    let order_infos: Vec<OrderInfo> = orders
+        .iter()
+        .map(|o| {
+            let side = match o.side {
+                crate::app::Side::Bid => "buy",
+                crate::app::Side::Ask => "sell",
+            };
+            let order_type = match o.order_type {
+                crate::app::OrderType::Gtc => "limit",
+                crate::app::OrderType::Ioc => "market",
+                crate::app::OrderType::Alo => "limit",
+            };
+            let filled = o.original_size - o.size;
+            let status = if filled > 0 && o.size > 0 {
+                "partial"
+            } else {
+                "open"
+            };
+
+            OrderInfo {
+                id: o.id.clone(),
+                symbol: o.symbol.clone(),
+                side: side.to_string(),
+                order_type: order_type.to_string(),
+                price: o.price,
+                size: o.original_size,
+                filled,
+                status: status.to_string(),
+                timestamp: o.timestamp,
+            }
+        })
+        .collect();
+
+    Json(order_infos)
 }
 
 // =============================================================================

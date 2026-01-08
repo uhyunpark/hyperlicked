@@ -1,7 +1,10 @@
 'use client'
 
+import { useState } from 'react'
 import { useTradingStore } from '@/lib/store'
 import type { PriceLevel } from '@/lib/types'
+
+type OrderbookTab = 'orderbook' | 'trades'
 
 function OrderbookRow({
   level,
@@ -46,7 +49,46 @@ function OrderbookRow({
   )
 }
 
+// Trades panel component for the tab
+function TradesPanel() {
+  const { trades } = useTradingStore()
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Column headers */}
+      <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
+        <div>Price (USDT)</div>
+        <div>Size (BTC)</div>
+        <div>Time</div>
+      </div>
+
+      {/* Trades list */}
+      <div className="flex-1 overflow-y-auto">
+        {trades.map((trade) => {
+          const time = new Date(trade.timestamp)
+          const timeStr = time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          const isBuy = trade.side === 'buy'
+
+          return (
+            <div
+              key={trade.id}
+              className="flex justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary"
+            >
+              <div className={isBuy ? 'text-green-buy' : 'text-red-sell'}>
+                {trade.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <div className="text-text-primary">{trade.size.toFixed(4)}</div>
+              <div className="text-text-muted">{timeStr}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export function Orderbook() {
+  const [activeTab, setActiveTab] = useState<OrderbookTab>('orderbook')
   const { orderbook } = useTradingStore()
 
   // Calculate cumulative totals
@@ -78,56 +120,82 @@ export function Orderbook() {
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
-      {/* Header */}
-      <div className="border-b border-border px-3 py-2">
-        <h3 className="text-sm font-semibold text-text-primary">Order Book</h3>
+      {/* Tab Header */}
+      <div className="flex border-b border-border">
+        <button
+          onClick={() => setActiveTab('orderbook')}
+          className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === 'orderbook'
+              ? 'border-b-2 border-accent text-text-primary'
+              : 'text-text-muted hover:text-text-secondary'
+          }`}
+        >
+          Order Book
+        </button>
+        <button
+          onClick={() => setActiveTab('trades')}
+          className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+            activeTab === 'trades'
+              ? 'border-b-2 border-accent text-text-primary'
+              : 'text-text-muted hover:text-text-secondary'
+          }`}
+        >
+          Trades
+        </button>
       </div>
 
-      {/* Column headers */}
-      <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
-        <div>Price (USDT)</div>
-        <div>Size (BTC)</div>
-        <div>Total</div>
-      </div>
-
-      {/* Orderbook content */}
-      <div className="flex-1 overflow-y-auto">
-        {/* Asks (reversed - lowest at bottom) */}
-        <div className="flex flex-col-reverse">
-          {asksWithTotal.slice(0, 15).map((ask, i) => (
-            <OrderbookRow
-              key={`ask-${i}`}
-              level={ask}
-              side="ask"
-              maxSize={maxSize}
-              onClick={handlePriceClick}
-            />
-          ))}
-        </div>
-
-        {/* Spread indicator */}
-        <div className="border-y border-border bg-bg-tertiary px-3 py-1.5 text-center">
-          <div className="text-xs font-mono text-text-primary">
-            {bestAsk.toLocaleString()} ↔ {bestBid.toLocaleString()}
+      {/* Tab Content */}
+      {activeTab === 'trades' ? (
+        <TradesPanel />
+      ) : (
+        <>
+          {/* Column headers */}
+          <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
+            <div>Price (USDT)</div>
+            <div>Size (BTC)</div>
+            <div>Total</div>
           </div>
-          <div className="text-xs text-text-muted">
-            Spread: {spread.toFixed(2)} ({spreadPercent.toFixed(3)}%)
-          </div>
-        </div>
 
-        {/* Bids */}
-        <div>
-          {bidsWithTotal.slice(0, 15).map((bid, i) => (
-            <OrderbookRow
-              key={`bid-${i}`}
-              level={bid}
-              side="bid"
-              maxSize={maxSize}
-              onClick={handlePriceClick}
-            />
-          ))}
-        </div>
-      </div>
+          {/* Orderbook content */}
+          <div className="flex-1 overflow-y-auto">
+            {/* Asks (reversed - lowest at bottom) */}
+            <div className="flex flex-col-reverse">
+              {asksWithTotal.slice(0, 15).map((ask, i) => (
+                <OrderbookRow
+                  key={`ask-${i}`}
+                  level={ask}
+                  side="ask"
+                  maxSize={maxSize}
+                  onClick={handlePriceClick}
+                />
+              ))}
+            </div>
+
+            {/* Spread indicator */}
+            <div className="border-y border-border bg-bg-tertiary px-3 py-1.5 text-center">
+              <div className="text-xs font-mono text-text-primary">
+                {bestAsk.toLocaleString()} ↔ {bestBid.toLocaleString()}
+              </div>
+              <div className="text-xs text-text-muted">
+                Spread: {spread.toFixed(2)} ({spreadPercent.toFixed(3)}%)
+              </div>
+            </div>
+
+            {/* Bids */}
+            <div>
+              {bidsWithTotal.slice(0, 15).map((bid, i) => (
+                <OrderbookRow
+                  key={`bid-${i}`}
+                  level={bid}
+                  side="bid"
+                  maxSize={maxSize}
+                  onClick={handlePriceClick}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

@@ -203,6 +203,17 @@ impl AppState {
     pub fn mempool_stats(&self) -> (usize, usize, usize) {
         self.mempool.bucket_counts()
     }
+
+    /// Get all open orders for a specific address across all orderbooks
+    pub fn orders_by_address(&self, address: &str) -> Vec<Order> {
+        let mut orders = Vec::new();
+        for book in self.orderbooks.values() {
+            for order in book.orders_by_trader(address) {
+                orders.push(order.clone());
+            }
+        }
+        orders
+    }
 }
 
 impl Default for AppState {

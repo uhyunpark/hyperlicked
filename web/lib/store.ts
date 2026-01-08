@@ -85,6 +85,7 @@ interface TradingState {
 
   // UI state
   selectedSymbol: string
+  isConnected: boolean // WebSocket connection status
 
   // Actions
   updateOrderbook: (orderbook: OrderbookData) => void
@@ -92,6 +93,7 @@ interface TradingState {
   setPositions: (positions: Position[]) => void
   setOpenOrders: (orders: Order[]) => void
   setSelectedSymbol: (symbol: string) => void
+  setWsConnected: (connected: boolean) => void
 }
 
 export const useTradingStore = create<TradingState>((set) => ({
@@ -107,6 +109,7 @@ export const useTradingStore = create<TradingState>((set) => ({
   positions: [],
   openOrders: [],
   selectedSymbol: 'BTC-USDT',
+  isConnected: false,
 
   // Actions
   updateOrderbook: (orderbook) => set({
@@ -120,5 +123,6 @@ export const useTradingStore = create<TradingState>((set) => ({
 
   setPositions: (positions) => set({ positions }),
   setOpenOrders: (orders) => set({ openOrders: orders }),
-  setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol })
+  setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol }),
+  setWsConnected: (connected) => set({ isConnected: connected })
 }))

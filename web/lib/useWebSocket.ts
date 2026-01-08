@@ -34,19 +34,15 @@ interface WSSubscribeRequest {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
-  const { updateOrderbook, addTrade } = useTradingStore()
+  const { updateOrderbook, addTrade, setWsConnected } = useTradingStore()
 
   useEffect(() => {
-    let isConnected = false
-
     function connect() {
-      console.log('[ws] Connecting to', WS_URL)
       const ws = new WebSocket(WS_URL)
       wsRef.current = ws
 
       ws.onopen = () => {
-        console.log('[ws] Connected!')
-        isConnected = true
+        setWsConnected(true)
 
         // Subscribe to orderbook and trades
         const subscribeMsg: WSSubscribeRequest = {
@@ -54,7 +50,6 @@ export function useWebSocket() {
           channels: ['orderbook:BTC-USDT', 'trades:BTC-USDT']
         }
         ws.send(JSON.stringify(subscribeMsg))
-        console.log('[ws] Subscribed to channels:', subscribeMsg.channels)
       }
 
       ws.onmessage = (event) => {
@@ -101,13 +96,11 @@ export function useWebSocket() {
       }
 
       ws.onclose = () => {
-        console.log('[ws] Disconnected')
-        isConnected = false
+        setWsConnected(false)
         wsRef.current = null
 
         // Attempt to reconnect after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('[ws] Attempting to reconnect...')
           connect()
         }, 3000)
       }
@@ -124,7 +117,7 @@ export function useWebSocket() {
         wsRef.current.close()
       }
     }
-  }, [updateOrderbook, addTrade])
+  }, [updateOrderbook, addTrade, setWsConnected])
 
   return wsRef.current
 }

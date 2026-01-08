@@ -12,6 +12,9 @@ import {
   hasValidAgentKey,
   clearAgentKey,
   getDelegationTimeRemaining,
+  setExplicitDisconnect,
+  wasExplicitlyDisconnected,
+  getAgentKeyWalletAddress,
   type AgentDelegation
 } from './agentKey'
 
@@ -89,17 +92,25 @@ export interface CancelToSign {
 }
 
 export function useWallet() {
-  // Shared trading state from Zustand store (syncs across all components)
+  // Shared state from Zustand store (syncs across all components)
   const {
+    isConnected,
+    address,
     tradingEnabled,
     agentAddress,
     delegationExpiry,
     setTradingEnabled
   } = useWalletStore()
 
-  const [wallet, setWallet] = useState<Omit<WalletState, 'tradingEnabled' | 'agentAddress' | 'delegationExpiry'>>({
-    isConnected: false,
-    address: null,
+  // Local state for non-serializable objects (provider, signer)
+  const [wallet, setWallet] = useState<{
+    provider: BrowserProvider | null
+    signer: JsonRpcSigner | null
+    isRabby: boolean
+    chainId: number | null
+    error: string | null
+    needsReconnect: boolean
+  }>({
     provider: null,
     signer: null,
     isRabby: false,
@@ -112,6 +123,9 @@ export function useWallet() {
 
   // CRITICAL FIX: Use ref to avoid stale closure in signOrderSmart
   const agentWalletRef = useRef<Wallet | HDNodeWallet | null>(null)
+
+  // Track if we've attempted auto-connect this session (prevents race condition)
+  const hasAutoConnectAttempted = useRef(false)
 
   // Sync ref with state
   useEffect(() => {
@@ -142,7 +156,9 @@ export function useWallet() {
         throw new Error('No Ethereum wallet detected. Please install Rabby Wallet or MetaMask.')
       }
 
-      console.log('[wallet] Requesting account access...')
+      // Clear explicit disconnect flag since user is intentionally connecting
+      setExplicitDisconnect(false)
+
 
       // Request account access
       const accounts = await ethereum.request({ method: 'eth_requestAccounts' })
@@ -153,16 +169,14 @@ export function useWallet() {
       // Create ethers provider and signer
       const provider = new BrowserProvider(ethereum)
       const signer = await provider.getSigner()
-      const address = await signer.getAddress()
+      const connectedAddress = await signer.getAddress()
       const network = await provider.getNetwork()
       const chainId = Number(network.chainId)
 
       const isRabby = detectRabby()
-      console.log(`[wallet] Connected! Address: ${address}, Wallet: ${isRabby ? 'Rabby' : 'MetaMask/Other'}, Chain ID: ${chainId}`)
 
+      // Update local state (provider, signer, etc - non-serializable)
       setWallet({
-        isConnected: true,
-        address,
         provider,
         signer,
         isRabby,
@@ -171,7 +185,10 @@ export function useWallet() {
         needsReconnect: false
       })
 
-      return { address, isRabby, chainId }
+      // Sync to Zustand store (isConnected, address - serializable, shared)
+      useWalletStore.getState().setConnected(connectedAddress, chainId, isRabby)
+
+      return { address: connectedAddress, isRabby, chainId }
     } catch (error: any) {
       console.error('[wallet] Connection failed:', error)
       throw error
@@ -180,14 +197,20 @@ export function useWallet() {
 
   // Disconnect wallet
   const disconnect = useCallback((reason?: string) => {
-    console.log('[wallet] Disconnected', reason ? `(${reason})` : '')
-    // Also clear agent key on disconnect
-    clearAgentKey()
+
+    // Mark explicit disconnect so we don't auto-connect on page load
+    // Only set if this is user-initiated (no error reason)
+    if (!reason) {
+      setExplicitDisconnect(true)
+    }
+
+    // DON'T clear agent key - keep it for reconnection
+    // Just clear the in-memory wallet reference
     setAgentWallet(null)
-    setTradingEnabled(false) // Clear shared trading state
+    setTradingEnabled(false) // Clear shared trading state (will be restored on reconnect)
+
+    // Clear local state (provider, signer, etc)
     setWallet({
-      isConnected: false,
-      address: null,
       provider: null,
       signer: null,
       isRabby: false,
@@ -195,6 +218,9 @@ export function useWallet() {
       error: reason || null,
       needsReconnect: !!reason
     })
+
+    // Sync to Zustand store (isConnected, address)
+    useWalletStore.getState().setDisconnected()
   }, [setTradingEnabled])
 
   // Clear error
@@ -209,7 +235,6 @@ export function useWallet() {
     }
 
     try {
-      console.log('[wallet] Signing order with EIP-712...', order)
 
       // Sign typed data (EIP-712)
       const signature = await wallet.signer.signTypedData(
@@ -218,7 +243,6 @@ export function useWallet() {
         order
       )
 
-      console.log('[wallet] Order signed successfully!')
       return signature
     } catch (error: any) {
       console.error('[wallet] Signing failed:', error)
@@ -239,11 +263,9 @@ export function useWallet() {
         params: [{ chainId: `0x${targetChainId.toString(16)}` }]
       })
 
-      console.log(`[wallet] Switched to chain ${targetChainId}`)
     } catch (error: any) {
       // Chain doesn't exist, add it
       if (error.code === 4902) {
-        console.log('[wallet] Network not found, adding...')
         await addNetwork(targetChainId)
       } else {
         throw error
@@ -274,7 +296,6 @@ export function useWallet() {
         }]
       })
 
-      console.log(`[wallet] Added network ${chainId} (${config.network.chainName}) with RPC ${config.network.rpcUrl}`)
     } catch (error: any) {
       console.error('[wallet] Failed to add network:', error)
       throw error
@@ -284,10 +305,10 @@ export function useWallet() {
   // Track previous address to detect actual changes
   const prevAddressRef = useRef<string | null>(null)
 
-  // Sync prev address ref
+  // Sync prev address ref (use address from store)
   useEffect(() => {
-    prevAddressRef.current = wallet.address
-  }, [wallet.address])
+    prevAddressRef.current = address
+  }, [address])
 
   // Listen for account and chain changes
   useEffect(() => {
@@ -297,7 +318,6 @@ export function useWallet() {
     if (!ethereum) return
 
     const handleAccountsChanged = (accounts: string[]) => {
-      console.log('[wallet] Accounts changed:', accounts)
 
       if (accounts.length === 0) {
         // User disconnected wallet
@@ -310,43 +330,41 @@ export function useWallet() {
 
       // Only disconnect if address actually changed (not just reconnecting)
       if (prevAddress && prevAddress !== newAddress) {
-        console.log('[wallet] Address changed from', prevAddress, 'to', newAddress)
         disconnect('Wallet address changed. Please reconnect.')
       } else if (!prevAddress) {
         // No previous address - this is initial connection or after page load
         // Let auto-connect handle it
-        console.log('[wallet] Initial connection detected')
       }
     }
 
     const handleChainChanged = (chainIdHex: string) => {
       const newChainId = parseInt(chainIdHex, 16)
-      console.log('[wallet] Chain changed to:', newChainId)
 
-      // Update chainId in state without full reload
-      setWallet(prev => {
-        if (!prev.isConnected) return prev
+      // Check if connected (from store)
+      const storeState = useWalletStore.getState()
+      if (!storeState.isConnected) return
 
-        // Check if this is the expected chain
-        const expectedChainId = config.network.chainId
-        if (newChainId !== expectedChainId) {
-          console.log(`[wallet] Wrong network. Expected ${expectedChainId}, got ${newChainId}`)
-          return {
-            ...prev,
-            chainId: newChainId,
-            error: `Wrong network. Please switch to ${config.network.chainName} (Chain ID: ${expectedChainId})`,
-            needsReconnect: false
-          }
-        }
-
+      // Check if this is the expected chain
+      const expectedChainId = config.network.chainId
+      if (newChainId !== expectedChainId) {
+        setWallet(prev => ({
+          ...prev,
+          chainId: newChainId,
+          error: `Wrong network. Please switch to ${config.network.chainName} (Chain ID: ${expectedChainId})`,
+          needsReconnect: false
+        }))
+      } else {
         // Correct chain - clear any network errors
-        return {
+        setWallet(prev => ({
           ...prev,
           chainId: newChainId,
           error: null,
           needsReconnect: false
-        }
-      })
+        }))
+      }
+
+      // Update chainId in store
+      useWalletStore.getState().setChainId(newChainId)
     }
 
     ethereum.on('accountsChanged', handleAccountsChanged)
@@ -358,66 +376,99 @@ export function useWallet() {
     }
   }, [disconnect])
 
-  // Auto-connect if previously connected
+  // Auto-connect if previously connected (unless user explicitly disconnected)
+  // NOTE: Empty dependency array - only runs ONCE on mount to prevent race conditions
   useEffect(() => {
+    // Only attempt auto-connect once per mount
+    if (hasAutoConnectAttempted.current) return
+    hasAutoConnectAttempted.current = true
+
     if (typeof window === 'undefined') return
 
     const ethereum = (window as any).ethereum
     if (!ethereum) return
 
-    // Check if already connected
+    // Skip auto-connect if user explicitly disconnected
+    if (wasExplicitlyDisconnected()) {
+      return
+    }
+
+    // Check if already connected - use eth_accounts (silent) not eth_requestAccounts (popup)
     ethereum.request({ method: 'eth_accounts' })
-      .then((accounts: string[]) => {
+      .then(async (accounts: string[]) => {
         if (accounts.length > 0) {
-          console.log('[wallet] Auto-connecting to previous session...')
-          connect()
+          try {
+            const provider = new BrowserProvider(ethereum)
+            const signer = await provider.getSigner()
+            const connectedAddress = await signer.getAddress()
+            const network = await provider.getNetwork()
+            const chainId = Number(network.chainId)
+            const isRabby = ethereum.isRabby === true
+
+
+            // Update local state (non-serializable)
+            setWallet({
+              provider,
+              signer,
+              isRabby,
+              chainId,
+              error: null,
+              needsReconnect: false
+            })
+
+            // Sync to Zustand store (serializable, shared)
+            useWalletStore.getState().setConnected(connectedAddress, chainId, isRabby)
+          } catch (error) {
+            console.error('[wallet] Auto-connect setup failed:', error)
+          }
         }
       })
       .catch((error: any) => {
         console.error('[wallet] Auto-connect failed:', error)
       })
-  }, [connect])
+  }, []) // Empty deps - runs once on mount
 
   // Check for existing agent key on mount and when wallet connects
   useEffect(() => {
-    if (!wallet.address) return
+    if (!address) return
 
-    if (hasValidAgentKey()) {
+    // Check if there's a valid agent key for THIS wallet address
+    const storedWalletAddress = getAgentKeyWalletAddress()
+
+    if (hasValidAgentKey() && storedWalletAddress?.toLowerCase() === address.toLowerCase()) {
       const agent = loadAgentKey()
 
       if (agent) {
         setAgentWallet(agent)
         setTradingEnabled(true, agent.address, getDelegationTimeRemaining())
-        console.log('[wallet] Loaded existing agent key:', agent.address)
       }
+    } else if (storedWalletAddress && storedWalletAddress.toLowerCase() !== address.toLowerCase()) {
+      // Different wallet connected - don't use the stored agent key
     }
-  }, [wallet.address, setTradingEnabled])
+  }, [address, setTradingEnabled])
 
   // Enable trading: create agent key and sign delegation
   const enableTrading = useCallback(async (durationDays: number = 7): Promise<void> => {
-    if (!wallet.signer || !wallet.address) {
+    if (!wallet.signer || !address) {
       throw new Error('Wallet not connected')
     }
 
     try {
-      console.log(`[wallet] Enabling trading for ${durationDays} days...`)
 
       // Generate new agent key
       const agent = generateAgentKey()
-      console.log('[wallet] Generated agent key:', agent.address)
 
       // Create delegation
       const expiration = BigInt(Math.floor(Date.now() / 1000) + durationDays * 86400)
       const nonce = BigInt(Date.now()) // Simple nonce (timestamp)
 
       const delegation: Omit<AgentDelegation, 'signature'> = {
-        wallet: wallet.address,
+        wallet: address,
         agent: agent.address,
         expiration: expiration.toString(),
         nonce: nonce.toString()
       }
 
-      console.log('[wallet] Requesting MetaMask signature for delegation...')
 
       // Sign delegation with MetaMask (ONE-TIME signature)
       const signature = await wallet.signer.signTypedData(
@@ -426,7 +477,6 @@ export function useWallet() {
         delegation
       )
 
-      console.log('[wallet] Delegation signed!')
 
       const fullDelegation: AgentDelegation = {
         ...delegation,
@@ -437,37 +487,33 @@ export function useWallet() {
       storeAgentKey(agent, fullDelegation)
 
       // Register delegation with backend
-      console.log('[wallet] Registering delegation with backend...')
       const { registerDelegation } = await import('@/lib/api')
 
-      const delegationId = `${wallet.address}-${nonce.toString()}`
+      const delegationId = `${address}-${nonce.toString()}`
       const response = await registerDelegation({
-        wallet: wallet.address,
+        wallet: address,
         agent: agent.address,
         expiration: expiration.toString(),
         nonce: nonce.toString(),
         signature
       })
 
-      console.log('[wallet] Backend registration successful:', response.delegationId)
 
       // Update state
       setAgentWallet(agent)
       setTradingEnabled(true, agent.address, getDelegationTimeRemaining())
 
-      console.log('[wallet] Trading enabled! Agent key stored and delegation registered.')
     } catch (error: any) {
       console.error('[wallet] Enable trading failed:', error)
       throw error
     }
-  }, [wallet.signer, wallet.address, setTradingEnabled])
+  }, [wallet.signer, address, setTradingEnabled])
 
   // Disable trading: clear agent key
   const disableTrading = useCallback(() => {
     clearAgentKey()
     setAgentWallet(null)
     setTradingEnabled(false)
-    console.log('[wallet] Trading disabled')
   }, [setTradingEnabled])
 
   // Sign order with agent key (if enabled) or MetaMask (if not)
@@ -475,16 +521,9 @@ export function useWallet() {
     // Use ref to get latest agent wallet (avoids stale closure)
     const currentAgentWallet = agentWalletRef.current
 
-    // Debug: Log current state
-    console.log('[wallet] signOrderSmart called:', {
-      tradingEnabled,
-      agentWalletExists: !!currentAgentWallet,
-      agentAddress: currentAgentWallet?.address
-    })
 
     // If trading enabled, use agent key
     if (tradingEnabled && currentAgentWallet) {
-      console.log('[wallet] Signing order with agent key (no MetaMask popup!)')
 
       const orderMessage = JSON.stringify(order)
       const signature = await currentAgentWallet.signMessage(orderMessage)
@@ -499,7 +538,6 @@ export function useWallet() {
     }
 
     // Otherwise, use MetaMask
-    console.log('[wallet] Signing order with MetaMask (popup required)')
     const signature = await signOrder(order)
     return {
       signature,
@@ -514,7 +552,6 @@ export function useWallet() {
     }
 
     try {
-      console.log('[wallet] Signing cancel order with EIP-712...', cancel)
 
       // Sign typed data (EIP-712)
       const signature = await wallet.signer.signTypedData(
@@ -523,7 +560,6 @@ export function useWallet() {
         cancel
       )
 
-      console.log('[wallet] Cancel order signed successfully!')
       return signature
     } catch (error: any) {
       console.error('[wallet] Cancel signing failed:', error)
@@ -538,7 +574,6 @@ export function useWallet() {
 
     // If trading enabled, use agent key
     if (tradingEnabled && currentAgentWallet) {
-      console.log('[wallet] Signing cancel with agent key (no MetaMask popup!)')
 
       const cancelMessage = JSON.stringify(cancel)
       const signature = await currentAgentWallet.signMessage(cancelMessage)
@@ -553,7 +588,6 @@ export function useWallet() {
     }
 
     // Otherwise, use MetaMask
-    console.log('[wallet] Signing cancel with MetaMask (popup required)')
     const signature = await signCancel(cancel)
     return {
       signature,
@@ -562,6 +596,10 @@ export function useWallet() {
   }, [tradingEnabled, signCancel])
 
   return {
+    // Connection state from Zustand store (shared across all components)
+    isConnected,
+    address,
+    // Local state (provider, signer - not serializable)
     ...wallet,
     // Trading state from shared store (syncs across components)
     tradingEnabled,

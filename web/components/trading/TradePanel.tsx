@@ -140,16 +140,34 @@ export function TradePanel() {
     }
   }
 
+  // Calculate size for percentage buttons
+  const calculateSizeForPercent = (percent: number) => {
+    if (currentPrice <= 0 || availableBalance <= 0) return 0
+    return (availableBalance * leverage * (percent / 100)) / currentPrice
+  }
+
+  const handleSizePercent = (percent: number) => {
+    const calculatedSize = calculateSizeForPercent(percent)
+    setSize(calculatedSize.toFixed(4))
+  }
+
+  // Calculate margin ratio
+  const marginRatio = account && account.lockedCollateral > 0
+    ? ((account.totalEquity / account.lockedCollateral) * 100)
+    : 0
+
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
       {/* Header */}
       <div className="border-b border-border px-4 py-2">
-        <h3 className="text-sm font-semibold text-text-primary">Trade</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-text-primary">Trade</h3>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
         {/* Order Type Tabs */}
-        <div className="mb-4 flex gap-1 rounded border border-border bg-bg-primary p-1">
+        <div className="mb-3 flex gap-1 rounded border border-border bg-bg-primary p-1">
           <button
             className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
               orderType === 'limit'
@@ -180,6 +198,14 @@ export function TradePanel() {
           >
             Stop
           </button>
+        </div>
+
+        {/* Available to Trade */}
+        <div className="mb-3 flex items-center justify-between rounded bg-bg-tertiary px-3 py-2">
+          <span className="text-xs text-text-muted">Available to Trade</span>
+          <span className="font-mono text-sm font-semibold text-text-primary">
+            ${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC
+          </span>
         </div>
 
         {/* Side Toggle */}
@@ -221,7 +247,7 @@ export function TradePanel() {
         )}
 
         {/* Size Input */}
-        <div className="mb-4">
+        <div className="mb-3">
           <label className="mb-1 block text-xs text-text-muted">Size (BTC)</label>
           <input
             type="number"
@@ -230,8 +256,20 @@ export function TradePanel() {
             placeholder="0.00"
             className="w-full rounded border border-border bg-bg-primary px-3 py-2 text-sm font-mono text-text-primary focus:border-accent focus:outline-none"
           />
+          {/* Size Percentage Buttons */}
+          <div className="mt-2 flex gap-1">
+            {[25, 50, 75, 100].map((percent) => (
+              <button
+                key={percent}
+                onClick={() => handleSizePercent(percent)}
+                className="flex-1 rounded border border-border bg-bg-tertiary py-1 text-xs text-text-muted transition-colors hover:border-accent hover:text-accent"
+              >
+                {percent}%
+              </button>
+            ))}
+          </div>
           <div className="mt-1 flex justify-between text-xs text-text-muted">
-            <span>Notional: ${notional.toFixed(2)}</span>
+            <span>Notional: ${notional.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             <span>Max: {currentPrice > 0 ? (availableBalance * leverage / currentPrice).toFixed(4) : '0.0000'}</span>
           </div>
         </div>
@@ -314,36 +352,59 @@ export function TradePanel() {
           </button>
         )}
 
-        {/* Account Summary */}
+        {/* Account Equity Section */}
         <div className="mt-4 rounded border border-border bg-bg-primary p-3">
-          <div className="mb-2 text-xs text-text-muted">Account Balance</div>
-          {isLoadingAccount ? (
-            <div className="text-sm text-text-muted">Loading...</div>
-          ) : account ? (
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <span className="text-xs text-text-muted">Available</span>
-                <span className="text-sm font-mono text-text-primary">${account.availableBalance.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-xs text-text-muted">In Positions</span>
-                <span className="text-sm font-mono text-text-secondary">${account.lockedCollateral.toFixed(2)}</span>
-              </div>
-              {account.unrealizedPnL !== 0 && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-text-muted">Unrealized PnL</span>
-                  <span className={`text-sm font-mono ${account.unrealizedPnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
-                    {account.unrealizedPnL >= 0 ? '+' : ''}${account.unrealizedPnL.toFixed(2)}
+          {/* Account Equity Header */}
+          <div className="mb-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-text-muted">Account Equity</span>
+            {isLoadingAccount ? (
+              <span className="text-sm text-text-muted">Loading...</span>
+            ) : (
+              <span className="font-mono text-lg font-semibold text-text-primary">
+                ${account?.totalEquity.toLocaleString('en-US', { minimumFractionDigits: 2 }) ?? '--'}
+              </span>
+            )}
+          </div>
+
+          {/* Perps Overview */}
+          {account && (
+            <div className="space-y-2 border-t border-border pt-3">
+              <div className="text-xs font-medium text-text-secondary">Perps Overview</div>
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Balance</span>
+                  <span className="font-mono text-text-primary">
+                    ${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
-              )}
-              <div className="flex justify-between border-t border-border pt-1">
-                <span className="text-xs font-medium text-text-muted">Total Equity</span>
-                <span className="text-lg font-mono font-semibold text-text-primary">${account.totalEquity.toFixed(2)}</span>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Positions</span>
+                  <span className="font-mono text-text-primary">
+                    ${account.lockedCollateral.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Unrealized PnL</span>
+                  <span className={`font-mono ${account.unrealizedPnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
+                    {account.unrealizedPnL >= 0 ? '+' : ''}${account.unrealizedPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Cross Margin Ratio</span>
+                  <span className="font-mono text-text-primary">
+                    {marginRatio > 0 ? marginRatio.toFixed(2) : '--'}%
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Maintenance Margin</span>
+                  <span className="font-mono text-text-secondary">--</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-muted">Cross Account Leverage</span>
+                  <span className="font-mono text-text-primary">{leverage}x</span>
+                </div>
               </div>
             </div>
-          ) : (
-            <div className="text-lg font-mono font-semibold text-text-primary">--</div>
           )}
         </div>
       </div>

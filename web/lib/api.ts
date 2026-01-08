@@ -119,6 +119,25 @@ export async function getPositions(address: string): Promise<ApiPosition[]> {
   return res.json()
 }
 
+export interface ApiOrder {
+  id: string
+  symbol: string
+  side: string        // "buy" or "sell"
+  type: string        // "limit", "market", etc.
+  price: number       // USDT cents
+  size: number        // Satoshis
+  filled: number      // Satoshis filled
+  status: string      // "open", "partial", "filled", "cancelled"
+  timestamp: number
+  owner: string
+}
+
+export async function getOrders(address: string): Promise<ApiOrder[]> {
+  const res = await fetch(`${API_BASE}/accounts/${address}/orders`)
+  if (!res.ok) throw new Error(`Failed to fetch orders: ${res.statusText}`)
+  return res.json()
+}
+
 // Cancel order with signed transaction (deprecated - use submitSignedTransaction instead)
 export async function cancelOrder(orderId: string, address: string): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/orders/cancel`, {

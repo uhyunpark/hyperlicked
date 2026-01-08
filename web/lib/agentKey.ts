@@ -9,6 +9,39 @@ import { Wallet, HDNodeWallet } from 'ethers'
 
 const AGENT_KEY_STORAGE = 'hyperlicked_agent_key'
 const AGENT_DELEGATION_STORAGE = 'hyperlicked_agent_delegation'
+const EXPLICIT_DISCONNECT_KEY = 'hyperlicked_explicit_disconnect'
+
+/**
+ * Mark that user explicitly disconnected (skip auto-connect)
+ */
+export function setExplicitDisconnect(value: boolean): void {
+  if (value) {
+    sessionStorage.setItem(EXPLICIT_DISCONNECT_KEY, 'true')
+  } else {
+    sessionStorage.removeItem(EXPLICIT_DISCONNECT_KEY)
+  }
+}
+
+/**
+ * Check if user explicitly disconnected (should skip auto-connect)
+ */
+export function wasExplicitlyDisconnected(): boolean {
+  return sessionStorage.getItem(EXPLICIT_DISCONNECT_KEY) === 'true'
+}
+
+/**
+ * Get the wallet address associated with stored agent key
+ */
+export function getAgentKeyWalletAddress(): string | null {
+  try {
+    const stored = localStorage.getItem(AGENT_KEY_STORAGE)
+    if (!stored) return null
+    const data: StoredAgentKey = JSON.parse(stored)
+    return data.delegation.wallet
+  } catch {
+    return null
+  }
+}
 
 export interface AgentDelegation {
   wallet: string // Main wallet address
@@ -47,7 +80,6 @@ export function storeAgentKey(
   }
 
   localStorage.setItem(AGENT_KEY_STORAGE, JSON.stringify(stored))
-  console.log('[agentKey] Stored agent key')
 }
 
 /**
@@ -65,14 +97,12 @@ export function loadAgentKey(): Wallet | null {
     const now = BigInt(Math.floor(Date.now() / 1000))
 
     if (now > expiration) {
-      console.log('[agentKey] Delegation expired, removing')
       clearAgentKey()
       return null
     }
 
     // Create wallet from private key
     const wallet = new Wallet(data.privateKey)
-    console.log('[agentKey] Loaded agent key:', wallet.address)
 
     return wallet
   } catch (error) {
@@ -120,7 +150,6 @@ export function hasValidAgentKey(): boolean {
  */
 export function clearAgentKey(): void {
   localStorage.removeItem(AGENT_KEY_STORAGE)
-  console.log('[agentKey] Cleared agent key')
 }
 
 /**
