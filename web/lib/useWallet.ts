@@ -159,9 +159,15 @@ export function useWallet() {
       // Clear explicit disconnect flag since user is intentionally connecting
       setExplicitDisconnect(false)
 
+      // Request permissions - this forces wallet to show account selection popup (EIP-2255)
+      // Unlike eth_requestAccounts which silently returns if already authorized
+      await ethereum.request({
+        method: 'wallet_requestPermissions',
+        params: [{ eth_accounts: {} }]
+      })
 
-      // Request account access
-      const accounts = await ethereum.request({ method: 'eth_requestAccounts' })
+      // Now get the accounts after permission is granted
+      const accounts = await ethereum.request({ method: 'eth_accounts' })
       if (!accounts || accounts.length === 0) {
         throw new Error('No accounts found')
       }
@@ -196,12 +202,25 @@ export function useWallet() {
   }, [detectRabby])
 
   // Disconnect wallet
-  const disconnect = useCallback((reason?: string) => {
+  const disconnect = useCallback(async (reason?: string) => {
 
     // Mark explicit disconnect so we don't auto-connect on page load
     // Only set if this is user-initiated (no error reason)
     if (!reason) {
       setExplicitDisconnect(true)
+    }
+
+    // Revoke wallet permissions so next connect shows popup (EIP-2255)
+    try {
+      const ethereum = (window as any).ethereum
+      if (ethereum) {
+        await ethereum.request({
+          method: 'wallet_revokePermissions',
+          params: [{ eth_accounts: {} }]
+        })
+      }
+    } catch (e) {
+      // Silent fail - not all wallets support this
     }
 
     // DON'T clear agent key - keep it for reconnection
@@ -443,17 +462,33 @@ export function useWallet() {
         setTradingEnabled(true, agent.address, getDelegationTimeRemaining())
       }
     } else if (storedWalletAddress && storedWalletAddress.toLowerCase() !== address.toLowerCase()) {
-      // Different wallet connected - don't use the stored agent key
+      // Different wallet connected - clear the old agent key to prevent stale state
+      clearAgentKey()
     }
   }, [address, setTradingEnabled])
 
   // Enable trading: create agent key and sign delegation
   const enableTrading = useCallback(async (durationDays: number = 7): Promise<void> => {
-    if (!wallet.signer || !address) {
+    // If no local signer but Zustand says connected, create signer on-demand
+    // This handles the case where a different component (e.g., Header) called connect()
+    // but this component's local signer state is still null
+    let signer = wallet.signer
+    if (!signer && isConnected) {
+      const ethereum = (window as any).ethereum
+      if (ethereum) {
+        const provider = new BrowserProvider(ethereum)
+        signer = await provider.getSigner()
+      }
+    }
+
+    if (!signer) {
       throw new Error('Wallet not connected')
     }
 
     try {
+      // IMPORTANT: Get address directly from signer to avoid race condition
+      // The `address` from Zustand store might be stale if user just switched wallets
+      const signerAddress = await signer.getAddress()
 
       // Generate new agent key
       const agent = generateAgentKey()
@@ -463,7 +498,7 @@ export function useWallet() {
       const nonce = BigInt(Date.now()) // Simple nonce (timestamp)
 
       const delegation: Omit<AgentDelegation, 'signature'> = {
-        wallet: address,
+        wallet: signerAddress,
         agent: agent.address,
         expiration: expiration.toString(),
         nonce: nonce.toString()
@@ -471,7 +506,7 @@ export function useWallet() {
 
 
       // Sign delegation with MetaMask (ONE-TIME signature)
-      const signature = await wallet.signer.signTypedData(
+      const signature = await signer.signTypedData(
         EIP712_DOMAIN,
         EIP712_DELEGATION_TYPES,
         delegation
@@ -489,9 +524,9 @@ export function useWallet() {
       // Register delegation with backend
       const { registerDelegation } = await import('@/lib/api')
 
-      const delegationId = `${address}-${nonce.toString()}`
+      const delegationId = `${signerAddress}-${nonce.toString()}`
       const response = await registerDelegation({
-        wallet: address,
+        wallet: signerAddress,
         agent: agent.address,
         expiration: expiration.toString(),
         nonce: nonce.toString(),
@@ -507,7 +542,7 @@ export function useWallet() {
       console.error('[wallet] Enable trading failed:', error)
       throw error
     }
-  }, [wallet.signer, address, setTradingEnabled])
+  }, [wallet.signer, isConnected, setTradingEnabled])
 
   // Disable trading: clear agent key
   const disableTrading = useCallback(() => {
