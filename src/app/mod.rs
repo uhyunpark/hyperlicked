@@ -28,7 +28,7 @@ pub mod state;
 pub use accounts::{Account, AccountManager, Position};
 pub use mempool::Mempool;
 pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
-pub use state::AppState;
+pub use state::{AppState, OrderUpdateInfo};
 
 use crate::types::{Price, Size};
 

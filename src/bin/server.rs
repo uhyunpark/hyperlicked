@@ -170,11 +170,12 @@ async fn run_consensus_loop(state: SharedState) {
 
             // Execute block (processes mempool transactions)
             let exec_start = std::time::Instant::now();
-            let (app_hash, fills) = {
+            let (app_hash, fills, order_updates) = {
                 let mut app = state.app.write().await;
                 let hash = app.execute(&block);
                 let fills = app.take_pending_fills();
-                (hash, fills)
+                let order_updates = app.take_pending_order_updates();
+                (hash, fills, order_updates)
             };
             let exec_time = exec_start.elapsed();
 
@@ -211,6 +212,19 @@ async fn run_consensus_loop(state: SharedState) {
                     side,
                     block.timestamp,
                 );
+            }
+
+            // Emit user events for order updates
+            for order_update in &order_updates {
+                state.users.notify_order_update(
+                    &order_update.trader,
+                    &order_update.order_id,
+                    &order_update.symbol,
+                    &order_update.status,
+                    order_update.filled,
+                    order_update.remaining,
+                    block.timestamp,
+                ).await;
             }
 
             // Broadcast block committed event

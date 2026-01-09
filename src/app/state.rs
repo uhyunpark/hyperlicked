@@ -16,6 +16,17 @@ use super::{
 use crate::consensus::AppHook;
 use crate::types::{Block, Hash, Price};
 
+/// Order update info for WebSocket event emission
+#[derive(Debug, Clone)]
+pub struct OrderUpdateInfo {
+    pub trader: String,
+    pub order_id: String,
+    pub symbol: String,
+    pub status: String,   // "open", "partial", "filled"
+    pub filled: i64,
+    pub remaining: i64,
+}
+
 /// Complete application state
 pub struct AppState {
     /// Orderbooks by symbol
@@ -32,6 +43,8 @@ pub struct AppState {
     timestamp: u64,
     /// Fills from the last block execution (for event emission)
     pending_fills: Vec<Fill>,
+    /// Order updates from the last block execution (for event emission)
+    pending_order_updates: Vec<OrderUpdateInfo>,
 }
 
 impl AppState {
@@ -44,6 +57,7 @@ impl AppState {
             mark_prices: HashMap::new(),
             timestamp: 0,
             pending_fills: Vec::new(),
+            pending_order_updates: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -124,7 +138,7 @@ impl AppState {
                 // Create order
                 let order_id = book.next_order_id();
                 let order = Order {
-                    id: order_id,
+                    id: order_id.clone(),
                     trader: trader.clone(),
                     symbol: symbol.clone(),
                     side,
@@ -137,6 +151,29 @@ impl AppState {
 
                 // Place order
                 let fills = book.place(order, config)?;
+
+                // Calculate filled amount for the taker's order
+                let filled: i64 = fills.iter().map(|f| f.size).sum();
+                let remaining = size - filled;
+
+                // Determine order status
+                let status = if remaining == 0 {
+                    "filled"
+                } else if filled > 0 {
+                    "partial"
+                } else {
+                    "open"
+                };
+
+                // Emit order update for the taker (order placer)
+                self.pending_order_updates.push(OrderUpdateInfo {
+                    trader: trader.clone(),
+                    order_id: order_id.clone(),
+                    symbol: symbol.clone(),
+                    status: status.to_string(),
+                    filled,
+                    remaining,
+                });
 
                 // Process fills
                 for fill in &fills {
@@ -223,6 +260,11 @@ impl AppState {
         std::mem::take(&mut self.pending_fills)
     }
 
+    /// Take pending order updates (clears the list)
+    pub fn take_pending_order_updates(&mut self) -> Vec<OrderUpdateInfo> {
+        std::mem::take(&mut self.pending_order_updates)
+    }
+
     /// Get account for position updates
     pub fn accounts(&self) -> &AccountManager {
         &self.accounts
@@ -251,8 +293,9 @@ impl AppHook for AppState {
     fn execute(&mut self, block: &Block) -> Hash {
         self.timestamp = block.timestamp;
 
-        // Clear pending fills from previous block
+        // Clear pending events from previous block
         self.pending_fills.clear();
+        self.pending_order_updates.clear();
 
         // Get transactions for this block from mempool
         let txs = self.mempool.prepare_block(1000);

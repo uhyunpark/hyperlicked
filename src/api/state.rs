@@ -181,6 +181,27 @@ impl UserRegistry {
         }).await;
     }
 
+    /// Send order update to a user
+    pub async fn notify_order_update(
+        &self,
+        address: &str,
+        order_id: &str,
+        symbol: &str,
+        status: &str,
+        filled: i64,
+        remaining: i64,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::OrderUpdate {
+            order_id: order_id.to_string(),
+            symbol: symbol.to_string(),
+            status: status.to_string(),
+            filled,
+            remaining,
+            timestamp,
+        }).await;
+    }
+
     /// Send position update to a user
     pub async fn notify_position_update(
         &self,
