@@ -82,6 +82,7 @@ export interface OrderToSign {
   deadline: string // BigInt as string (0 = no expiry)
   leverage: number
   owner: string // Address
+  reduce_only?: boolean // Only reduce existing position
 }
 
 export interface CancelToSign {

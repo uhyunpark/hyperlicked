@@ -85,11 +85,13 @@ export function useWebSocket() {
         .map(o => {
           const size = convertSize(o.size)
           const filled = convertSize(o.filled)
+          // Normalize order type - only 'limit' and 'market' are supported
+          const orderType: 'limit' | 'market' = o.type === 'market' ? 'market' : 'limit'
           return {
             id: o.id,
             symbol: o.symbol,
             side: o.side as 'buy' | 'sell',
-            type: (o.type || 'limit') as 'limit' | 'market' | 'stop',
+            type: orderType,
             price: convertPrice(o.price),
             size,
             filled,
@@ -165,8 +167,10 @@ export function useWebSocket() {
 
             case 'trade': {
               const update = data as WSTradeUpdate
+              // Generate unique ID: timestamp + price + size + random suffix
+              const uniqueId = `${update.timestamp}-${update.price}-${update.size}-${Math.random().toString(36).slice(2, 7)}`
               addTrade({
-                id: `${update.timestamp}`,
+                id: uniqueId,
                 symbol: update.symbol,
                 price: convertPrice(update.price),
                 size: convertSize(update.size),

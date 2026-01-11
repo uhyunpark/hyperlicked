@@ -1,8 +1,15 @@
 // Trading types matching backend structure
 
 export type Side = 'buy' | 'sell'
-export type OrderType = 'limit' | 'market' | 'stop'
-export type TimeInForce = 'GTC' | 'IOC' | 'ALO'
+export type OrderType = 'limit' | 'market'
+export type TimeInForce = 'gtc' | 'ioc' | 'alo'
+
+// TIF codes for API (matches backend: 1=GTC, 2=IOC, 3=ALO)
+export const TIF_CODES = {
+  gtc: 1,  // Good-til-Cancel: stays on book until filled/cancelled
+  ioc: 2,  // Immediate-or-Cancel: fill immediately, cancel unfilled
+  alo: 3,  // Add-Liquidity-Only (Post Only): rejected if would match
+} as const
 
 export interface PriceLevel {
   price: number

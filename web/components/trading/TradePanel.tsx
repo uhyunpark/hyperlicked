@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
-import type { Side, OrderType } from '@/lib/types'
+import type { Side, OrderType, TimeInForce } from '@/lib/types'
+import { TIF_CODES } from '@/lib/types'
 
 interface AccountData {
   balance: number
@@ -19,6 +20,8 @@ export function TradePanel() {
   const wallet = useWallet()
   const [side, setSide] = useState<Side>('buy')
   const [orderType, setOrderType] = useState<OrderType>('limit')
+  const [tif, setTif] = useState<TimeInForce>('gtc')
+  const [reduceOnly, setReduceOnly] = useState(false)
   const [price, setPrice] = useState('')
   const [size, setSize] = useState('')
   const [leverage, setLeverage] = useState(10)
@@ -98,19 +101,32 @@ export function TradePanel() {
     try {
       const { submitSignedTransaction, convertToApiPrice, convertToApiSize } = await import('@/lib/api')
 
-      const orderPrice = orderType === 'limit' ? parseFloat(price) : currentPrice
+      // For market orders, use sweep prices to ensure execution
+      // Buy: Use very high price to sweep all asks
+      // Sell: Use minimum price (1 cent) to sweep all bids
+      let orderPrice: number
+      if (orderType === 'market') {
+        orderPrice = side === 'buy' ? currentPrice * 2 : 0.01
+      } else {
+        orderPrice = parseFloat(price)
+      }
       const orderSize = parseFloat(size)
+
+      // For market orders, always use IOC (immediate-or-cancel)
+      // For limit orders, use the selected TIF
+      const tifCode = orderType === 'market' ? TIF_CODES.ioc : TIF_CODES[tif]
 
       const orderToSign: OrderToSign = {
         symbol: selectedSymbol,
         side: side === 'buy' ? 1 : 2,
-        type: orderType === 'limit' ? 1 : (orderType === 'market' ? 2 : 3),
+        type: tifCode,
         price: convertToApiPrice(orderPrice).toString(),
         qty: convertToApiSize(orderSize).toString(),
         nonce: nonce.toString(),
         deadline: '0',
         leverage,
-        owner: wallet.address
+        owner: wallet.address,
+        reduce_only: reduceOnly
       }
 
       const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
@@ -188,17 +204,59 @@ export function TradePanel() {
           >
             Market
           </button>
-          <button
-            className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-              orderType === 'stop'
-                ? 'bg-bg-secondary text-text-primary'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
-            onClick={() => setOrderType('stop')}
-          >
-            Stop
-          </button>
         </div>
+
+        {/* TIF Selector (Limit orders only) */}
+        {orderType === 'limit' && (
+          <div className="mb-3 flex gap-1 rounded border border-border bg-bg-primary p-1">
+            <button
+              className={`flex-1 rounded px-2 py-1 text-xs transition-colors ${
+                tif === 'gtc'
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-text-muted hover:text-text-secondary'
+              }`}
+              onClick={() => setTif('gtc')}
+              title="Good til Cancel - stays on book until filled or cancelled"
+            >
+              GTC
+            </button>
+            <button
+              className={`flex-1 rounded px-2 py-1 text-xs transition-colors ${
+                tif === 'ioc'
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-text-muted hover:text-text-secondary'
+              }`}
+              onClick={() => setTif('ioc')}
+              title="Immediate or Cancel - fill immediately, cancel unfilled portion"
+            >
+              IOC
+            </button>
+            <button
+              className={`flex-1 rounded px-2 py-1 text-xs transition-colors ${
+                tif === 'alo'
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-text-muted hover:text-text-secondary'
+              }`}
+              onClick={() => setTif('alo')}
+              title="Post Only - rejected if would match immediately (maker only)"
+            >
+              Post Only
+            </button>
+          </div>
+        )}
+
+        {/* Reduce Only Checkbox */}
+        <label className="mb-3 flex cursor-pointer items-center gap-2">
+          <input
+            type="checkbox"
+            checked={reduceOnly}
+            onChange={(e) => setReduceOnly(e.target.checked)}
+            className="h-4 w-4 rounded border-border accent-accent"
+          />
+          <span className="text-xs text-text-secondary" title="Only reduce existing position, never increase">
+            Reduce Only
+          </span>
+        </label>
 
         {/* Available to Trade */}
         <div className="mb-3 flex items-center justify-between rounded bg-bg-tertiary px-3 py-2">
