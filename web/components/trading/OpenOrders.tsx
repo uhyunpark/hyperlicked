@@ -1,15 +1,25 @@
 'use client'
 
-import { useTradingStore } from '@/lib/store'
+import { useTradingStore, useWalletStore } from '@/lib/store'
+import { cancelOrder } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 
 export function OpenOrders() {
   const { openOrders } = useTradingStore()
+  const { address } = useWalletStore()
 
-  const handleCancel = (orderId: string) => {
-    console.log('Cancelling order:', orderId)
-    // TODO: Submit cancel to backend
-    toast.info('Order Cancelled', `Order ${orderId} has been cancelled`)
+  const handleCancel = async (orderId: string) => {
+    if (!address) {
+      toast.error('Not Connected', 'Please connect your wallet first')
+      return
+    }
+    try {
+      await cancelOrder(orderId, address)
+      toast.success('Order Cancelled', `Order ${orderId} cancelled`)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      toast.error('Cancel Failed', message)
+    }
   }
 
   return (

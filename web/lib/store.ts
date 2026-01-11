@@ -117,9 +117,11 @@ export const useTradingStore = create<TradingState>((set) => ({
     currentPrice: orderbook.asks[0]?.price || orderbook.bids[0]?.price || 0
   }),
 
-  addTrade: (trade) => set((state) => ({
-    trades: [trade, ...state.trades].slice(0, 100) // Keep last 100 trades
-  })),
+  addTrade: (trade) => set((state) => {
+    // Deduplicate by ID
+    if (state.trades.some(t => t.id === trade.id)) return state
+    return { trades: [trade, ...state.trades].slice(0, 100) } // Keep last 100 trades
+  }),
 
   setPositions: (positions) => set({ positions }),
   setOpenOrders: (orders) => set({ openOrders: orders }),
