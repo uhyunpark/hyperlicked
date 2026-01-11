@@ -49,6 +49,7 @@ pub enum Transaction {
         price: Price,
         size: Size,
         order_type: OrderType,
+        reduce_only: bool,
     },
     /// Cancel an order
     CancelOrder {

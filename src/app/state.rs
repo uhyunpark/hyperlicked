@@ -119,14 +119,33 @@ impl AppState {
                 symbol,
                 side,
                 price,
-                size,
+                mut size,
                 order_type,
+                reduce_only,
             } => {
                 let config = self.configs.get(&symbol)
                     .ok_or(AppError::MarketNotFound)?;
 
                 let book = self.orderbooks.get_mut(&symbol)
                     .ok_or(AppError::MarketNotFound)?;
+
+                // Handle reduce_only validation
+                if reduce_only {
+                    let account = self.accounts.get_or_create(&trader);
+                    let pos = account.position(&symbol);
+
+                    // Long position (size > 0) can only reduce with sells (Ask)
+                    // Short position (size < 0) can only reduce with buys (Bid)
+                    let is_reducing = (pos.size > 0 && side == Side::Ask) ||
+                                     (pos.size < 0 && side == Side::Bid);
+
+                    if !is_reducing || pos.size == 0 {
+                        return Err(AppError::ReduceOnlyViolation);
+                    }
+
+                    // Clamp size to position size
+                    size = size.min(pos.size.abs());
+                }
 
                 // Check margin (simplified: require full notional)
                 let notional = (size * price) / 100_000_000;
@@ -146,6 +165,7 @@ impl AppState {
                     size,
                     original_size: size,
                     order_type,
+                    reduce_only,
                     timestamp: self.timestamp,
                 };
 
@@ -333,6 +353,8 @@ pub enum AppError {
     OrderNotFound,
     #[error("insufficient margin")]
     InsufficientMargin,
+    #[error("reduce-only order would increase position")]
+    ReduceOnlyViolation,
 }
 
 #[cfg(test)]
@@ -360,6 +382,7 @@ mod tests {
             price: 5_000_000, // $50,000
             size: 100_000_000, // 1 BTC
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }).unwrap();
 
         assert!(fills.is_empty()); // No counterparty
@@ -383,6 +406,7 @@ mod tests {
             price: 5_000_000,
             size: 100_000_000,
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }).unwrap();
 
         // Bob deposits and asks (should match)
@@ -398,6 +422,7 @@ mod tests {
             price: 4_900_000, // Below bid
             size: 50_000_000, // 0.5 BTC
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }).unwrap();
 
         assert_eq!(fills.len(), 1);

@@ -406,6 +406,7 @@ pub struct OrderDetails {
     pub deadline: String,   // BigInt as string
     pub leverage: u8,
     pub owner: String,      // Address
+    pub reduce_only: Option<bool>, // Only reduce existing position
 }
 
 /// Cancel details within SignedTransaction
@@ -478,6 +479,7 @@ async fn submit_order(
             price,
             size,
             order_type,
+            reduce_only: order.reduce_only.unwrap_or(false),
         };
 
         // Submit to mempool
@@ -677,6 +679,7 @@ async fn submit_order_legacy(
         price: req.price,
         size: req.size,
         order_type,
+        reduce_only: false,
     };
 
     let mut app = state.shared.app.write().await;

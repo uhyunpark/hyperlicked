@@ -43,6 +43,7 @@ pub struct Order {
     pub size: Size,           // Remaining size
     pub original_size: Size,  // Original size
     pub order_type: OrderType,
+    pub reduce_only: bool,    // Only reduce existing position
     pub timestamp: u64,
 }
 
@@ -442,6 +443,7 @@ mod tests {
             size,
             original_size: size,
             order_type: OrderType::Gtc,
+            reduce_only: false,
             timestamp: 0,
         }
     }

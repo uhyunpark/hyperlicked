@@ -122,6 +122,7 @@ fn test_order_matching() {
         price: 5_000_000, // $50,000 in cents
         size: 100_000_000, // 1 BTC in satoshis
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     // Bob places ask at $49,000 (should match)
@@ -132,6 +133,7 @@ fn test_order_matching() {
         price: 4_900_000,
         size: 100_000_000,
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     // Execute block to process transactions
@@ -190,6 +192,7 @@ fn test_position_updates() {
         price: 5_000_000,
         size: 200_000_000, // 2 BTC
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     state.submit_tx(Transaction::PlaceOrder {
@@ -199,6 +202,7 @@ fn test_position_updates() {
         price: 5_000_000,
         size: 100_000_000, // 1 BTC (partial)
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     // Execute
@@ -252,6 +256,7 @@ fn test_full_flow() {
         price: 5_000_000,
         size: 100_000_000,
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     state.submit_tx(Transaction::PlaceOrder {
@@ -261,6 +266,7 @@ fn test_full_flow() {
         price: 5_000_000,
         size: 100_000_000,
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }).unwrap();
 
     // 2. Create engine with our state
@@ -302,6 +308,7 @@ fn test_mempool_3_bucket_ordering() {
         price: 5_000_000,
         size: 100_000_000,
         order_type: OrderType::Gtc,
+        reduce_only: false,
     }, 1).unwrap();
 
     mempool.add(Transaction::CancelOrder {

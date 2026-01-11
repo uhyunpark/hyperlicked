@@ -161,6 +161,7 @@ mod tests {
             price: 50000,
             size: 100,
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }, 1).unwrap();
 
         mempool.add(Transaction::CancelOrder {
@@ -194,6 +195,7 @@ mod tests {
             price: 50000,
             size: 100,
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }, 1).unwrap();
 
         mempool.add(Transaction::PlaceOrder {
@@ -203,6 +205,7 @@ mod tests {
             price: 51000,
             size: 100,
             order_type: OrderType::Gtc,
+            reduce_only: false,
         }, 2).unwrap();
 
         let block = mempool.prepare_block(10);
