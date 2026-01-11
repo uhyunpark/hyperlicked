@@ -63,6 +63,8 @@ async fn main() -> Result<()> {
         node_id: net_config.node_id,
         validators: node_ids.to_vec(),
         view_timeout_ms: 3000,
+        bls_pubkeys: vec![], // BLS disabled for testing
+        bls_secret_key: None,
     };
 
     println!("Consensus Configuration:");

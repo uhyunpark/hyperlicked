@@ -5,10 +5,19 @@
 //! 2. Timeout expires (leader failed)
 //!
 //! This is a "reactive" pacemaker - it waits for events rather than polling.
+//!
+//! ## View Change Protocol
+//!
+//! When timeout occurs, the pacemaker coordinates view changes:
+//! 1. Create and broadcast ViewChange message
+//! 2. Collect ViewChanges from other validators
+//! 3. When quorum reached, new leader broadcasts NewView
 
 use std::time::{Duration, Instant};
 
-use crate::types::{Certificate, View};
+use crate::types::{Certificate, NewView, NodeId, View, ViewChange, ViewChangeCertificate};
+
+use super::view_change::ViewChangeCollector;
 
 /// Pacemaker manages view advancement
 pub struct Pacemaker {
@@ -26,6 +35,12 @@ pub struct Pacemaker {
 
     /// Maximum timeout multiplier (2^max_backoff)
     max_backoff: u32,
+
+    /// View change collector (None if view change protocol disabled)
+    vc_collector: Option<ViewChangeCollector>,
+
+    /// View for which we've already sent a ViewChange (prevent double-send)
+    vc_sent_for_view: Option<View>,
 }
 
 impl Pacemaker {
@@ -36,7 +51,14 @@ impl Pacemaker {
             consecutive_timeouts: 0,
             view_start: Instant::now(),
             max_backoff: 5, // Max 32x base timeout
+            vc_collector: None,
+            vc_sent_for_view: None,
         }
+    }
+
+    /// Enable view change protocol with given quorum size
+    pub fn with_view_change(&mut self, quorum: usize) {
+        self.vc_collector = Some(ViewChangeCollector::new(quorum));
     }
 
     /// Get current view
@@ -92,6 +114,76 @@ impl Pacemaker {
         self.current_view = 0;
         self.consecutive_timeouts = 0;
         self.view_start = Instant::now();
+        self.vc_sent_for_view = None;
+        if let Some(ref mut collector) = self.vc_collector {
+            collector.clear();
+        }
+    }
+
+    // =========================================================================
+    // View Change Protocol Methods
+    // =========================================================================
+
+    /// Create a ViewChange message for current timeout.
+    ///
+    /// Returns None if:
+    /// - ViewChange already sent for this view
+    /// - View change protocol not enabled
+    pub fn create_view_change(
+        &mut self,
+        node_id: NodeId,
+        high_qc: Option<Certificate>,
+    ) -> Option<ViewChange> {
+        let current = self.current_view;
+
+        // Only send once per view
+        if self.vc_sent_for_view == Some(current) {
+            return None;
+        }
+
+        self.vc_sent_for_view = Some(current);
+
+        Some(ViewChange {
+            from_view: current,
+            to_view: current + 1,
+            high_qc,
+            sender: node_id,
+            signature: vec![0u8; 64], // Placeholder until BLS
+        })
+    }
+
+    /// Process received ViewChange message.
+    ///
+    /// Returns ViewChangeCertificate if quorum reached for the target view.
+    pub fn on_view_change(&mut self, vc: ViewChange) -> Option<ViewChangeCertificate> {
+        self.vc_collector.as_mut()?.add(vc)
+    }
+
+    /// Process received NewView message from new leader.
+    ///
+    /// Advances to the new view if it's higher than current.
+    pub fn on_new_view(&mut self, nv: &NewView) {
+        if nv.view > self.current_view {
+            self.current_view = nv.view;
+            self.consecutive_timeouts = 0;
+            self.view_start = Instant::now();
+            self.vc_sent_for_view = None;
+
+            // Prune old view change data
+            if let Some(ref mut collector) = self.vc_collector {
+                collector.prune_below(nv.view);
+            }
+        }
+    }
+
+    /// Get the highest QC from collected ViewChanges for a view
+    pub fn highest_qc_from_view_changes(&self, view: View) -> Option<Certificate> {
+        self.vc_collector.as_ref()?.highest_qc(view)
+    }
+
+    /// Check if view change protocol is enabled
+    pub fn has_view_change(&self) -> bool {
+        self.vc_collector.is_some()
     }
 }
 
@@ -130,6 +222,8 @@ mod tests {
             view: 0,
             block_hash: [0u8; 32],
             votes: vec![],
+            voters: vec![],
+            bls_pubkeys: vec![],
             agg_signature: vec![],
         };
 
@@ -167,6 +261,8 @@ mod tests {
             view: pm.current_view(),
             block_hash: [0u8; 32],
             votes: vec![],
+            voters: vec![],
+            bls_pubkeys: vec![],
             agg_signature: vec![],
         };
         pm.advance_view(&qc);

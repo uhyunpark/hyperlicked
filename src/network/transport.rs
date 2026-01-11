@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use super::{Network, NetworkConfig};
-use crate::types::{hash_short, Message, NodeId, Prepare, Propose, Vote};
+use crate::types::{hash_short, Message, NewView, NodeId, Prepare, Propose, ViewChange, Vote};
 
 /// TCP-based network implementation
 pub struct TcpNetwork {
@@ -167,6 +167,20 @@ impl Network for TcpNetwork {
     async fn broadcast_prepare(&self, prepare: Prepare) -> Result<()> {
         debug!(view = prepare.view, "Broadcasting prepare");
         self.broadcast(&Message::Prepare(prepare)).await
+    }
+
+    async fn broadcast_view_change(&self, vc: ViewChange) -> Result<()> {
+        debug!(
+            from_view = vc.from_view,
+            to_view = vc.to_view,
+            "Broadcasting view change"
+        );
+        self.broadcast(&Message::ViewChange(vc)).await
+    }
+
+    async fn broadcast_new_view(&self, nv: NewView) -> Result<()> {
+        debug!(view = nv.view, "Broadcasting new view");
+        self.broadcast(&Message::NewView(nv)).await
     }
 
     async fn recv(&self) -> Result<(NodeId, Message)> {

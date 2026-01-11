@@ -89,13 +89,18 @@ impl Block {
 /// Validators vote for blocks they consider valid. Votes include:
 /// - `app_hash`: The state hash after executing the block (for Byzantine detection)
 /// - `signature`: Proof that this validator approved the block
+/// - `bls_pubkey`: Optional BLS public key (48 bytes) for BLS signature aggregation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Vote {
     pub view: View,
     pub block_hash: Hash,
     pub app_hash: Hash, // For Byzantine detection: validators must agree on execution
     pub voter: NodeId,
+    /// BLS signature (96 bytes) or legacy ECDSA placeholder (64 bytes)
     pub signature: Signature,
+    /// BLS public key of voter (48 bytes), None for legacy ECDSA
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bls_pubkey: Option<Vec<u8>>,
 }
 
 impl Vote {
@@ -107,6 +112,7 @@ impl Vote {
             app_hash,
             voter,
             signature: vec![0u8; 64], // Placeholder, will be signed
+            bls_pubkey: None,
         }
     }
 
@@ -119,6 +125,11 @@ impl Vote {
         data.extend_from_slice(&self.voter);
         data
     }
+
+    /// Check if this vote uses BLS signature
+    pub fn is_bls(&self) -> bool {
+        self.signature.len() == 96 && self.bls_pubkey.is_some()
+    }
 }
 
 /// Quorum Certificate: proof that 2f+1 validators voted for a block.
@@ -126,20 +137,31 @@ impl Vote {
 /// A QC proves consensus was reached. In HotStuff-2:
 /// - QC on block N allows proposing block N+1
 /// - QC on block N+1 commits block N (2-chain rule)
+///
+/// Supports two modes:
+/// - Legacy: stores individual votes, concatenates signatures
+/// - BLS: stores voter list + pubkeys, single 96-byte aggregated signature
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Certificate {
     pub view: View,
     pub block_hash: Hash,
+    /// Individual votes (legacy mode, empty when using BLS aggregation)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub votes: Vec<Vote>,
-    /// Aggregated signature (BLS). For now, just concatenate signatures.
+    /// Voters who contributed to this QC (NodeIds)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub voters: Vec<NodeId>,
+    /// BLS public keys of voters (for verification), 48 bytes each
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub bls_pubkeys: Vec<Vec<u8>>,
+    /// Aggregated signature (96 bytes for BLS, or concatenated for legacy)
     pub agg_signature: Vec<u8>,
 }
 
 impl Certificate {
-    /// Create a certificate from collected votes
+    /// Create a certificate from collected votes (legacy mode)
     pub fn new(view: View, block_hash: Hash, votes: Vec<Vote>) -> Self {
-        // For now, aggregate signature is just a placeholder
-        // Real implementation would use BLS aggregation
+        let voters = votes.iter().map(|v| v.voter).collect();
         let agg_signature = votes
             .iter()
             .flat_map(|v| v.signature.iter().copied())
@@ -149,13 +171,47 @@ impl Certificate {
             view,
             block_hash,
             votes,
+            voters,
+            bls_pubkeys: vec![],
             agg_signature,
         }
     }
 
-    /// Number of votes in this certificate
+    /// Create a certificate with BLS aggregation
+    pub fn new_bls(
+        view: View,
+        block_hash: Hash,
+        votes: Vec<Vote>,
+        agg_signature: Vec<u8>,
+    ) -> Self {
+        let voters = votes.iter().map(|v| v.voter).collect();
+        let bls_pubkeys = votes
+            .iter()
+            .filter_map(|v| v.bls_pubkey.clone())
+            .collect();
+
+        Self {
+            view,
+            block_hash,
+            votes: vec![], // Don't store individual votes when using BLS
+            voters,
+            bls_pubkeys,
+            agg_signature,
+        }
+    }
+
+    /// Number of voters in this certificate
     pub fn vote_count(&self) -> usize {
-        self.votes.len()
+        if !self.voters.is_empty() {
+            self.voters.len()
+        } else {
+            self.votes.len()
+        }
+    }
+
+    /// Check if this is a BLS-aggregated certificate
+    pub fn is_bls(&self) -> bool {
+        !self.bls_pubkeys.is_empty() && self.agg_signature.len() == 96
     }
 }
 
@@ -178,12 +234,89 @@ pub struct Prepare {
     pub qc: Certificate,
 }
 
+/// ViewChange message: sent when a validator times out waiting for leader.
+///
+/// In HotStuff-2, when a leader fails:
+/// 1. Validators timeout and broadcast ViewChange
+/// 2. New leader collects 2f+1 ViewChanges to form ViewChangeCertificate
+/// 3. New leader broadcasts NewView to start the new view
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewChange {
+    /// The view this validator is moving FROM
+    pub from_view: View,
+    /// The view this validator wants to move TO
+    pub to_view: View,
+    /// The sender's highest QC (proof of chain progress)
+    pub high_qc: Option<Certificate>,
+    /// The sender's node ID
+    pub sender: NodeId,
+    /// Signature over (from_view, to_view, high_qc.block_hash)
+    pub signature: Signature,
+}
+
+impl ViewChange {
+    /// Data to be signed for this view change
+    pub fn signing_data(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&self.from_view.to_le_bytes());
+        data.extend_from_slice(&self.to_view.to_le_bytes());
+        if let Some(ref qc) = self.high_qc {
+            data.extend_from_slice(&qc.block_hash);
+        }
+        data
+    }
+}
+
+/// ViewChangeCertificate: proof that 2f+1 validators agreed to change views.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewChangeCertificate {
+    pub view: View,
+    pub view_changes: Vec<ViewChange>,
+    /// Aggregated signature (BLS when implemented)
+    pub agg_signature: Vec<u8>,
+}
+
+impl ViewChangeCertificate {
+    /// Create from collected ViewChange messages
+    pub fn new(view: View, view_changes: Vec<ViewChange>) -> Self {
+        let agg_signature = view_changes
+            .iter()
+            .flat_map(|vc| vc.signature.iter().copied())
+            .collect();
+        Self {
+            view,
+            view_changes,
+            agg_signature,
+        }
+    }
+
+    /// Get the highest QC among all ViewChange messages
+    pub fn highest_qc(&self) -> Option<&Certificate> {
+        self.view_changes
+            .iter()
+            .filter_map(|vc| vc.high_qc.as_ref())
+            .max_by_key(|qc| qc.view)
+    }
+}
+
+/// NewView message: sent by new leader after collecting ViewChange quorum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewView {
+    pub view: View,
+    /// The highest QC among all ViewChange messages
+    pub high_qc: Option<Certificate>,
+    /// Proof that 2f+1 validators agreed to this view change
+    pub view_change_cert: ViewChangeCertificate,
+}
+
 /// All network message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     Propose(Propose),
     Vote(Vote),
     Prepare(Prepare),
+    ViewChange(ViewChange),
+    NewView(NewView),
 }
 
 // =============================================================================
@@ -199,6 +332,10 @@ pub struct ConsensusConfig {
     pub validators: Vec<NodeId>,
     /// Timeout before view change (milliseconds)
     pub view_timeout_ms: u64,
+    /// BLS public keys for each validator (same order as validators), 48 bytes each
+    pub bls_pubkeys: Vec<Vec<u8>>,
+    /// Our BLS secret key (32 bytes seed), None if BLS disabled
+    pub bls_secret_key: Option<[u8; 32]>,
 }
 
 impl ConsensusConfig {
@@ -233,13 +370,29 @@ impl ConsensusConfig {
         self.validators[idx]
     }
 
-    /// Create config for single-node testing
+    /// Check if BLS is enabled
+    pub fn bls_enabled(&self) -> bool {
+        !self.bls_pubkeys.is_empty() && self.bls_secret_key.is_some()
+    }
+
+    /// Get BLS public key for a validator
+    pub fn bls_pubkey(&self, node_id: &NodeId) -> Option<&[u8]> {
+        self.validators
+            .iter()
+            .position(|v| v == node_id)
+            .and_then(|i| self.bls_pubkeys.get(i))
+            .map(|v| v.as_slice())
+    }
+
+    /// Create config for single-node testing (no BLS)
     pub fn single_node() -> Self {
         let node_id = [1u8; 32];
         Self {
             node_id,
             validators: vec![node_id],
             view_timeout_ms: 3000,
+            bls_pubkeys: vec![],
+            bls_secret_key: None,
         }
     }
 }
@@ -301,6 +454,8 @@ mod tests {
             node_id: [1u8; 32],
             validators: vec![[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
             view_timeout_ms: 3000,
+            bls_pubkeys: vec![],
+            bls_secret_key: None,
         };
         assert_eq!(cfg4.f(), 1);
         assert_eq!(cfg4.quorum(), 3);

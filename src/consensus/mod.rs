@@ -17,15 +17,19 @@
 //!
 //! See `docs/specs/consensus.md` for full specification.
 
+mod aggregator;
 mod engine;
 mod pacemaker;
 pub mod runner;
 mod safety;
+pub mod view_change;
 
+pub use aggregator::VoteAggregator;
 pub use engine::Engine;
 pub use pacemaker::Pacemaker;
 pub use runner::ConsensusRunner;
 pub use safety::Safety;
+pub use view_change::{ViewChangeCollector, ViewChangeError};
 
 use crate::types::{Block, Hash};
 

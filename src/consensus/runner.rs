@@ -13,7 +13,8 @@ use tracing::{debug, info, warn};
 use super::{AppHook, BlockStore, MemoryBlockStore, NoOpApp, Pacemaker, Safety};
 use crate::network::{Network, TcpNetwork};
 use crate::types::{
-    hash_short, Block, Certificate, ConsensusConfig, Hash, Message, Prepare, Propose, View, Vote,
+    hash_short, Block, Certificate, ConsensusConfig, Hash, Message, NewView, Prepare, Propose,
+    View, ViewChange, ViewChangeCertificate, Vote,
 };
 
 /// Async consensus runner
@@ -77,6 +78,9 @@ impl ConsensusRunner {
             node = %hash_short(&self.config.node_id),
             "Starting consensus runner"
         );
+
+        // Enable view change protocol
+        self.pacemaker.with_view_change(self.config.quorum());
 
         loop {
             let view = self.pacemaker.current_view();
@@ -226,7 +230,72 @@ impl ConsensusRunner {
             }
             Err(_) => {
                 debug!(view, "Timeout waiting for proposal");
-                self.pacemaker.record_timeout();
+                self.handle_timeout().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle timeout by broadcasting ViewChange
+    async fn handle_timeout(&mut self) -> Result<()> {
+        let view = self.pacemaker.current_view();
+        debug!(view, "Handling timeout with view change");
+
+        // Create and broadcast ViewChange
+        if let Some(vc) = self.pacemaker.create_view_change(
+            self.config.node_id,
+            self.safety.high_qc().cloned(),
+        ) {
+            info!(
+                from_view = vc.from_view,
+                to_view = vc.to_view,
+                "Broadcasting ViewChange"
+            );
+
+            // Broadcast to all validators
+            if let Err(e) = self.network.broadcast_view_change(vc.clone()).await {
+                warn!(error = %e, "Failed to broadcast ViewChange");
+            }
+
+            // Process our own view change (might reach quorum)
+            if let Some(vcc) = self.pacemaker.on_view_change(vc) {
+                self.handle_view_change_certificate(vcc).await?;
+            }
+        }
+
+        self.pacemaker.record_timeout();
+        Ok(())
+    }
+
+    /// Handle ViewChangeCertificate when quorum reached
+    async fn handle_view_change_certificate(&mut self, vcc: ViewChangeCertificate) -> Result<()> {
+        let new_view = vcc.view;
+        let new_leader = self.config.leader_of(new_view);
+
+        info!(
+            new_view,
+            new_leader = %hash_short(&new_leader),
+            "ViewChange quorum reached"
+        );
+
+        // If we're the new leader, broadcast NewView
+        if new_leader == self.config.node_id {
+            let high_qc = vcc.highest_qc().cloned();
+
+            let nv = NewView {
+                view: new_view,
+                high_qc: high_qc.clone(),
+                view_change_cert: vcc,
+            };
+
+            info!(view = new_view, "Broadcasting NewView as new leader");
+            self.network.broadcast_new_view(nv.clone()).await?;
+
+            // Update our own state
+            self.pacemaker.on_new_view(&nv);
+            if let Some(qc) = high_qc {
+                self.safety.update_high_qc(qc);
             }
         }
 
@@ -263,6 +332,25 @@ impl ConsensusRunner {
                         self.process_prepare(prepare);
                     }
                 }
+                Message::ViewChange(vc) => {
+                    debug!(
+                        from = %hash_short(&from),
+                        from_view = vc.from_view,
+                        to_view = vc.to_view,
+                        "Received ViewChange"
+                    );
+                    if let Some(vcc) = self.pacemaker.on_view_change(vc) {
+                        // Can't await here, just log
+                        debug!(view = vcc.view, "ViewChange quorum reached while waiting");
+                    }
+                }
+                Message::NewView(nv) => {
+                    debug!(view = nv.view, "Received NewView");
+                    self.pacemaker.on_new_view(&nv);
+                    if let Some(qc) = nv.high_qc {
+                        self.safety.update_high_qc(qc);
+                    }
+                }
             }
         }
     }
@@ -286,6 +374,22 @@ impl ConsensusRunner {
                 }
                 Message::Propose(_) => {
                     // Ignore proposals while waiting for prepare
+                }
+                Message::ViewChange(vc) => {
+                    debug!(
+                        from = %hash_short(&from),
+                        from_view = vc.from_view,
+                        to_view = vc.to_view,
+                        "Received ViewChange while waiting for prepare"
+                    );
+                    let _ = self.pacemaker.on_view_change(vc);
+                }
+                Message::NewView(nv) => {
+                    debug!(view = nv.view, "Received NewView while waiting for prepare");
+                    self.pacemaker.on_new_view(&nv);
+                    if let Some(qc) = nv.high_qc {
+                        self.safety.update_high_qc(qc);
+                    }
                 }
             }
         }
@@ -323,6 +427,21 @@ impl ConsensusRunner {
                             "Received vote"
                         );
                         self.votes.entry(block_hash).or_default().push(vote);
+                    }
+                }
+                Ok(Ok((from, Message::ViewChange(vc)))) => {
+                    debug!(
+                        from = %hash_short(&from),
+                        to_view = vc.to_view,
+                        "Received ViewChange while collecting votes"
+                    );
+                    let _ = self.pacemaker.on_view_change(vc);
+                }
+                Ok(Ok((_, Message::NewView(nv)))) => {
+                    debug!(view = nv.view, "Received NewView while collecting votes");
+                    self.pacemaker.on_new_view(&nv);
+                    if let Some(qc) = nv.high_qc {
+                        self.safety.update_high_qc(qc);
                     }
                 }
                 Ok(Ok((_, msg))) => {
