@@ -2,7 +2,7 @@
 //!
 //! Provides key generation, signing, and address recovery.
 
-use alloy_primitives::{keccak256, Address, B256};
+use alloy_primitives::{keccak256, Address};
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
 use k256::elliptic_curve::rand_core::OsRng;
 

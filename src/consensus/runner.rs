@@ -14,7 +14,7 @@ use super::{AppHook, BlockStore, MemoryBlockStore, NoOpApp, Pacemaker, Safety};
 use crate::network::{Network, TcpNetwork};
 use crate::types::{
     hash_short, Block, Certificate, ConsensusConfig, Hash, Message, NewView, Prepare, Propose,
-    View, ViewChange, ViewChangeCertificate, Vote,
+    View, ViewChangeCertificate, Vote,
 };
 
 /// Async consensus runner

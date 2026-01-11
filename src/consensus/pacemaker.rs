@@ -193,7 +193,8 @@ impl Default for Pacemaker {
     }
 }
 
-/// Events that can advance the view
+/// Events that can advance the view (for future use in logging/metrics)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum ViewAdvanceReason {
     /// Received a valid QC
