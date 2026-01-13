@@ -3,11 +3,12 @@
 //! All REST endpoints for the exchange.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 
 use super::handlers::{deposit, register_delegation, submit_order_legacy, withdraw};
 use super::state::{PriceLevel, SharedState};
@@ -134,9 +135,47 @@ async fn get_orderbook(
     }))
 }
 
-async fn get_trades(Path(_symbol): Path<String>) -> Json<Vec<serde_json::Value>> {
-    // TODO: Implement trade history
-    Json(vec![])
+/// Query parameters for trades endpoint
+#[derive(Deserialize)]
+struct TradesQuery {
+    limit: Option<usize>,
+}
+
+/// Trade response format
+#[derive(serde::Serialize)]
+struct TradeResponse {
+    price: i64,
+    size: i64,
+    side: String,
+    timestamp: u64,
+}
+
+async fn get_trades(
+    State(state): State<ApiState>,
+    Path(symbol): Path<String>,
+    Query(params): Query<TradesQuery>,
+) -> Json<Vec<TradeResponse>> {
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let app = state.shared.app.read().await;
+
+    let trades: Vec<TradeResponse> = app
+        .get_trades(&symbol, limit)
+        .into_iter()
+        .map(|f| {
+            let side = match f.side {
+                crate::app::Side::Bid => "buy",
+                crate::app::Side::Ask => "sell",
+            };
+            TradeResponse {
+                price: f.price,
+                size: f.size,
+                side: side.to_string(),
+                timestamp: f.timestamp,
+            }
+        })
+        .collect();
+
+    Json(trades)
 }
 
 // =============================================================================

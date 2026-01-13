@@ -3,7 +3,7 @@
 //! Integrates orderbook, accounts, and mempool into a single
 //! AppHook implementation for consensus.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use sha2::{Digest, Sha256};
 
@@ -15,6 +15,9 @@ use super::{
 };
 use crate::consensus::AppHook;
 use crate::types::{Block, Hash, Price};
+
+/// Maximum trades stored per symbol
+const MAX_TRADES_PER_SYMBOL: usize = 1000;
 
 /// Order update info for WebSocket event emission
 #[derive(Debug, Clone)]
@@ -45,6 +48,8 @@ pub struct AppState {
     pending_fills: Vec<Fill>,
     /// Order updates from the last block execution (for event emission)
     pending_order_updates: Vec<OrderUpdateInfo>,
+    /// Trade history by symbol (recent trades, capped at MAX_TRADES_PER_SYMBOL)
+    trade_history: HashMap<Symbol, VecDeque<Fill>>,
 }
 
 impl AppState {
@@ -58,6 +63,7 @@ impl AppState {
             timestamp: 0,
             pending_fills: Vec::new(),
             pending_order_updates: Vec::new(),
+            trade_history: HashMap::new(),
         };
 
         // Add default BTC-USDT market
@@ -211,6 +217,13 @@ impl AppState {
 
                     // Update mark price to last trade
                     self.mark_prices.insert(symbol.clone(), fill.price);
+
+                    // Store fill in trade history
+                    let history = self.trade_history.entry(fill.symbol.clone()).or_default();
+                    history.push_back(fill.clone());
+                    while history.len() > MAX_TRADES_PER_SYMBOL {
+                        history.pop_front();
+                    }
                 }
 
                 Ok(fills)
@@ -293,6 +306,14 @@ impl AppState {
     /// Get market config
     pub fn market_config(&self, symbol: &str) -> Option<&MarketConfig> {
         self.configs.get(symbol)
+    }
+
+    /// Get recent trades for a symbol (most recent first)
+    pub fn get_trades(&self, symbol: &str, limit: usize) -> Vec<&Fill> {
+        self.trade_history
+            .get(symbol)
+            .map(|h| h.iter().rev().take(limit).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -450,5 +471,48 @@ mod tests {
         let hash2 = state.compute_state_hash();
 
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_trade_history() {
+        let mut state = AppState::new();
+
+        // Setup: Alice bids, Bob asks -> should match and create trade
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 100_000_000 }).unwrap();
+        state.execute_tx(Transaction::Deposit { trader: "bob".into(), amount: 100_000_000 }).unwrap();
+
+        // Alice places bid
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        }).unwrap();
+
+        // No trades yet
+        assert!(state.get_trades("BTC-USDT", 10).is_empty());
+
+        // Bob places ask (matches Alice's bid)
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "bob".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Ask,
+            price: 4_900_000,
+            size: 50_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        }).unwrap();
+
+        // Now we should have 1 trade
+        let trades = state.get_trades("BTC-USDT", 10);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].price, 5_000_000);
+        assert_eq!(trades[0].size, 50_000_000);
+
+        // Unknown symbol returns empty
+        assert!(state.get_trades("ETH-USDT", 10).is_empty());
     }
 }
