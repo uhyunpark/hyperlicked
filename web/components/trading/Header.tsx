@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
-import { config } from '@/lib/config'
+import { config, isDevelopment } from '@/lib/config'
 import { toast } from '@/components/ui/Toast'
 
 interface NavTabProps {
@@ -96,6 +96,11 @@ export function Header() {
           <div className="flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-green-500" title={wsConnected ? 'Online' : 'Connecting...'} />
             <div className="text-lg font-bold text-text-primary">HyperLicked</div>
+            {isDevelopment && (
+              <span className="rounded bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-500">
+                DEV
+              </span>
+            )}
           </div>
         </div>
 

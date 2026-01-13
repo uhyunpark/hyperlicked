@@ -6,6 +6,8 @@ import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
 import type { Side, OrderType, TimeInForce } from '@/lib/types'
 import { TIF_CODES } from '@/lib/types'
+import { isDevelopment } from '@/lib/config'
+import { requestFaucet } from '@/lib/api'
 
 interface AccountData {
   balance: number
@@ -30,6 +32,7 @@ export function TradePanel() {
   // Account data from API
   const [account, setAccount] = useState<AccountData | null>(null)
   const [isLoadingAccount, setIsLoadingAccount] = useState(false)
+  const [isFaucetLoading, setIsFaucetLoading] = useState(false)
 
   // Fetch account data when wallet connects
   useEffect(() => {
@@ -73,6 +76,34 @@ export function TradePanel() {
 
   const accountBalance = account?.totalEquity ?? 0
   const availableBalance = account?.availableBalance ?? 0
+
+  // Faucet handler (dev mode only)
+  const handleFaucet = async () => {
+    if (!wallet.address || isFaucetLoading) return
+    setIsFaucetLoading(true)
+    try {
+      const success = await requestFaucet(wallet.address)
+      if (success) {
+        toast.success('Faucet', 'Received $100,000 test USDT')
+        // Refresh account data
+        const { getAccount } = await import('@/lib/api')
+        const data = await getAccount(wallet.address)
+        setAccount({
+          balance: data.balance / 100,
+          lockedCollateral: data.lockedCollateral / 100,
+          availableBalance: data.availableBalance / 100,
+          unrealizedPnL: data.unrealizedPnL / 100,
+          totalEquity: data.totalEquity / 100
+        })
+      } else {
+        toast.error('Faucet Failed', 'Could not get test USDT')
+      }
+    } catch (error: any) {
+      toast.error('Faucet Failed', error.message)
+    } finally {
+      setIsFaucetLoading(false)
+    }
+  }
 
   // Calculate order details
   const priceNum = parseFloat(price) || currentPrice
@@ -265,6 +296,17 @@ export function TradePanel() {
             ${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC
           </span>
         </div>
+
+        {/* Dev Faucet Button */}
+        {isDevelopment && wallet.isConnected && (
+          <button
+            onClick={handleFaucet}
+            disabled={isFaucetLoading}
+            className="mb-3 w-full rounded border border-yellow-500/30 bg-yellow-500/10 py-2 text-sm font-medium text-yellow-500 transition-colors hover:bg-yellow-500/20 disabled:opacity-50"
+          >
+            {isFaucetLoading ? 'Requesting...' : 'Get Test USDT ($100k)'}
+          </button>
+        )}
 
         {/* Side Toggle */}
         <div className="mb-4 grid grid-cols-2 gap-2">

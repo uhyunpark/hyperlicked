@@ -223,3 +223,20 @@ export async function registerDelegation(req: RegisterDelegationRequest): Promis
 
   return res.json()
 }
+
+// ==============================
+// Dev Faucet API
+// ==============================
+
+// Request test USDT from faucet (dev mode only)
+// Default: $100,000 (10_000_000 cents)
+export async function requestFaucet(address: string, amount: number = 10_000_000): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/deposit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trader: address, amount })
+  })
+
+  const data = await res.json()
+  return data.success === true
+}
