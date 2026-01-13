@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::crypto::bls::BlsSecretKey;
+
 // =============================================================================
 // Type Aliases
 // =============================================================================
@@ -116,6 +118,34 @@ impl Vote {
         }
     }
 
+    /// Create a BLS-signed vote
+    pub fn new_bls(
+        view: View,
+        block_hash: Hash,
+        app_hash: Hash,
+        voter: NodeId,
+        bls_sk: &BlsSecretKey,
+    ) -> Self {
+        let mut vote = Self {
+            view,
+            block_hash,
+            app_hash,
+            voter,
+            signature: vec![],
+            bls_pubkey: None,
+        };
+
+        // Sign the vote data
+        let signing_data = vote.signing_data();
+        let sig = bls_sk.sign(&signing_data);
+        let pubkey = bls_sk.public_key();
+
+        vote.signature = sig.to_bytes().to_vec();
+        vote.bls_pubkey = Some(pubkey.to_bytes().to_vec());
+
+        vote
+    }
+
     /// Data to be signed
     pub fn signing_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
@@ -129,6 +159,36 @@ impl Vote {
     /// Check if this vote uses BLS signature
     pub fn is_bls(&self) -> bool {
         self.signature.len() == 96 && self.bls_pubkey.is_some()
+    }
+
+    /// Verify this vote's BLS signature
+    pub fn verify_bls(&self) -> bool {
+        if !self.is_bls() {
+            return false;
+        }
+
+        use crate::crypto::bls::{BlsPublicKey, BlsSignature};
+
+        // Parse pubkey
+        let pubkey_bytes = match self.bls_pubkey.as_ref() {
+            Some(pk) if pk.len() == 48 => pk,
+            _ => return false,
+        };
+        let mut pk_arr = [0u8; 48];
+        pk_arr.copy_from_slice(pubkey_bytes);
+        let pubkey = match BlsPublicKey::from_bytes(&pk_arr) {
+            Ok(pk) => pk,
+            Err(_) => return false,
+        };
+
+        // Parse signature
+        let sig = match BlsSignature::from_slice(&self.signature) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        // Verify
+        pubkey.verify(&self.signing_data(), &sig)
     }
 }
 
@@ -384,16 +444,26 @@ impl ConsensusConfig {
             .map(|v| v.as_slice())
     }
 
-    /// Create config for single-node testing (no BLS)
+    /// Create config for single-node testing with BLS enabled
     pub fn single_node() -> Self {
         let node_id = [1u8; 32];
+        // Use deterministic seed for testing
+        let bls_seed = [42u8; 32];
+        let bls_sk = BlsSecretKey::from_seed(&bls_seed);
+        let bls_pk = bls_sk.public_key().to_bytes().to_vec();
+
         Self {
             node_id,
             validators: vec![node_id],
             view_timeout_ms: 3000,
-            bls_pubkeys: vec![],
-            bls_secret_key: None,
+            bls_pubkeys: vec![bls_pk],
+            bls_secret_key: Some(bls_seed),
         }
+    }
+
+    /// Get our BLS secret key
+    pub fn bls_secret_key(&self) -> Option<BlsSecretKey> {
+        self.bls_secret_key.map(|seed| BlsSecretKey::from_seed(&seed))
     }
 }
 
@@ -459,5 +529,43 @@ mod tests {
         };
         assert_eq!(cfg4.f(), 1);
         assert_eq!(cfg4.quorum(), 3);
+    }
+
+    #[test]
+    fn test_vote_bls_signing() {
+        // Get BLS key from single_node config
+        let cfg = ConsensusConfig::single_node();
+        let bls_sk = cfg.bls_secret_key().expect("BLS should be enabled");
+
+        // Create a BLS-signed vote
+        let vote = Vote::new_bls(
+            1,
+            [1u8; 32],
+            [2u8; 32],
+            cfg.node_id,
+            &bls_sk,
+        );
+
+        // Verify it's a BLS vote
+        assert!(vote.is_bls(), "Vote should use BLS signature");
+        assert_eq!(vote.signature.len(), 96, "BLS signature should be 96 bytes");
+        assert!(vote.bls_pubkey.is_some(), "Vote should have BLS public key");
+        assert_eq!(vote.bls_pubkey.as_ref().unwrap().len(), 48, "BLS pubkey should be 48 bytes");
+
+        // Verify the signature
+        assert!(vote.verify_bls(), "BLS signature should verify");
+
+        // Tampered vote should fail verification
+        let mut tampered_vote = vote.clone();
+        tampered_vote.block_hash[0] ^= 1;
+        assert!(!tampered_vote.verify_bls(), "Tampered vote should fail verification");
+    }
+
+    #[test]
+    fn test_single_node_has_bls_keys() {
+        let cfg = ConsensusConfig::single_node();
+        assert!(cfg.bls_enabled(), "single_node config should have BLS enabled");
+        assert!(cfg.bls_secret_key().is_some(), "should have BLS secret key");
+        assert_eq!(cfg.bls_pubkeys.len(), 1, "should have one BLS pubkey");
     }
 }
