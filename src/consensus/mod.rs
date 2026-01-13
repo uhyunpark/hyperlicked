@@ -19,6 +19,7 @@
 
 mod aggregator;
 mod engine;
+mod message_handler;
 mod pacemaker;
 pub mod runner;
 mod safety;

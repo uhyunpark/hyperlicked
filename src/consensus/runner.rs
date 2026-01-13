@@ -10,7 +10,9 @@ use anyhow::Result;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use super::message_handler::{handle_view_message, store_vote};
 use super::{AppHook, BlockStore, MemoryBlockStore, NoOpApp, Pacemaker, Safety};
+use crate::config::Config;
 use crate::network::{Network, TcpNetwork};
 use crate::types::{
     hash_short, Block, Certificate, ConsensusConfig, Hash, Message, NewView, Prepare, Propose,
@@ -92,8 +94,13 @@ impl ConsensusRunner {
                 self.run_follower_round(view).await?;
             }
 
-            // Small delay to prevent tight loop
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Configurable delay to prevent tight loop (0 = yield only)
+            let delay_ms = Config::global().consensus_loop_delay_ms;
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
         }
     }
 
@@ -101,91 +108,53 @@ impl ConsensusRunner {
     async fn run_leader_round(&mut self, view: View) -> Result<()> {
         info!(view, "Running as LEADER");
 
-        // 1. Get parent block
         let parent = self.get_proposal_parent();
-        let parent_hash = parent.hash();
-
-        // 2. Prepare payload
         let payload = self.app.prepare_payload(&parent);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
 
-        // 3. Create block
         let mut block = Block {
             view,
             height: parent.height + 1,
-            parent: parent_hash,
+            parent: parent.hash(),
             payload,
             proposer: self.config.node_id,
             app_hash: [0u8; 32],
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: now.as_millis() as u64,
         };
-
-        // 4. Execute to get app_hash
-        let app_hash = self.app.execute(&block);
-        block.app_hash = app_hash;
+        block.app_hash = self.app.execute(&block);
 
         let block_hash = block.hash();
-        info!(
-            view,
-            height = block.height,
-            hash = %hash_short(&block_hash),
-            "Proposing block"
-        );
+        info!(view, height = block.height, hash = %hash_short(&block_hash), "Proposing block");
 
-        // 5. Store block
         self.store.save(&block);
         self.pending.insert(block_hash, block.clone());
 
-        // 6. Broadcast proposal
-        let propose = Propose {
-            block: block.clone(),
-            justify: self.safety.high_qc().cloned(),
-        };
+        let propose = Propose { block: block.clone(), justify: self.safety.high_qc().cloned() };
         self.network.broadcast_propose(propose).await?;
 
-        // 7. Self-vote
-        let self_vote = Vote::new(view, block_hash, app_hash, self.config.node_id);
-        self.votes
-            .entry(block_hash)
-            .or_default()
-            .push(self_vote);
+        // Self-vote (with BLS signature if enabled)
+        let self_vote = if let Some(bls_sk) = self.config.bls_secret_key() {
+            Vote::new_bls(view, block_hash, block.app_hash, self.config.node_id, &bls_sk)
+        } else {
+            Vote::new(view, block_hash, block.app_hash, self.config.node_id)
+        };
+        self.votes.entry(block_hash).or_default().push(self_vote);
 
-        // 8. Collect votes from others
+        // Collect votes
         let quorum = self.config.quorum();
-        let collect_timeout = Duration::from_secs(3);
-
-        let votes = self.collect_votes(block_hash, quorum, collect_timeout).await;
+        let votes = self.collect_votes(block_hash, quorum, Duration::from_secs(3)).await;
 
         if votes.len() >= quorum {
-            info!(
-                view,
-                votes = votes.len(),
-                "Collected quorum, forming QC"
-            );
-
-            // 9. Form QC
+            info!(view, votes = votes.len(), "Collected quorum, forming QC");
             let qc = Certificate::new(view, block_hash, votes);
-
-            // 10. Broadcast prepare
             let prepare = Prepare { view, qc: qc.clone() };
             self.network.broadcast_prepare(prepare).await?;
-
-            // 11. Process QC (may commit)
             self.process_qc(qc);
-
-            // 12. Advance view
             if let Some(ref high_qc) = self.safety.high_qc() {
                 self.pacemaker.advance_view(high_qc);
             }
         } else {
-            warn!(
-                view,
-                votes = votes.len(),
-                needed = quorum,
-                "Failed to collect quorum"
-            );
+            warn!(view, votes = votes.len(), needed = quorum, "Failed to collect quorum");
             self.pacemaker.record_timeout();
         }
 
@@ -311,46 +280,17 @@ impl ConsensusRunner {
                 Message::Propose(propose) => {
                     if propose.block.view == target_view {
                         return Ok(propose);
-                    } else {
-                        debug!(
-                            got = propose.block.view,
-                            expected = target_view,
-                            "Wrong view proposal"
-                        );
                     }
+                    debug!(got = propose.block.view, expected = target_view, "Wrong view proposal");
                 }
-                Message::Vote(vote) => {
-                    // Store vote (might be leader collecting)
-                    self.votes
-                        .entry(vote.block_hash)
-                        .or_default()
-                        .push(vote);
+                Message::Vote(vote) => store_vote(&mut self.votes, vote),
+                Message::Prepare(prepare) if prepare.view >= target_view => {
+                    self.process_prepare(prepare);
                 }
-                Message::Prepare(prepare) => {
-                    // Store for later processing
-                    if prepare.view >= target_view {
-                        self.process_prepare(prepare);
-                    }
+                ref m @ (Message::ViewChange(_) | Message::NewView(_)) => {
+                    handle_view_message(m, &from, &mut self.pacemaker, &mut self.safety);
                 }
-                Message::ViewChange(vc) => {
-                    debug!(
-                        from = %hash_short(&from),
-                        from_view = vc.from_view,
-                        to_view = vc.to_view,
-                        "Received ViewChange"
-                    );
-                    if let Some(vcc) = self.pacemaker.on_view_change(vc) {
-                        // Can't await here, just log
-                        debug!(view = vcc.view, "ViewChange quorum reached while waiting");
-                    }
-                }
-                Message::NewView(nv) => {
-                    debug!(view = nv.view, "Received NewView");
-                    self.pacemaker.on_new_view(&nv);
-                    if let Some(qc) = nv.high_qc {
-                        self.safety.update_high_qc(qc);
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -361,36 +301,12 @@ impl ConsensusRunner {
             let (from, msg) = self.network.recv_msg().await?;
 
             match msg {
-                Message::Prepare(prepare) => {
-                    if prepare.view >= target_view {
-                        return Ok(prepare);
-                    }
+                Message::Prepare(prepare) if prepare.view >= target_view => return Ok(prepare),
+                Message::Vote(vote) => store_vote(&mut self.votes, vote),
+                ref m @ (Message::ViewChange(_) | Message::NewView(_)) => {
+                    handle_view_message(m, &from, &mut self.pacemaker, &mut self.safety);
                 }
-                Message::Vote(vote) => {
-                    self.votes
-                        .entry(vote.block_hash)
-                        .or_default()
-                        .push(vote);
-                }
-                Message::Propose(_) => {
-                    // Ignore proposals while waiting for prepare
-                }
-                Message::ViewChange(vc) => {
-                    debug!(
-                        from = %hash_short(&from),
-                        from_view = vc.from_view,
-                        to_view = vc.to_view,
-                        "Received ViewChange while waiting for prepare"
-                    );
-                    let _ = self.pacemaker.on_view_change(vc);
-                }
-                Message::NewView(nv) => {
-                    debug!(view = nv.view, "Received NewView while waiting for prepare");
-                    self.pacemaker.on_new_view(&nv);
-                    if let Some(qc) = nv.high_qc {
-                        self.safety.update_high_qc(qc);
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -405,56 +321,25 @@ impl ConsensusRunner {
         let deadline = tokio::time::Instant::now() + timeout_duration;
 
         loop {
-            // Check if we have quorum
             let current_votes = self.votes.get(&block_hash).map(|v| v.len()).unwrap_or(0);
-            if current_votes >= quorum {
+            if current_votes >= quorum || tokio::time::Instant::now() >= deadline {
                 return self.votes.remove(&block_hash).unwrap_or_default();
             }
 
-            // Check timeout
-            if tokio::time::Instant::now() >= deadline {
-                return self.votes.remove(&block_hash).unwrap_or_default();
-            }
-
-            // Wait for next message
             let remaining = deadline - tokio::time::Instant::now();
             match timeout(remaining, self.network.recv_msg()).await {
-                Ok(Ok((from, Message::Vote(vote)))) => {
-                    if vote.block_hash == block_hash {
-                        debug!(
-                            from = %hash_short(&from),
-                            view = vote.view,
-                            "Received vote"
-                        );
+                Ok(Ok((from, msg))) => match msg {
+                    Message::Vote(vote) if vote.block_hash == block_hash => {
+                        debug!(from = %hash_short(&from), view = vote.view, "Received vote");
                         self.votes.entry(block_hash).or_default().push(vote);
                     }
-                }
-                Ok(Ok((from, Message::ViewChange(vc)))) => {
-                    debug!(
-                        from = %hash_short(&from),
-                        to_view = vc.to_view,
-                        "Received ViewChange while collecting votes"
-                    );
-                    let _ = self.pacemaker.on_view_change(vc);
-                }
-                Ok(Ok((_, Message::NewView(nv)))) => {
-                    debug!(view = nv.view, "Received NewView while collecting votes");
-                    self.pacemaker.on_new_view(&nv);
-                    if let Some(qc) = nv.high_qc {
-                        self.safety.update_high_qc(qc);
+                    ref m @ (Message::ViewChange(_) | Message::NewView(_)) => {
+                        handle_view_message(m, &from, &mut self.pacemaker, &mut self.safety);
                     }
-                }
-                Ok(Ok((_, msg))) => {
-                    // Handle other messages
-                    debug!(?msg, "Received non-vote while collecting");
-                }
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Error receiving message");
-                }
-                Err(_) => {
-                    // Timeout
-                    break;
-                }
+                    _ => {}
+                },
+                Ok(Err(e)) => warn!(error = %e, "Error receiving message"),
+                Err(_) => break,
             }
         }
 
@@ -492,13 +377,24 @@ impl ConsensusRunner {
             self.safety.update_high_qc(justify);
         }
 
-        // Create vote
-        Some(Vote::new(
-            view,
-            block.hash(),
-            local_app_hash,
-            self.config.node_id,
-        ))
+        // Create vote (with BLS signature if enabled)
+        let vote = if let Some(bls_sk) = self.config.bls_secret_key() {
+            Vote::new_bls(
+                view,
+                block.hash(),
+                local_app_hash,
+                self.config.node_id,
+                &bls_sk,
+            )
+        } else {
+            Vote::new(
+                view,
+                block.hash(),
+                local_app_hash,
+                self.config.node_id,
+            )
+        };
+        Some(vote)
     }
 
     /// Process a prepare message
@@ -528,8 +424,19 @@ impl ConsensusRunner {
         // Update high_qc
         self.safety.update_high_qc(qc.clone());
 
-        // Try to commit (simplified: commit the certified block)
-        self.try_commit(&qc.block_hash);
+        // 2-chain commit rule (HotStuff-2):
+        // When we have QC for block B, commit B's PARENT.
+        // This ensures block N is only committed when N+1 has been certified.
+        let certified_block = self.pending.get(&qc.block_hash)
+            .cloned()
+            .or_else(|| self.store.get(&qc.block_hash));
+
+        if let Some(block) = certified_block {
+            // Don't commit genesis parent (height 0 has parent = [0u8; 32])
+            if block.height > 0 {
+                self.try_commit(&block.parent);
+            }
+        }
     }
 
     /// Try to commit a block
