@@ -69,6 +69,30 @@ pub struct PriceLevel {
     pub order_count: usize,
 }
 
+/// Aggregate price levels from order map
+fn aggregate_levels(
+    levels: &HashMap<Price, Vec<Order>>,
+    limit: usize,
+    descending: bool,
+) -> Vec<PriceLevel> {
+    let mut result: Vec<_> = levels
+        .iter()
+        .filter(|(_, orders)| !orders.is_empty())
+        .map(|(price, orders)| PriceLevel {
+            price: *price,
+            size: orders.iter().map(|o| o.size).sum(),
+            order_count: orders.len(),
+        })
+        .collect();
+    if descending {
+        result.sort_by(|a, b| b.price.cmp(&a.price));
+    } else {
+        result.sort_by(|a, b| a.price.cmp(&b.price));
+    }
+    result.truncate(limit);
+    result
+}
+
 /// Heap-based orderbook
 pub struct OrderBook {
     symbol: Symbol,
@@ -299,34 +323,12 @@ impl OrderBook {
 
     /// Get bid levels (sorted high to low)
     pub fn bid_levels(&self, limit: usize) -> Vec<PriceLevel> {
-        let mut levels: Vec<_> = self.bids
-            .iter()
-            .filter(|(_, orders)| !orders.is_empty())
-            .map(|(price, orders)| PriceLevel {
-                price: *price,
-                size: orders.iter().map(|o| o.size).sum(),
-                order_count: orders.len(),
-            })
-            .collect();
-        levels.sort_by(|a, b| b.price.cmp(&a.price));
-        levels.truncate(limit);
-        levels
+        aggregate_levels(&self.bids, limit, true)
     }
 
     /// Get ask levels (sorted low to high)
     pub fn ask_levels(&self, limit: usize) -> Vec<PriceLevel> {
-        let mut levels: Vec<_> = self.asks
-            .iter()
-            .filter(|(_, orders)| !orders.is_empty())
-            .map(|(price, orders)| PriceLevel {
-                price: *price,
-                size: orders.iter().map(|o| o.size).sum(),
-                order_count: orders.len(),
-            })
-            .collect();
-        levels.sort_by(|a, b| a.price.cmp(&b.price));
-        levels.truncate(limit);
-        levels
+        aggregate_levels(&self.asks, limit, false)
     }
 
     /// Get symbol
@@ -337,25 +339,11 @@ impl OrderBook {
     /// Get all orders for a specific trader
     pub fn orders_by_trader(&self, trader: &str) -> Vec<&Order> {
         let trader_lower = trader.to_lowercase();
-        let mut orders = Vec::new();
-
-        for order_list in self.bids.values() {
-            for order in order_list {
-                if order.trader.to_lowercase() == trader_lower {
-                    orders.push(order);
-                }
-            }
-        }
-
-        for order_list in self.asks.values() {
-            for order in order_list {
-                if order.trader.to_lowercase() == trader_lower {
-                    orders.push(order);
-                }
-            }
-        }
-
-        orders
+        self.bids.values()
+            .chain(self.asks.values())
+            .flat_map(|orders| orders.iter())
+            .filter(|order| order.trader.to_lowercase() == trader_lower)
+            .collect()
     }
 
     // --- Private helpers ---
