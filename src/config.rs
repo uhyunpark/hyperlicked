@@ -62,6 +62,10 @@ pub struct Config {
     /// Block time in milliseconds (0 = max speed)
     pub block_time_ms: u64,
 
+    /// Consensus loop delay in milliseconds (0 = yield only, no sleep)
+    /// This prevents CPU spinning in the consensus runner loop
+    pub consensus_loop_delay_ms: u64,
+
     /// Log all blocks (including empty heartbeats)
     pub log_all_blocks: bool,
 
@@ -98,6 +102,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100),
+            consensus_loop_delay_ms: std::env::var("CONSENSUS_LOOP_DELAY_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10), // Default 10ms to prevent CPU spin
             log_all_blocks: std::env::var("LOG_BLOCKS")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(false),
