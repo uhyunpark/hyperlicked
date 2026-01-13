@@ -28,6 +28,9 @@ pub struct VoteAggregator {
 
     /// Use BLS aggregation
     use_bls: bool,
+
+    /// Skip signature verification (dev mode only!)
+    skip_verification: bool,
 }
 
 impl VoteAggregator {
@@ -37,10 +40,22 @@ impl VoteAggregator {
             votes: HashMap::new(),
             quorum,
             use_bls,
+            skip_verification: false,
+        }
+    }
+
+    /// Create aggregator with verification control
+    pub fn new_with_options(quorum: usize, use_bls: bool, skip_verification: bool) -> Self {
+        Self {
+            votes: HashMap::new(),
+            quorum,
+            use_bls,
+            skip_verification,
         }
     }
 
     /// Add a vote. Returns Certificate if quorum reached.
+    /// Verifies BLS signature unless skip_verification is set.
     pub fn add_vote(&mut self, vote: Vote) -> Option<Certificate> {
         let key = (vote.view, vote.block_hash);
         let voter = vote.voter;
@@ -50,6 +65,18 @@ impl VoteAggregator {
         // Don't accept duplicate from same voter
         if vote_map.contains_key(&voter) {
             return None;
+        }
+
+        // Verify BLS signature if enabled and not skipped
+        if self.use_bls && !self.skip_verification && vote.is_bls() {
+            if !vote.verify_bls() {
+                tracing::warn!(
+                    view = vote.view,
+                    voter = %crate::types::hash_short(&voter),
+                    "Rejecting vote with invalid BLS signature"
+                );
+                return None;
+            }
         }
 
         vote_map.insert(voter, vote);
@@ -227,5 +254,62 @@ mod tests {
 
         // Should be empty now
         assert_eq!(agg.vote_count(1, &hash), 0);
+    }
+
+    #[test]
+    fn test_bls_verification_accepts_valid() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        let mut agg = VoteAggregator::new_with_options(1, true, false);
+
+        let hash = [1u8; 32];
+        let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
+
+        // Create valid BLS-signed vote
+        let vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+
+        // Should accept valid vote
+        let cert = agg.add_vote(vote);
+        assert!(cert.is_some(), "Valid BLS vote should be accepted");
+    }
+
+    #[test]
+    fn test_bls_verification_rejects_invalid() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        let mut agg = VoteAggregator::new_with_options(2, true, false);
+
+        let hash = [1u8; 32];
+        let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
+
+        // Create valid vote then tamper with it
+        let mut tampered_vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+        tampered_vote.block_hash[0] ^= 1; // Tamper with block hash
+
+        // Should reject tampered vote
+        agg.add_vote(tampered_vote);
+        assert_eq!(agg.vote_count(1, &hash), 0, "Tampered vote should be rejected");
+    }
+
+    #[test]
+    fn test_skip_verification_accepts_invalid() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        // With skip_verification = true, quorum = 2 so we can check vote is stored
+        let mut agg = VoteAggregator::new_with_options(2, true, true);
+
+        let hash = [1u8; 32];
+        let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
+
+        // Create valid vote then tamper with it
+        let mut tampered_vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+        tampered_vote.block_hash[0] ^= 1; // Tamper
+        let tampered_hash = tampered_vote.block_hash;
+
+        // Should accept when verification is skipped (dev mode)
+        let cert = agg.add_vote(tampered_vote);
+        assert!(cert.is_none(), "Quorum not reached yet");
+        // Vote is stored under tampered_hash (because that's what's in the vote)
+        assert_eq!(agg.vote_count(1, &tampered_hash), 1, "Should accept when verification skipped");
     }
 }
