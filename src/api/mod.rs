@@ -15,10 +15,13 @@
 //! ### WebSocket
 //! - `WS /ws` - Real-time updates (orderbook, fills, positions)
 
+mod handlers;
 mod routes;
 pub mod state;
+pub mod types;
 mod websocket;
 
 pub use routes::create_router;
 pub use state::SharedState;
+pub use types::ApiState;
 pub use websocket::WebSocketHandler;
