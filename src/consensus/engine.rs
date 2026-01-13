@@ -123,8 +123,12 @@ where
         self.store.save(&block);
         self.pending.insert(block_hash, block.clone());
 
-        // 6. For single node: self-vote
-        let vote = Vote::new(view, block_hash, app_hash, self.config.node_id);
+        // 6. For single node: self-vote (with BLS signature if enabled)
+        let vote = if let Some(bls_sk) = self.config.bls_secret_key() {
+            Vote::new_bls(view, block_hash, app_hash, self.config.node_id, &bls_sk)
+        } else {
+            Vote::new(view, block_hash, app_hash, self.config.node_id)
+        };
 
         // 7. Form QC (single node = 1 vote is quorum)
         let qc = Certificate::new(view, block_hash, vec![vote]);
@@ -174,13 +178,13 @@ where
         self.store.save(block);
         self.pending.insert(block.hash(), block.clone());
 
-        // 4. Create vote
-        Some(Vote::new(
-            view,
-            block.hash(),
-            local_app_hash,
-            self.config.node_id,
-        ))
+        // 4. Create vote (with BLS signature if enabled)
+        let vote = if let Some(bls_sk) = self.config.bls_secret_key() {
+            Vote::new_bls(view, block.hash(), local_app_hash, self.config.node_id, &bls_sk)
+        } else {
+            Vote::new(view, block.hash(), local_app_hash, self.config.node_id)
+        };
+        Some(vote)
     }
 
     /// Process a quorum certificate
@@ -195,13 +199,20 @@ where
         // Update high_qc
         self.safety.update_high_qc(qc.clone());
 
-        // 2-chain commit rule:
-        // If we have QC for block B, and QC for B's parent (high_qc before this),
-        // then B's parent is committed.
+        // 2-chain commit rule (HotStuff-2):
+        // When we have QC for block B, commit B's PARENT.
+        // This ensures block N is only committed when N+1 has been certified,
+        // providing stronger Byzantine fault tolerance.
+        let certified_block = self.pending.get(&qc.block_hash)
+            .cloned()
+            .or_else(|| self.store.get(&qc.block_hash))?;
 
-        // For simplicity in Phase 1: commit the block that this QC certifies
-        // (This is slightly simplified; real 2-chain would commit parent)
-        self.try_commit(&qc.block_hash)
+        // Don't commit genesis parent (height 0 has parent = [0u8; 32])
+        if certified_block.height == 0 {
+            return None;
+        }
+
+        self.try_commit(&certified_block.parent)
     }
 
     /// Try to commit a block and its ancestors
@@ -273,6 +284,35 @@ mod tests {
     use crate::consensus::{MemoryBlockStore, NoOpApp};
 
     #[test]
+    fn test_2_chain_commit_rule() {
+        // HotStuff-2 2-chain commit: block N commits when QC for N+1 exists
+        // Genesis (height 0) is already committed at initialization
+        let config = ConsensusConfig::single_node();
+        let app = NoOpApp;
+        let store = MemoryBlockStore::new();
+
+        let mut engine = Engine::new(config, app, store);
+        assert_eq!(engine.committed_height(), 0, "Genesis starts as committed");
+
+        // Tick 1: Certify block 1, try to commit genesis (already committed, returns None)
+        let committed = engine.tick();
+        assert!(committed.is_none(), "Genesis was already committed at init");
+        assert_eq!(engine.committed_height(), 0);
+
+        // Tick 2: Certify block 2, commits block 1
+        let committed = engine.tick();
+        assert!(committed.is_some());
+        assert_eq!(committed.unwrap().height, 1, "Second QC should commit block 1");
+        assert_eq!(engine.committed_height(), 1);
+
+        // Tick 3: Certify block 3, commits block 2
+        let committed = engine.tick();
+        assert!(committed.is_some());
+        assert_eq!(committed.unwrap().height, 2, "Third QC should commit block 2");
+        assert_eq!(engine.committed_height(), 2);
+    }
+
+    #[test]
     fn test_single_node_produces_blocks() {
         let config = ConsensusConfig::single_node();
         let app = NoOpApp;
@@ -280,12 +320,18 @@ mod tests {
 
         let mut engine = Engine::new(config, app, store);
 
-        // First tick should produce a block
+        // With 2-chain commit:
+        // - Tick 1: Certifies block 1, genesis already committed -> None
+        // - Tick 2: Certifies block 2, commits block 1
+        // - Tick 3: Certifies block 3, commits block 2
+        let committed = engine.tick();
+        assert!(committed.is_none()); // Genesis already committed
+        assert_eq!(engine.committed_height(), 0);
+
         let committed = engine.tick();
         assert!(committed.is_some());
         assert_eq!(engine.committed_height(), 1);
 
-        // Second tick should produce another block
         let committed = engine.tick();
         assert!(committed.is_some());
         assert_eq!(engine.committed_height(), 2);
@@ -299,8 +345,12 @@ mod tests {
 
         let mut engine = Engine::new(config, app, store);
 
-        // Produce several blocks
-        for expected_height in 1..=5 {
+        // With 2-chain commit: first tick returns None (genesis already committed)
+        // Then committed heights are: 1, 2, 3, 4 for ticks 2-5
+        let first = engine.tick();
+        assert!(first.is_none(), "First tick: genesis already committed");
+
+        for expected_height in 1..=4 {
             let block = engine.tick().expect("should produce block");
             assert_eq!(block.height, expected_height);
         }
