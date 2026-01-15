@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
@@ -18,7 +18,7 @@ interface AccountData {
 }
 
 export function TradePanel() {
-  const { selectedSymbol, currentPrice } = useTradingStore()
+  const { selectedSymbol, currentPrice, balanceRefreshTrigger } = useTradingStore()
   const wallet = useWallet()
   const [side, setSide] = useState<Side>('buy')
   const [orderType, setOrderType] = useState<OrderType>('limit')
@@ -27,12 +27,32 @@ export function TradePanel() {
   const [price, setPrice] = useState('')
   const [size, setSize] = useState('')
   const [leverage, setLeverage] = useState(10)
-  const [nonce, setNonce] = useState(1)
 
   // Account data from API
   const [account, setAccount] = useState<AccountData | null>(null)
   const [isLoadingAccount, setIsLoadingAccount] = useState(false)
   const [isFaucetLoading, setIsFaucetLoading] = useState(false)
+
+  // Account fetch function (reusable)
+  const fetchAccount = useCallback(async () => {
+    if (!wallet.address) return
+    setIsLoadingAccount(true)
+    try {
+      const { getAccount } = await import('@/lib/api')
+      const data = await getAccount(wallet.address)
+      setAccount({
+        balance: data.balance / 100, // cents to dollars
+        lockedCollateral: data.lockedCollateral / 100,
+        availableBalance: data.availableBalance / 100,
+        unrealizedPnL: data.unrealizedPnL / 100,
+        totalEquity: data.totalEquity / 100
+      })
+    } catch (error) {
+      console.error('[account] Failed to fetch:', error)
+    } finally {
+      setIsLoadingAccount(false)
+    }
+  }, [wallet.address])
 
   // Fetch account data when wallet connects
   useEffect(() => {
@@ -41,38 +61,19 @@ export function TradePanel() {
       return
     }
 
-    const fetchAccount = async () => {
-      setIsLoadingAccount(true)
-      try {
-        const { getAccount } = await import('@/lib/api')
-        const data = await getAccount(wallet.address!)
-        setAccount({
-          balance: data.balance / 100, // cents to dollars
-          lockedCollateral: data.lockedCollateral / 100,
-          availableBalance: data.availableBalance / 100,
-          unrealizedPnL: data.unrealizedPnL / 100,
-          totalEquity: data.totalEquity / 100
-        })
-      } catch (error) {
-        console.error('[account] Failed to fetch:', error)
-        // Use default values on error
-        setAccount({
-          balance: 100000,
-          lockedCollateral: 0,
-          availableBalance: 100000,
-          unrealizedPnL: 0,
-          totalEquity: 100000
-        })
-      } finally {
-        setIsLoadingAccount(false)
-      }
-    }
-
     fetchAccount()
     // Refresh every 10 seconds
     const interval = setInterval(fetchAccount, 10000)
     return () => clearInterval(interval)
-  }, [wallet.isConnected, wallet.address])
+  }, [wallet.isConnected, wallet.address, fetchAccount])
+
+  // Refetch account when WebSocket balance update is received
+  useEffect(() => {
+    if (balanceRefreshTrigger > 0 && wallet.address) {
+      console.log('[account] Balance refresh triggered via WebSocket')
+      fetchAccount()
+    }
+  }, [balanceRefreshTrigger, wallet.address, fetchAccount])
 
   const accountBalance = account?.totalEquity ?? 0
   const availableBalance = account?.availableBalance ?? 0
@@ -85,16 +86,23 @@ export function TradePanel() {
       const success = await requestFaucet(wallet.address)
       if (success) {
         toast.success('Faucet', 'Received $100,000 test USDT')
-        // Refresh account data
-        const { getAccount } = await import('@/lib/api')
-        const data = await getAccount(wallet.address)
-        setAccount({
-          balance: data.balance / 100,
-          lockedCollateral: data.lockedCollateral / 100,
-          availableBalance: data.availableBalance / 100,
-          unrealizedPnL: data.unrealizedPnL / 100,
-          totalEquity: data.totalEquity / 100
-        })
+        // Wait for block to be processed (deposit is in mempool, executed on next block ~100ms)
+        // Then refresh account data
+        setTimeout(async () => {
+          try {
+            const { getAccount } = await import('@/lib/api')
+            const data = await getAccount(wallet.address!)
+            setAccount({
+              balance: data.balance / 100,
+              lockedCollateral: data.lockedCollateral / 100,
+              availableBalance: data.availableBalance / 100,
+              unrealizedPnL: data.unrealizedPnL / 100,
+              totalEquity: data.totalEquity / 100
+            })
+          } catch (err) {
+            console.error('[faucet] Failed to refresh balance:', err)
+          }
+        }, 500) // Wait 500ms for block to process
       } else {
         toast.error('Faucet Failed', 'Could not get test USDT')
       }
@@ -130,7 +138,12 @@ export function TradePanel() {
     }
 
     try {
-      const { submitSignedTransaction, convertToApiPrice, convertToApiSize } = await import('@/lib/api')
+      const { submitSignedTransaction, convertToApiPrice, convertToApiSize, getNonce } = await import('@/lib/api')
+
+      // Always fetch fresh nonce from server before submitting
+      // This ensures we have the correct nonce even after previous orders
+      const nonceData = await getNonce(wallet.address!)
+      const currentNonce = nonceData.nonce
 
       // For market orders, use sweep prices to ensure execution
       // Buy: Use very high price to sweep all asks
@@ -153,7 +166,7 @@ export function TradePanel() {
         type: tifCode,
         price: convertToApiPrice(orderPrice).toString(),
         qty: convertToApiSize(orderSize).toString(),
-        nonce: nonce.toString(),
+        nonce: currentNonce.toString(),
         deadline: '0',
         leverage,
         owner: wallet.address,
@@ -175,9 +188,35 @@ export function TradePanel() {
       if (response.status === 'submitted') {
         const method = agentMode ? 'Agent Key' : (wallet.isRabby ? 'Rabby' : 'MetaMask')
         toast.success('Order Submitted', `Order #${response.orderId} signed with ${method}`)
-        setNonce(n => n + 1)
         setSize('')
         if (orderType === 'limit') setPrice('')
+
+        // Immediately refresh open orders so the new order appears
+        try {
+          const { getOrders, convertPrice, convertSize } = await import('@/lib/api')
+          const ordersData = await getOrders(wallet.address!)
+          const orders = ordersData
+            .filter(o => o.status === 'open' || o.status === 'partial')
+            .map(o => {
+              const size = convertSize(o.size)
+              const filled = convertSize(o.filled)
+              return {
+                id: o.id,
+                symbol: o.symbol,
+                side: o.side as 'buy' | 'sell',
+                type: (o.type === 'market' ? 'market' : 'limit') as 'limit' | 'market',
+                price: convertPrice(o.price),
+                size,
+                filled,
+                remaining: size - filled,
+                status: (o.status === 'partial' ? 'open' : o.status) as 'open' | 'filled' | 'cancelled',
+                timestamp: o.timestamp
+              }
+            })
+          useTradingStore.getState().setOpenOrders(orders)
+        } catch (err) {
+          console.error('[order] Failed to refresh orders:', err)
+        }
       } else {
         toast.error('Order Rejected', response.message || 'Unknown error')
       }
