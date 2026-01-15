@@ -19,6 +19,7 @@ mod handlers;
 mod routes;
 pub mod state;
 pub mod types;
+mod verify;
 mod websocket;
 
 pub use routes::create_router;

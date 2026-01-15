@@ -13,9 +13,10 @@ use serde::Deserialize;
 use super::handlers::{deposit, register_delegation, submit_order_legacy, withdraw};
 use super::state::{PriceLevel, SharedState};
 use super::types::{
-    AccountInfo, ApiState, ChainStatus, MarketInfo, OrderDetails, OrderInfo, OrderbookSnapshot,
+    AccountInfo, ApiState, ChainStatus, MarketInfo, OrderInfo, OrderbookSnapshot,
     PositionInfo, SignedTransaction, SubmitOrderResponse,
 };
+use super::verify::{verify_cancel, verify_order};
 use crate::app::{OrderType, Side, Transaction};
 
 pub fn create_router(state: SharedState) -> Router {
@@ -31,8 +32,10 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/accounts/:address", get(get_account))
         .route("/accounts/:address/positions", get(get_positions))
         .route("/accounts/:address/orders", get(get_orders))
+        .route("/accounts/:address/nonce", get(get_nonce))
         // Chain endpoints
         .route("/chain/status", get(get_chain_status))
+        .route("/chain/insurance-fund", get(get_insurance_fund))
         // Order submission
         .route("/orders", post(submit_order))
         .route("/orders/cancel", post(cancel_order))
@@ -213,6 +216,8 @@ async fn get_positions(
     State(state): State<ApiState>,
     Path(address): Path<String>,
 ) -> Json<Vec<PositionInfo>> {
+    use crate::app::MAINTENANCE_MARGIN_BPS;
+
     let app = state.shared.app.read().await;
 
     let account = match app.account(&address) {
@@ -220,26 +225,47 @@ async fn get_positions(
         None => return Json(vec![]),
     };
 
+    // Get available margin for liquidation price calculation
+    let available_margin = account.balance + account.locked;
+
     let positions: Vec<PositionInfo> = account
         .positions
         .iter()
         .filter(|(_, pos)| pos.size != 0)
         .map(|(symbol, pos)| {
             let mark = app.mark_price(symbol).unwrap_or(pos.entry_price);
+            let notional = pos.notional(mark);
+            // Approximate margin allocated to this position (proportional to notional)
+            let total_notional: i64 = account.positions.values()
+                .filter(|p| p.size != 0)
+                .map(|p| p.notional(mark))
+                .sum();
+            let position_margin = if total_notional > 0 {
+                (available_margin * notional) / total_notional
+            } else {
+                available_margin
+            };
+
             PositionInfo {
                 symbol: symbol.clone(),
                 size: pos.size,
                 entry_price: pos.entry_price,
                 mark_price: mark,
-                liquidation_price: pos.entry_price * 9 / 10,
+                liquidation_price: pos.liquidation_price(position_margin, MAINTENANCE_MARGIN_BPS),
                 unrealized_pnl: pos.unrealized_pnl(mark),
-                margin: 0,
-                leverage: 10.0,
+                margin: position_margin,
+                leverage: if position_margin > 0 { notional as f64 / position_margin as f64 } else { 0.0 },
             }
         })
         .collect();
 
     Json(positions)
+}
+
+async fn get_nonce(State(state): State<ApiState>, Path(address): Path<String>) -> Json<serde_json::Value> {
+    let app = state.shared.app.read().await;
+    let nonce = app.accounts().get_nonce(&address);
+    Json(serde_json::json!({ "address": address, "nonce": nonce }))
 }
 
 async fn get_orders(State(state): State<ApiState>, Path(address): Path<String>) -> Json<Vec<OrderInfo>> {
@@ -295,6 +321,14 @@ async fn get_chain_status(State(state): State<ApiState>) -> Json<ChainStatus> {
     })
 }
 
+async fn get_insurance_fund(State(state): State<ApiState>) -> Json<serde_json::Value> {
+    let app = state.shared.app.read().await;
+    Json(serde_json::json!({
+        "balance": app.insurance_fund_balance(),
+        "balance_usd": app.insurance_fund_balance() as f64 / 100.0
+    }))
+}
+
 // =============================================================================
 // Order Submission
 // =============================================================================
@@ -304,9 +338,9 @@ async fn submit_order(
     Json(req): Json<SignedTransaction>,
 ) -> Result<Json<SubmitOrderResponse>, (StatusCode, String)> {
     if req.tx_type == "order" {
-        submit_order_tx(&state, req.order).await
+        submit_order_tx(&state, req).await
     } else if req.tx_type == "cancel" {
-        submit_cancel_tx(&state, req.cancel).await
+        submit_cancel_tx(&state, req).await
     } else {
         Err((
             StatusCode::BAD_REQUEST,
@@ -317,40 +351,59 @@ async fn submit_order(
 
 async fn submit_order_tx(
     state: &ApiState,
-    order: Option<OrderDetails>,
+    req: SignedTransaction,
 ) -> Result<Json<SubmitOrderResponse>, (StatusCode, String)> {
-    let order = order.ok_or((StatusCode::BAD_REQUEST, "Missing order details".to_string()))?;
+    // Get delegation if agent mode
+    let delegation = if req.agent_mode.unwrap_or(false) {
+        let delegation_id = req
+            .delegation_id
+            .as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "Missing delegation_id for agent mode".to_string()))?;
 
-    let side = match order.side {
+        let delegations = state.delegations.read().await;
+        delegations.get(delegation_id).cloned()
+    } else {
+        None
+    };
+
+    // Verify signature and extract verified data
+    let verified = verify_order(&req, &state.eip712_signer, &state.agent_signer, delegation.as_ref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Validate and consume nonce
+    {
+        let mut app = state.shared.app.write().await;
+        let address_str = format!("{:?}", verified.owner);
+
+        app.accounts_mut()
+            .use_nonce(&address_str, verified.nonce)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
+
+    // Convert to internal types
+    let side = match verified.side {
         1 => Side::Bid,
         2 => Side::Ask,
         _ => return Err((StatusCode::BAD_REQUEST, "Invalid side".to_string())),
     };
 
-    let order_type = match order.order_type {
+    let order_type = match verified.order_type {
         1 => OrderType::Gtc,
         2 => OrderType::Ioc,
         3 => OrderType::Alo,
         _ => return Err((StatusCode::BAD_REQUEST, "Invalid order type".to_string())),
     };
 
-    let price: i64 = order
-        .price
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid price".to_string()))?;
-    let size: i64 = order
-        .qty
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid qty".to_string()))?;
+    let trader = format!("{:?}", verified.owner);
 
     let tx = Transaction::PlaceOrder {
-        trader: order.owner,
-        symbol: order.symbol,
+        trader,
+        symbol: verified.symbol,
         side,
-        price,
-        size,
+        price: verified.price,
+        size: verified.size,
         order_type,
-        reduce_only: order.reduce_only.unwrap_or(false),
+        reduce_only: verified.reduce_only,
     };
 
     let mut app = state.shared.app.write().await;
@@ -369,13 +422,27 @@ async fn submit_order_tx(
 
 async fn submit_cancel_tx(
     state: &ApiState,
-    cancel: Option<super::types::CancelDetails>,
+    req: SignedTransaction,
 ) -> Result<Json<SubmitOrderResponse>, (StatusCode, String)> {
-    let cancel = cancel.ok_or((StatusCode::BAD_REQUEST, "Missing cancel details".to_string()))?;
+    // Verify signature
+    let verified = verify_cancel(&req, &state.eip712_signer)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Validate and consume nonce
+    {
+        let mut app = state.shared.app.write().await;
+        let address_str = format!("{:?}", verified.owner);
+
+        app.accounts_mut()
+            .use_nonce(&address_str, verified.nonce)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
+
+    let trader = format!("{:?}", verified.owner);
 
     let tx = Transaction::CancelOrder {
-        trader: cancel.owner,
-        order_id: cancel.order_id.clone(),
+        trader,
+        order_id: verified.order_id.clone(),
     };
 
     let mut app = state.shared.app.write().await;
@@ -383,7 +450,7 @@ async fn submit_cancel_tx(
 
     Ok(Json(SubmitOrderResponse {
         status: "submitted".to_string(),
-        order_id: cancel.order_id,
+        order_id: verified.order_id,
         message: None,
     }))
 }

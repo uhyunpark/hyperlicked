@@ -40,6 +40,52 @@ impl Position {
     pub fn notional(&self, mark_price: Price) -> i64 {
         (self.size.abs() * mark_price) / 100_000_000
     }
+
+    /// Calculate liquidation price given available margin
+    /// Returns 0 if position is empty or margin is insufficient to calculate
+    pub fn liquidation_price(&self, available_margin: i64, maintenance_rate_bps: i64) -> Price {
+        if self.size == 0 || self.entry_price == 0 {
+            return 0;
+        }
+
+        // Notional at entry = |size| * entry_price / 1e8
+        let notional_at_entry = (self.size.abs() * self.entry_price) / 100_000_000;
+        if notional_at_entry == 0 {
+            return 0;
+        }
+
+        // Maintenance margin = notional * maintenance_rate / 10000
+        // At liquidation: equity = maintenance_margin
+        // equity = margin + unrealized_pnl
+        // For long: pnl = size * (liq_price - entry) / 1e8
+        // At liquidation: margin + size * (liq - entry) / 1e8 = notional_at_liq * maint / 10000
+        // Simplified: liq_price where margin covers losses down to maintenance
+
+        // margin_ratio = available_margin * 1e8 / (|size| * entry_price)
+        // For long: liq = entry * (1 - margin_ratio + maintenance_rate)
+        // For short: liq = entry * (1 + margin_ratio - maintenance_rate)
+
+        let margin_ratio_bps = if notional_at_entry > 0 {
+            (available_margin * 10000) / notional_at_entry
+        } else {
+            0
+        };
+
+        if self.size > 0 {
+            // Long position: liquidated when price drops
+            // liq_price = entry * (10000 - margin_ratio_bps + maintenance_rate_bps) / 10000
+            let factor = 10000 - margin_ratio_bps + maintenance_rate_bps;
+            if factor <= 0 {
+                return 0; // Well-margined, won't liquidate
+            }
+            (self.entry_price * factor) / 10000
+        } else {
+            // Short position: liquidated when price rises
+            // liq_price = entry * (10000 + margin_ratio_bps - maintenance_rate_bps) / 10000
+            let factor = 10000 + margin_ratio_bps - maintenance_rate_bps;
+            (self.entry_price * factor) / 10000
+        }
+    }
 }
 
 /// Trader account
@@ -52,6 +98,9 @@ pub struct Account {
     pub locked: i64,
     /// Positions by symbol
     pub positions: HashMap<Symbol, Position>,
+    /// Next expected nonce (for replay protection)
+    #[serde(default)]
+    pub nonce: u64,
 }
 
 impl Account {
@@ -61,7 +110,23 @@ impl Account {
             balance: 0,
             locked: 0,
             positions: HashMap::new(),
+            nonce: 0,
         }
+    }
+
+    /// Check if nonce is valid (must be exactly current nonce)
+    pub fn validate_nonce(&self, nonce: u64) -> bool {
+        nonce == self.nonce
+    }
+
+    /// Increment nonce after successful transaction
+    pub fn increment_nonce(&mut self) {
+        self.nonce += 1;
+    }
+
+    /// Get current nonce (for API responses)
+    pub fn current_nonce(&self) -> u64 {
+        self.nonce
     }
 
     /// Total equity = balance + locked + unrealized PnL
@@ -81,6 +146,34 @@ impl Account {
     /// Available margin for new orders
     pub fn available_margin(&self) -> i64 {
         self.balance
+    }
+
+    /// Calculate total maintenance margin required across all positions
+    /// maintenance_rate_bps: maintenance margin rate in basis points (500 = 5%)
+    pub fn maintenance_margin_required(&self, mark_prices: &HashMap<Symbol, Price>, maintenance_rate_bps: i64) -> i64 {
+        self.positions
+            .iter()
+            .filter(|(_, pos)| pos.size != 0)
+            .map(|(symbol, pos)| {
+                let mark = mark_prices.get(symbol).copied().unwrap_or(pos.entry_price);
+                let notional = pos.notional(mark);
+                (notional * maintenance_rate_bps) / 10000
+            })
+            .sum()
+    }
+
+    /// Check if account should be liquidated
+    /// Returns true if equity < maintenance margin required
+    pub fn is_liquidatable(&self, mark_prices: &HashMap<Symbol, Price>, maintenance_rate_bps: i64) -> bool {
+        // No positions = not liquidatable
+        if self.positions.values().all(|p| p.size == 0) {
+            return false;
+        }
+
+        let equity = self.equity(mark_prices);
+        let maintenance = self.maintenance_margin_required(mark_prices, maintenance_rate_bps);
+
+        equity < maintenance
     }
 
     /// Get position for a symbol (or empty)
@@ -148,6 +241,20 @@ impl AccountManager {
         Self {
             accounts: HashMap::new(),
         }
+    }
+
+    /// Create AccountManager from a list of accounts (for recovery from snapshot)
+    pub fn from_accounts(accounts: Vec<Account>) -> Self {
+        let accounts_map = accounts
+            .into_iter()
+            .map(|a| (a.address.clone(), a))
+            .collect();
+        Self { accounts: accounts_map }
+    }
+
+    /// Get all accounts (for snapshot)
+    pub fn all_accounts(&self) -> Vec<Account> {
+        self.accounts.values().cloned().collect()
     }
 
     /// Get or create account (no faucet - use `get_or_create_with_faucet` for dev mode)
@@ -272,6 +379,24 @@ impl AccountManager {
             .map(|a| a.balance >= required_margin)
             .unwrap_or(false)
     }
+
+    /// Validate and consume nonce atomically
+    pub fn use_nonce(&mut self, address: &str, nonce: u64) -> Result<(), AccountError> {
+        let account = self.get_or_create(address);
+        if !account.validate_nonce(nonce) {
+            return Err(AccountError::InvalidNonce {
+                expected: account.nonce,
+                got: nonce,
+            });
+        }
+        account.increment_nonce();
+        Ok(())
+    }
+
+    /// Get current nonce for an address
+    pub fn get_nonce(&self, address: &str) -> u64 {
+        self.accounts.get(address).map(|a| a.nonce).unwrap_or(0)
+    }
 }
 
 impl Default for AccountManager {
@@ -289,6 +414,8 @@ pub enum AccountError {
     InsufficientBalance,
     #[error("account not found")]
     NotFound,
+    #[error("invalid nonce: expected {expected}, got {got}")]
+    InvalidNonce { expected: u64, got: u64 },
 }
 
 #[cfg(test)]
@@ -354,5 +481,80 @@ mod tests {
         let pos = account.position("BTC-USDT");
         assert_eq!(pos.size, 100_000_000); // 1 BTC left
         assert_eq!(pos.realized_pnl, 100_000); // $1,000 realized
+    }
+
+    #[test]
+    fn test_nonce_validation() {
+        let mut mgr = AccountManager::new();
+
+        // First nonce should be 0
+        assert_eq!(mgr.get_nonce("alice"), 0);
+
+        // Use nonce 0
+        assert!(mgr.use_nonce("alice", 0).is_ok());
+        assert_eq!(mgr.get_nonce("alice"), 1);
+
+        // Replay should fail
+        assert!(mgr.use_nonce("alice", 0).is_err());
+
+        // Wrong nonce should fail
+        assert!(mgr.use_nonce("alice", 5).is_err());
+
+        // Next nonce should work
+        assert!(mgr.use_nonce("alice", 1).is_ok());
+        assert_eq!(mgr.get_nonce("alice"), 2);
+    }
+
+    #[test]
+    fn test_liquidation_price_long() {
+        let mut pos = Position::default();
+        // Long 1 BTC at $50,000
+        pos.size = 100_000_000; // 1 BTC
+        pos.entry_price = 5_000_000; // $50,000
+
+        // With $5,000 margin (10% of notional) and 5% maintenance (500 bps)
+        // margin_ratio = 10%, so factor = 10000 - 1000 + 500 = 9500
+        // liq_price = 50000 * 9500 / 10000 = $47,500
+        let liq = pos.liquidation_price(500_000, 500);
+        assert_eq!(liq, 4_750_000); // $47,500
+    }
+
+    #[test]
+    fn test_liquidation_price_short() {
+        let mut pos = Position::default();
+        // Short 1 BTC at $50,000
+        pos.size = -100_000_000; // -1 BTC
+        pos.entry_price = 5_000_000; // $50,000
+
+        // With $5,000 margin (10% of notional) and 5% maintenance (500 bps)
+        // margin_ratio = 10%, so factor = 10000 + 1000 - 500 = 10500
+        // liq_price = 50000 * 10500 / 10000 = $52,500
+        let liq = pos.liquidation_price(500_000, 500);
+        assert_eq!(liq, 5_250_000); // $52,500
+    }
+
+    #[test]
+    fn test_is_liquidatable() {
+        let mut account = Account::new("trader");
+        account.balance = 500_000; // $5,000
+
+        // Long 1 BTC at $50,000
+        account.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+
+        let mut mark_prices = HashMap::new();
+
+        // At entry price, equity = $5,000, maintenance = $2,500 (5% of $50k)
+        mark_prices.insert("BTC-USDT".to_string(), 5_000_000);
+        assert!(!account.is_liquidatable(&mark_prices, 500)); // Not liquidatable
+
+        // Price drops to $48,000, unrealized PnL = -$2,000
+        // equity = 5000 - 2000 = $3,000, maintenance = $2,400 (5% of $48k)
+        mark_prices.insert("BTC-USDT".to_string(), 4_800_000);
+        assert!(!account.is_liquidatable(&mark_prices, 500)); // Still OK
+
+        // Price drops to $46,000, unrealized PnL = -$4,000
+        // equity = 5000 - 4000 = $1,000, maintenance = $2,300 (5% of $46k)
+        mark_prices.insert("BTC-USDT".to_string(), 4_600_000);
+        assert!(account.is_liquidatable(&mark_prices, 500)); // Liquidatable!
     }
 }
