@@ -21,14 +21,16 @@
 //! ```
 
 pub mod accounts;
+pub mod liquidation;
 pub mod mempool;
 pub mod orderbook;
 pub mod state;
 
 pub use accounts::{Account, AccountManager, Position};
+pub use liquidation::LiquidationResult;
 pub use mempool::Mempool;
 pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
-pub use state::{AppState, OrderUpdateInfo};
+pub use state::{AppState, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
 
 use crate::types::{Price, Size};
 
@@ -91,7 +93,7 @@ impl Transaction {
 }
 
 /// Market configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MarketConfig {
     pub symbol: Symbol,
     pub tick_size: Price,      // Minimum price increment

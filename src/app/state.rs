@@ -30,6 +30,9 @@ pub struct OrderUpdateInfo {
     pub remaining: i64,
 }
 
+/// Maintenance margin rate in basis points (500 = 5%)
+pub const MAINTENANCE_MARGIN_BPS: i64 = 500;
+
 /// Complete application state
 pub struct AppState {
     /// Orderbooks by symbol
@@ -50,6 +53,10 @@ pub struct AppState {
     pending_order_updates: Vec<OrderUpdateInfo>,
     /// Trade history by symbol (recent trades, capped at MAX_TRADES_PER_SYMBOL)
     trade_history: HashMap<Symbol, VecDeque<Fill>>,
+    /// Insurance fund balance (in cents)
+    insurance_fund: i64,
+    /// Liquidations from the last block execution (for event emission)
+    pending_liquidations: Vec<super::liquidation::LiquidationResult>,
 }
 
 impl AppState {
@@ -64,6 +71,8 @@ impl AppState {
             pending_fills: Vec::new(),
             pending_order_updates: Vec::new(),
             trade_history: HashMap::new(),
+            insurance_fund: 0,
+            pending_liquidations: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -298,9 +307,19 @@ impl AppState {
         std::mem::take(&mut self.pending_order_updates)
     }
 
+    /// Take pending liquidations (clears the list)
+    pub fn take_pending_liquidations(&mut self) -> Vec<super::liquidation::LiquidationResult> {
+        std::mem::take(&mut self.pending_liquidations)
+    }
+
     /// Get account for position updates
     pub fn accounts(&self) -> &AccountManager {
         &self.accounts
+    }
+
+    /// Get mutable account manager (for nonce validation)
+    pub fn accounts_mut(&mut self) -> &mut AccountManager {
+        &mut self.accounts
     }
 
     /// Get market config
@@ -314,6 +333,69 @@ impl AppState {
             .get(symbol)
             .map(|h| h.iter().rev().take(limit).collect())
             .unwrap_or_default()
+    }
+
+    /// Create snapshot of current state
+    pub fn create_snapshot(&self, height: u64) -> crate::storage::AppSnapshot {
+        crate::storage::AppSnapshot {
+            height,
+            timestamp: self.timestamp,
+            accounts: self.accounts.all_accounts(),
+            market_configs: self.configs.values().cloned().collect(),
+            mark_prices: self.mark_prices.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            insurance_fund: self.insurance_fund,
+        }
+    }
+
+    /// Restore state from snapshot (for recovery)
+    pub fn from_snapshot(snapshot: crate::storage::AppSnapshot) -> Self {
+        // Extract fields from snapshot (consuming it)
+        let mark_prices = snapshot.mark_prices_map();
+        let timestamp = snapshot.timestamp;
+        let insurance_fund = snapshot.insurance_fund;
+
+        let mut state = Self {
+            orderbooks: HashMap::new(),
+            accounts: AccountManager::from_accounts(snapshot.accounts),
+            mempool: Mempool::default(),
+            configs: HashMap::new(),
+            mark_prices,
+            timestamp,
+            pending_fills: Vec::new(),
+            pending_order_updates: Vec::new(),
+            trade_history: HashMap::new(),
+            insurance_fund,
+            pending_liquidations: Vec::new(),
+        };
+
+        // Restore market configs and create orderbooks
+        for config in snapshot.market_configs {
+            let symbol = config.symbol.clone();
+            state.orderbooks.insert(symbol.clone(), OrderBook::new(&symbol));
+            state.configs.insert(symbol, config);
+        }
+
+        state
+    }
+
+    /// Get all market configs (for snapshot)
+    pub fn market_configs(&self) -> &HashMap<Symbol, MarketConfig> {
+        &self.configs
+    }
+
+    /// Get all mark prices (for snapshot)
+    pub fn mark_prices(&self) -> &HashMap<Symbol, Price> {
+        &self.mark_prices
+    }
+
+    /// Get insurance fund balance
+    pub fn insurance_fund_balance(&self) -> i64 {
+        self.insurance_fund
+    }
+
+    /// Add to insurance fund (can be negative for losses)
+    pub fn add_to_insurance_fund(&mut self, amount: i64) {
+        self.insurance_fund += amount;
     }
 }
 
@@ -337,6 +419,7 @@ impl AppHook for AppState {
         // Clear pending events from previous block
         self.pending_fills.clear();
         self.pending_order_updates.clear();
+        self.pending_liquidations.clear();
 
         // Get transactions for this block from mempool
         let txs = self.mempool.prepare_block(1000);
@@ -353,6 +436,18 @@ impl AppHook for AppState {
                 }
             }
         }
+
+        // Check and execute liquidations after all transactions
+        let liquidations = super::liquidation::check_and_liquidate(
+            &mut self.accounts,
+            &self.mark_prices,
+        );
+
+        // Process liquidation results
+        for liq in &liquidations {
+            self.insurance_fund += liq.pnl;
+        }
+        self.pending_liquidations = liquidations;
 
         // Return state hash for Byzantine detection
         self.compute_state_hash()
