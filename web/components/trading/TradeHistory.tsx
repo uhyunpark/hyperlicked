@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { useWallet } from '@/lib/useWallet'
+import { useTradingStore } from '@/lib/store'
+import { getTrades, ApiTrade, convertPrice, convertSize } from '@/lib/api'
 
 interface Trade {
   id: string
@@ -29,6 +31,7 @@ function formatTimestamp(timestamp: number) {
 
 export function TradeHistory() {
   const wallet = useWallet()
+  const { selectedSymbol } = useTradingStore()
   const [trades, setTrades] = useState<Trade[]>([])
   const [isLoading, setIsLoading] = useState(false)
 
@@ -41,12 +44,24 @@ export function TradeHistory() {
     const fetchTrades = async () => {
       setIsLoading(true)
       try {
-        // TODO: Replace with actual API call when backend endpoint is ready
-        // const response = await fetch(`/account/${wallet.address}/trades`)
-        // const data = await response.json()
-
-        // Mock data for now
-        setTrades([])
+        // Fetch recent market trades (user-specific trades API not yet available)
+        const data = await getTrades(selectedSymbol, 50)
+        const formatted: Trade[] = data.map((t: ApiTrade, i: number) => {
+          const price = convertPrice(t.price)
+          const size = convertSize(t.size)
+          return {
+            id: `${t.timestamp}-${i}`,
+            timestamp: t.timestamp,
+            symbol: selectedSymbol,
+            side: t.side as 'buy' | 'sell',
+            price,
+            size,
+            tradeValue: price * size,
+            fee: 0, // Fee info not in API
+            closedPnL: null, // PnL info not in API
+          }
+        })
+        setTrades(formatted)
       } catch (error) {
         console.error('[trade-history] Failed to fetch:', error)
         setTrades([])
@@ -56,7 +71,9 @@ export function TradeHistory() {
     }
 
     fetchTrades()
-  }, [wallet.isConnected, wallet.address])
+    const interval = setInterval(fetchTrades, 5000) // Refresh every 5s
+    return () => clearInterval(interval)
+  }, [wallet.isConnected, wallet.address, selectedSymbol])
 
   if (!wallet.isConnected) {
     return (

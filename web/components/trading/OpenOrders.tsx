@@ -1,12 +1,55 @@
 'use client'
 
+import { useEffect, useCallback } from 'react'
 import { useTradingStore, useWalletStore } from '@/lib/store'
-import { cancelOrder } from '@/lib/api'
+import { cancelOrder, getOrders, convertPrice, convertSize } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 
 export function OpenOrders() {
-  const { openOrders } = useTradingStore()
-  const { address } = useWalletStore()
+  const { openOrders, setOpenOrders } = useTradingStore()
+  const { address, isConnected } = useWalletStore()
+
+  // Fetch orders via REST as fallback (in case WebSocket isn't working)
+  const fetchOrders = useCallback(async () => {
+    if (!address) return
+    try {
+      const ordersData = await getOrders(address)
+      const orders = ordersData
+        .filter(o => o.status === 'open' || o.status === 'partial')
+        .map(o => {
+          const size = convertSize(o.size)
+          const filled = convertSize(o.filled)
+          const orderType: 'limit' | 'market' = o.type === 'market' ? 'market' : 'limit'
+          return {
+            id: o.id,
+            symbol: o.symbol,
+            side: o.side as 'buy' | 'sell',
+            type: orderType,
+            price: convertPrice(o.price),
+            size,
+            filled,
+            remaining: size - filled,
+            status: o.status === 'partial' ? 'open' : o.status as 'open' | 'filled' | 'cancelled',
+            timestamp: o.timestamp
+          }
+        })
+      setOpenOrders(orders)
+    } catch (error) {
+      console.error('[open-orders] Failed to fetch:', error)
+    }
+  }, [address, setOpenOrders])
+
+  // Fetch on mount and periodically
+  useEffect(() => {
+    if (!isConnected || !address) return
+
+    // Fetch immediately
+    fetchOrders()
+
+    // Refresh every 5 seconds
+    const interval = setInterval(fetchOrders, 5000)
+    return () => clearInterval(interval)
+  }, [isConnected, address, fetchOrders])
 
   const handleCancel = async (orderId: string) => {
     if (!address) {

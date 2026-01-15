@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useTradingStore } from '@/lib/store'
+import { getOrderbook, getTrades, convertPrice, convertSize } from '@/lib/api'
 import type { PriceLevel } from '@/lib/types'
 
 type OrderbookTab = 'orderbook' | 'trades'
@@ -89,7 +90,48 @@ function TradesPanel() {
 
 export function Orderbook() {
   const [activeTab, setActiveTab] = useState<OrderbookTab>('orderbook')
-  const { orderbook } = useTradingStore()
+  const { orderbook, updateOrderbook, addTrade, isConnected: wsConnected } = useTradingStore()
+
+  // REST fallback: fetch orderbook data if WebSocket isn't connected
+  const fetchData = useCallback(async () => {
+    try {
+      // Fetch orderbook
+      const book = await getOrderbook('BTC-USDT')
+      updateOrderbook({
+        symbol: book.symbol,
+        bids: book.bids.map(b => ({ price: convertPrice(b.price), size: convertSize(b.size) })),
+        asks: book.asks.map(a => ({ price: convertPrice(a.price), size: convertSize(a.size) })),
+        timestamp: book.timestamp
+      })
+
+      // Fetch recent trades
+      const tradesData = await getTrades('BTC-USDT', 50)
+      tradesData.forEach((t, i) => {
+        addTrade({
+          id: `${t.timestamp}-${i}`,
+          symbol: 'BTC-USDT',
+          price: convertPrice(t.price),
+          size: convertSize(t.size),
+          side: t.side as 'buy' | 'sell',
+          timestamp: t.timestamp
+        })
+      })
+    } catch (error) {
+      console.error('[orderbook] REST fetch failed:', error)
+    }
+  }, [updateOrderbook, addTrade])
+
+  // Poll for data if WebSocket isn't connected
+  useEffect(() => {
+    // Fetch immediately
+    fetchData()
+
+    // If WebSocket isn't connected, poll every 2 seconds
+    if (!wsConnected) {
+      const interval = setInterval(fetchData, 2000)
+      return () => clearInterval(interval)
+    }
+  }, [wsConnected, fetchData])
 
   // Calculate cumulative totals
   const bidsWithTotal = orderbook.bids.map((bid, i) => ({
