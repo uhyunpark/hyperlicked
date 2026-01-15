@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::handlers::{deposit, register_delegation, submit_order_legacy, withdraw};
 use super::state::{PriceLevel, SharedState};
 use super::types::{
-    AccountInfo, ApiState, ChainStatus, MarketInfo, OrderInfo, OrderbookSnapshot,
+    AccountInfo, ApiState, ChainStatus, FundingInfo, MarketInfo, OrderInfo, OrderbookSnapshot,
     PositionInfo, SignedTransaction, SubmitOrderResponse,
 };
 use super::verify::{verify_cancel, verify_order};
@@ -28,11 +28,13 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/markets/:symbol", get(get_market))
         .route("/markets/:symbol/orderbook", get(get_orderbook))
         .route("/markets/:symbol/trades", get(get_trades))
+        .route("/markets/:symbol/funding", get(get_funding))
         // Account endpoints
         .route("/accounts/:address", get(get_account))
         .route("/accounts/:address/positions", get(get_positions))
         .route("/accounts/:address/orders", get(get_orders))
         .route("/accounts/:address/nonce", get(get_nonce))
+        .route("/accounts/:address/funding", get(get_account_funding))
         // Chain endpoints
         .route("/chain/status", get(get_chain_status))
         .route("/chain/insurance-fund", get(get_insurance_fund))
@@ -181,6 +183,30 @@ async fn get_trades(
     Json(trades)
 }
 
+async fn get_funding(
+    State(state): State<ApiState>,
+    Path(symbol): Path<String>,
+) -> Result<Json<FundingInfo>, StatusCode> {
+    let app = state.shared.app.read().await;
+
+    // Check if market exists
+    if app.orderbook(&symbol).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let funding_rate_bps = app.funding_rate(&symbol);
+    let last_funding_time = app.last_funding_time(&symbol);
+    let next_funding_time = app.next_funding_time(&symbol);
+
+    Ok(Json(FundingInfo {
+        symbol,
+        funding_rate: funding_rate_bps as f64 / 10000.0, // Convert bps to decimal
+        funding_rate_bps,
+        next_funding_time,
+        last_funding_time,
+    }))
+}
+
 // =============================================================================
 // Account Endpoints
 // =============================================================================
@@ -302,6 +328,36 @@ async fn get_orders(State(state): State<ApiState>, Path(address): Path<String>) 
         .collect();
 
     Json(order_infos)
+}
+
+async fn get_account_funding(
+    State(state): State<ApiState>,
+    Path(address): Path<String>,
+) -> Json<Vec<super::types::FundingPayment>> {
+    let app = state.shared.app.read().await;
+
+    let account = match app.account(&address) {
+        Some(acc) => acc,
+        None => return Json(vec![]),
+    };
+
+    // Return cumulative funding for each position
+    let payments: Vec<super::types::FundingPayment> = account
+        .positions
+        .iter()
+        .filter(|(_, pos)| pos.cumulative_funding != 0 || pos.size != 0)
+        .map(|(symbol, pos)| {
+            super::types::FundingPayment {
+                symbol: symbol.clone(),
+                payment: pos.cumulative_funding,
+                payment_usd: pos.cumulative_funding as f64 / 100.0,
+                funding_rate_bps: app.funding_rate(symbol),
+                timestamp: pos.last_funding_timestamp,
+            }
+        })
+        .collect();
+
+    Json(payments)
 }
 
 // =============================================================================

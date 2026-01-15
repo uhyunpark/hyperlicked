@@ -153,6 +153,34 @@ pub struct ChainStatus {
 }
 
 // =============================================================================
+// Funding Types
+// =============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct FundingInfo {
+    pub symbol: String,
+    #[serde(rename = "fundingRate")]
+    pub funding_rate: f64,
+    #[serde(rename = "fundingRateBps")]
+    pub funding_rate_bps: i64,
+    #[serde(rename = "nextFundingTime")]
+    pub next_funding_time: u64,
+    #[serde(rename = "lastFundingTime")]
+    pub last_funding_time: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FundingPayment {
+    pub symbol: String,
+    pub payment: i64,
+    #[serde(rename = "paymentUsd")]
+    pub payment_usd: f64,
+    #[serde(rename = "fundingRate")]
+    pub funding_rate_bps: i64,
+    pub timestamp: u64,
+}
+
+// =============================================================================
 // Order Submission Types
 // =============================================================================
 
