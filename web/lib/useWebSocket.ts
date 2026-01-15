@@ -18,6 +18,7 @@ interface WSOrderbookUpdate {
 
 interface WSTradeUpdate {
   type: 'trade'
+  id: string  // Deterministic trade ID from server
   symbol: string
   price: number
   size: number
@@ -182,10 +183,9 @@ export function useWebSocket() {
 
             case 'trade': {
               const update = data as WSTradeUpdate
-              // Generate unique ID: timestamp + price + size + random suffix
-              const uniqueId = `${update.timestamp}-${update.price}-${update.size}-${Math.random().toString(36).slice(2, 7)}`
+              // Use server-provided deterministic ID for deduplication
               addTrade({
-                id: uniqueId,
+                id: update.id,
                 symbol: update.symbol,
                 price: convertPrice(update.price),
                 size: convertSize(update.size),

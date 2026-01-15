@@ -106,9 +106,9 @@ export function Orderbook() {
 
       // Fetch recent trades
       const tradesData = await getTrades('BTC-USDT', 50)
-      tradesData.forEach((t, i) => {
+      tradesData.forEach((t) => {
         addTrade({
-          id: `${t.timestamp}-${i}`,
+          id: t.id,  // Use server-provided deterministic ID
           symbol: 'BTC-USDT',
           price: convertPrice(t.price),
           size: convertSize(t.size),

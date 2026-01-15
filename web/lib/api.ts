@@ -279,6 +279,7 @@ export async function getAccountFunding(address: string): Promise<ApiFundingPaym
 // ==============================
 
 export interface ApiTrade {
+  id: string         // Deterministic trade ID for deduplication
   price: number      // cents
   size: number       // satoshis
   side: string       // "buy" or "sell"
@@ -288,6 +289,32 @@ export interface ApiTrade {
 export async function getTrades(symbol: string, limit: number = 100): Promise<ApiTrade[]> {
   const res = await fetch(`${API_BASE}/markets/${symbol}/trades?limit=${limit}`)
   if (!res.ok) throw new Error(`Failed to fetch trades: ${res.statusText}`)
+  return res.json()
+}
+
+// ==============================
+// Candle (OHLCV) API
+// ==============================
+
+export type CandleInterval = '1m' | '5m' | '15m' | '1h' | '4h' | '1d'
+
+export interface ApiCandle {
+  t: number  // Candle open time (ms)
+  o: number  // Open price (cents)
+  h: number  // High price (cents)
+  l: number  // Low price (cents)
+  c: number  // Close price (cents)
+  v: number  // Volume (satoshis)
+  n: number  // Number of trades
+}
+
+export async function getCandles(
+  symbol: string,
+  interval: CandleInterval = '1m',
+  limit: number = 500
+): Promise<ApiCandle[]> {
+  const res = await fetch(`${API_BASE}/markets/${symbol}/candles?interval=${interval}&limit=${limit}`)
+  if (!res.ok) throw new Error(`Failed to fetch candles: ${res.statusText}`)
   return res.json()
 }
 
