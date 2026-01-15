@@ -525,9 +525,10 @@ export function useWallet() {
       // Register delegation with backend
       const { registerDelegation } = await import('@/lib/api')
 
-      const delegationId = `${signerAddress}-${nonce.toString()}`
+      // Normalize address to lowercase for consistent delegation ID lookup
+      const normalizedAddress = signerAddress.toLowerCase()
       const response = await registerDelegation({
-        wallet: signerAddress,
+        wallet: normalizedAddress,
         agent: agent.address,
         expiration: expiration.toString(),
         nonce: nonce.toString(),
@@ -552,34 +553,36 @@ export function useWallet() {
     setTradingEnabled(false)
   }, [setTradingEnabled])
 
-  // Sign order with agent key (if enabled) or MetaMask (if not)
+  // Sign order with agent key (if available) or MetaMask (if not)
   const signOrderSmart = useCallback(async (order: OrderToSign): Promise<{ signature: string; agentMode: boolean; delegationId?: string }> => {
-    // Use ref to get latest agent wallet (avoids stale closure)
-    const currentAgentWallet = agentWalletRef.current
+    // Check localStorage directly - don't rely on tradingEnabled state
+    // because Zustand store resets on page refresh but localStorage persists
+    const agent = loadAgentKey()
+    const delegation = getStoredDelegation()
 
+    if (agent && delegation) {
+      // Use agent key for signing
+      const signature = await agent.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_ORDER_TYPES,
+        order
+      )
 
-    // If trading enabled, use agent key
-    if (tradingEnabled && currentAgentWallet) {
-
-      const orderMessage = JSON.stringify(order)
-      const signature = await currentAgentWallet.signMessage(orderMessage)
-
-      const delegation = getStoredDelegation()!
-
+      // Normalize address to lowercase for consistent delegation ID lookup
       return {
         signature,
         agentMode: true,
-        delegationId: `${delegation.wallet}-${delegation.nonce}`
+        delegationId: `${delegation.wallet.toLowerCase()}-${delegation.nonce}`
       }
     }
 
-    // Otherwise, use MetaMask
+    // No agent key - use MetaMask
     const signature = await signOrder(order)
     return {
       signature,
       agentMode: false
     }
-  }, [tradingEnabled, signOrder])
+  }, [signOrder])
 
   // Sign cancel order using EIP-712 (MetaMask only, no agent key)
   const signCancel = useCallback(async (cancel: CancelToSign): Promise<string> => {
@@ -603,33 +606,35 @@ export function useWallet() {
     }
   }, [wallet.signer])
 
-  // Sign cancel order with agent key (if enabled) or MetaMask (if not)
+  // Sign cancel order with agent key (if available) or MetaMask (if not)
   const signCancelSmart = useCallback(async (cancel: CancelToSign): Promise<{ signature: string; agentMode: boolean; delegationId?: string }> => {
-    // Use ref to get latest agent wallet (avoids stale closure)
-    const currentAgentWallet = agentWalletRef.current
+    // Check localStorage directly - don't rely on tradingEnabled state
+    const agent = loadAgentKey()
+    const delegation = getStoredDelegation()
 
-    // If trading enabled, use agent key
-    if (tradingEnabled && currentAgentWallet) {
+    if (agent && delegation) {
+      // Use agent key for signing
+      const signature = await agent.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_CANCEL_TYPES,
+        cancel
+      )
 
-      const cancelMessage = JSON.stringify(cancel)
-      const signature = await currentAgentWallet.signMessage(cancelMessage)
-
-      const delegation = getStoredDelegation()!
-
+      // Normalize address to lowercase for consistent delegation ID lookup
       return {
         signature,
         agentMode: true,
-        delegationId: `${delegation.wallet}-${delegation.nonce}`
+        delegationId: `${delegation.wallet.toLowerCase()}-${delegation.nonce}`
       }
     }
 
-    // Otherwise, use MetaMask
+    // No agent key - use MetaMask
     const signature = await signCancel(cancel)
     return {
       signature,
       agentMode: false
     }
-  }, [tradingEnabled, signCancel])
+  }, [signCancel])
 
   return {
     // Connection state from Zustand store (shared across all components)

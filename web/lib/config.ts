@@ -32,8 +32,9 @@ export const config = {
 } as const
 
 // Helper to check if we're in development mode
-export const isDevelopment = process.env.NODE_ENV === 'development'
-export const isProduction = process.env.NODE_ENV === 'production'
+// Use NEXT_PUBLIC_DEV_MODE for explicit control, fallback to NODE_ENV
+export const isDevelopment = process.env.NEXT_PUBLIC_DEV_MODE === 'true' || process.env.NODE_ENV === 'development'
+export const isProduction = process.env.NODE_ENV === 'production' && process.env.NEXT_PUBLIC_DEV_MODE !== 'true'
 
 // Log configuration on load (development only)
 if (typeof window !== 'undefined' && isDevelopment) {
