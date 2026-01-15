@@ -241,12 +241,13 @@ async fn run_consensus_loop(
 
             // Execute block (processes mempool transactions)
             let exec_start = std::time::Instant::now();
-            let (app_hash, fills, order_updates) = {
+            let (app_hash, fills, order_updates, deposits) = {
                 let mut app = state.app.write().await;
                 let hash = app.execute(&block);
                 let fills = app.take_pending_fills();
                 let order_updates = app.take_pending_order_updates();
-                (hash, fills, order_updates)
+                let deposits = app.take_pending_deposits();
+                (hash, fills, order_updates, deposits)
             };
             let exec_time = exec_start.elapsed();
 
@@ -325,6 +326,20 @@ async fn run_consensus_loop(
                     order_update.remaining,
                     block.timestamp,
                 ).await;
+            }
+
+            // Emit user events for deposits (balance updates)
+            for deposit in &deposits {
+                let app = state.app.read().await;
+                if let Some(account) = app.account(&deposit.trader) {
+                    state.users.notify_balance_update(
+                        &deposit.trader,
+                        account.balance,
+                        account.balance, // available = balance (simplified)
+                        account.locked,
+                        block.timestamp,
+                    ).await;
+                }
             }
 
             // Broadcast block committed event

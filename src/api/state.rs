@@ -85,6 +85,14 @@ pub enum UserEvent {
         unrealized_pnl: i64,
         timestamp: u64,
     },
+    /// User's account balance changed
+    #[serde(rename = "balanceUpdate")]
+    BalanceUpdate {
+        balance: i64,          // New total balance (cents)
+        available: i64,        // Available balance
+        locked: i64,           // Locked in positions
+        timestamp: u64,
+    },
 }
 
 /// User subscription info
@@ -219,6 +227,23 @@ impl UserRegistry {
             entry_price,
             mark_price,
             unrealized_pnl,
+            timestamp,
+        }).await;
+    }
+
+    /// Send balance update to a user
+    pub async fn notify_balance_update(
+        &self,
+        address: &str,
+        balance: i64,
+        available: i64,
+        locked: i64,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::BalanceUpdate {
+            balance,
+            available,
+            locked,
             timestamp,
         }).await;
     }
