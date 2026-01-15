@@ -172,7 +172,19 @@ impl OrderBook {
                         }
                     };
 
-                    let maker = &mut level[0];
+                    // Find first non-self-trade order at this price level
+                    let maker_idx = level.iter().position(|m| {
+                        m.trader.to_lowercase() != order.trader.to_lowercase()
+                    });
+                    let maker_idx = match maker_idx {
+                        Some(idx) => idx,
+                        None => {
+                            // All orders at this price are from the same trader - skip level
+                            break;
+                        }
+                    };
+
+                    let maker = &mut level[maker_idx];
                     let match_size = order.size.min(maker.size);
 
                     fills.push(Fill {
@@ -192,7 +204,7 @@ impl OrderBook {
                     self.last_price = best_ask;
 
                     if maker.size == 0 {
-                        let maker_id = level.remove(0).id;
+                        let maker_id = level.remove(maker_idx).id;
                         self.order_index.remove(&maker_id);
                         if level.is_empty() {
                             self.asks.remove(&best_ask);
@@ -228,7 +240,19 @@ impl OrderBook {
                         }
                     };
 
-                    let maker = &mut level[0];
+                    // Find first non-self-trade order at this price level
+                    let maker_idx = level.iter().position(|m| {
+                        m.trader.to_lowercase() != order.trader.to_lowercase()
+                    });
+                    let maker_idx = match maker_idx {
+                        Some(idx) => idx,
+                        None => {
+                            // All orders at this price are from the same trader - skip level
+                            break;
+                        }
+                    };
+
+                    let maker = &mut level[maker_idx];
                     let match_size = order.size.min(maker.size);
 
                     fills.push(Fill {
@@ -248,7 +272,7 @@ impl OrderBook {
                     self.last_price = best_bid;
 
                     if maker.size == 0 {
-                        let maker_id = level.remove(0).id;
+                        let maker_id = level.remove(maker_idx).id;
                         self.order_index.remove(&maker_id);
                         if level.is_empty() {
                             self.bids.remove(&best_bid);
@@ -422,9 +446,26 @@ mod tests {
     use super::*;
 
     fn make_order(id: &str, side: Side, price: Price, size: Size) -> Order {
+        // Use different traders for bid/ask to test matching (non-self-trade)
+        let trader = if side == Side::Bid { "alice" } else { "bob" };
         Order {
             id: id.to_string(),
-            trader: "trader".to_string(),
+            trader: trader.to_string(),
+            symbol: "BTC-USDT".to_string(),
+            side,
+            price,
+            size,
+            original_size: size,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+            timestamp: 0,
+        }
+    }
+
+    fn make_order_with_trader(id: &str, trader: &str, side: Side, price: Price, size: Size) -> Order {
+        Order {
+            id: id.to_string(),
+            trader: trader.to_string(),
             symbol: "BTC-USDT".to_string(),
             side,
             price,
@@ -495,5 +536,49 @@ mod tests {
 
         book.place(ioc, &config).unwrap();
         assert!(book.best_bid().is_none()); // IOC doesn't rest
+    }
+
+    #[test]
+    fn test_self_trade_prevention() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place bid from alice
+        let bid = make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100);
+        let fills = book.place(bid, &config).unwrap();
+        assert!(fills.is_empty());
+        assert!(book.best_bid().is_some());
+
+        // Place ask from same trader (alice) - should NOT match
+        let ask = make_order_with_trader("ask1", "alice", Side::Ask, 50000, 100);
+        let fills = book.place(ask, &config).unwrap();
+        assert!(fills.is_empty()); // No fills due to self-trade prevention
+        assert!(book.best_bid().is_some()); // Bid still on book
+        assert!(book.best_ask().is_some()); // Ask rests on book
+
+        // Now place ask from different trader (bob) - should match
+        let ask2 = make_order_with_trader("ask2", "bob", Side::Ask, 50000, 50);
+        let fills = book.place(ask2, &config).unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].size, 50);
+        assert_eq!(fills[0].maker, "alice");
+        assert_eq!(fills[0].taker, "bob");
+    }
+
+    #[test]
+    fn test_self_trade_case_insensitive() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place bid with lowercase address
+        let bid = make_order_with_trader("bid1", "0xabcd", Side::Bid, 50000, 100);
+        book.place(bid, &config).unwrap();
+
+        // Place ask with mixed-case address (same user)
+        let ask = make_order_with_trader("ask1", "0xAbCd", Side::Ask, 50000, 100);
+        let fills = book.place(ask, &config).unwrap();
+
+        // Should NOT match (case-insensitive comparison)
+        assert!(fills.is_empty());
     }
 }
