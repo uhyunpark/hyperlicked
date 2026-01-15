@@ -1,0 +1,75 @@
+//! Persistent Storage
+//!
+//! RocksDB-based persistence for blocks, consensus state, and app snapshots.
+//!
+//! ## Architecture
+//!
+//! Uses hybrid approach:
+//! - Always persist: Blocks, consensus safety state (QCs, voted views)
+//! - Periodic snapshots: App state every N blocks
+//! - On recovery: Load snapshot + replay blocks since snapshot
+
+pub mod recovery;
+pub mod rocks;
+pub mod snapshot;
+
+pub use recovery::{recover_from_storage, RecoveryResult};
+pub use rocks::RocksDbStore;
+pub use snapshot::AppSnapshot;
+
+use serde::{Deserialize, Serialize};
+
+use crate::consensus::BlockStore;
+use crate::types::{Block, Certificate, Hash, View};
+
+/// Consensus state that must survive crashes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsensusState {
+    /// Highest QC seen (determines valid chain extension)
+    pub high_qc: Option<Certificate>,
+    /// Locked QC (for HotStuff-2 liveness)
+    pub locked_qc: Option<Certificate>,
+    /// Views we've voted in (safety - prevent double voting)
+    pub voted_views: Vec<View>,
+    /// Current view
+    pub current_view: View,
+    /// Last committed block height
+    pub committed_height: u64,
+    /// Last committed block hash
+    pub committed_hash: Hash,
+}
+
+impl ConsensusState {
+    /// Genesis consensus state (no prior history)
+    pub fn genesis() -> Self {
+        Self {
+            high_qc: None,
+            locked_qc: None,
+            voted_views: Vec::new(),
+            current_view: 0,
+            committed_height: 0,
+            committed_hash: [0u8; 32],
+        }
+    }
+}
+
+/// Extended BlockStore with persistence features
+pub trait PersistentStore: BlockStore {
+    /// Persist consensus safety state atomically
+    fn save_consensus_state(&self, state: &ConsensusState) -> anyhow::Result<()>;
+
+    /// Load consensus safety state
+    fn load_consensus_state(&self) -> anyhow::Result<Option<ConsensusState>>;
+
+    /// Save app state snapshot at height
+    fn save_snapshot(&self, height: u64, snapshot: &AppSnapshot) -> anyhow::Result<()>;
+
+    /// Load latest snapshot at or before given height
+    fn load_latest_snapshot(&self, before_height: u64) -> anyhow::Result<Option<(u64, AppSnapshot)>>;
+
+    /// Get all committed blocks from height (inclusive) for replay
+    fn blocks_from_height(&self, from_height: u64) -> anyhow::Result<Vec<Block>>;
+
+    /// Atomic commit: block + consensus state together
+    fn commit_block(&self, block: &Block, state: &ConsensusState) -> anyhow::Result<()>;
+}

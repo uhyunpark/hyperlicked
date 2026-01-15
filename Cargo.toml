@@ -55,7 +55,8 @@ futures = "0.3"
 # ethers = "2.0"              # EIP-712 signing
 # blst = "0.3"                # BLS signatures
 # libp2p = "0.54"             # P2P networking
-# rocksdb = "0.22"            # Storage
+rocksdb = "0.22"              # Storage
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3.10"
