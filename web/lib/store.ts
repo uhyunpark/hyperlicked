@@ -86,6 +86,7 @@ interface TradingState {
   // UI state
   selectedSymbol: string
   isConnected: boolean // WebSocket connection status
+  balanceRefreshTrigger: number // Increments when balance update received
 
   // Actions
   updateOrderbook: (orderbook: OrderbookData) => void
@@ -94,6 +95,7 @@ interface TradingState {
   setOpenOrders: (orders: Order[]) => void
   setSelectedSymbol: (symbol: string) => void
   setWsConnected: (connected: boolean) => void
+  triggerBalanceRefresh: () => void
 }
 
 export const useTradingStore = create<TradingState>((set) => ({
@@ -110,6 +112,7 @@ export const useTradingStore = create<TradingState>((set) => ({
   openOrders: [],
   selectedSymbol: 'BTC-USDT',
   isConnected: false,
+  balanceRefreshTrigger: 0,
 
   // Actions
   updateOrderbook: (orderbook) => set({
@@ -126,5 +129,6 @@ export const useTradingStore = create<TradingState>((set) => ({
   setPositions: (positions) => set({ positions }),
   setOpenOrders: (orders) => set({ openOrders: orders }),
   setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol }),
-  setWsConnected: (connected) => set({ isConnected: connected })
+  setWsConnected: (connected) => set({ isConnected: connected }),
+  triggerBalanceRefresh: () => set((state) => ({ balanceRefreshTrigger: state.balanceRefreshTrigger + 1 }))
 }))

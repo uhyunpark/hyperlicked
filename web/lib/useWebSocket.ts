@@ -58,6 +58,14 @@ interface WSPositionUpdate {
   timestamp: number
 }
 
+interface WSBalanceUpdate {
+  type: 'balanceUpdate'
+  balance: number      // cents
+  available: number
+  locked: number
+  timestamp: number
+}
+
 interface WSSubscribed {
   type: 'subscribed'
   channel: string
@@ -65,11 +73,12 @@ interface WSSubscribed {
 }
 
 export function useWebSocket() {
+  console.log('[ws] useWebSocket hook initialized')
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
   const subscribedAddressRef = useRef<string | null>(null)
 
-  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions } = useTradingStore()
+  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions, triggerBalanceRefresh } = useTradingStore()
   const { isConnected: walletConnected, address } = useWalletStore()
 
   // Fetch user data (orders and positions)
@@ -120,24 +129,30 @@ export function useWebSocket() {
 
   useEffect(() => {
     function connect() {
+      console.log('[ws] Connecting to:', WS_URL)
       const ws = new WebSocket(WS_URL)
       wsRef.current = ws
 
       ws.onopen = () => {
+        console.log('[ws] Connected successfully')
         setWsConnected(true)
 
         // Subscribe to public channels
-        ws.send(JSON.stringify({
+        const subscribeMsg = {
           op: 'subscribe',
           channels: ['orderbook:BTC-USDT', 'trades:BTC-USDT']
-        }))
+        }
+        console.log('[ws] Subscribing to:', subscribeMsg)
+        ws.send(JSON.stringify(subscribeMsg))
 
         // Subscribe to user events if wallet connected
         if (walletConnected && address) {
-          ws.send(JSON.stringify({
+          const userSubscribeMsg = {
             op: 'subscribe',
             address: address
-          }))
+          }
+          console.log('[ws] Subscribing to user events:', userSubscribeMsg)
+          ws.send(JSON.stringify(userSubscribeMsg))
           subscribedAddressRef.current = address
         }
       }
@@ -204,6 +219,17 @@ export function useWebSocket() {
               break
             }
 
+            case 'balanceUpdate': {
+              // Balance changed (deposit/withdrawal) - trigger account refresh
+              console.log('[ws] Balance update received:', data)
+              if (subscribedAddressRef.current) {
+                fetchUserData(subscribedAddressRef.current)
+              }
+              // Also trigger the balance refresh callback
+              triggerBalanceRefresh()
+              break
+            }
+
             case 'subscribed': {
               const sub = data as WSSubscribed
               if (sub.channel === 'user') {
@@ -220,15 +246,20 @@ export function useWebSocket() {
       }
 
       ws.onerror = () => {
-        // Silently handle errors
+        // Note: WebSocket onerror event doesn't contain useful error details
+        // The actual error info is in the close event that follows
+        console.error('[ws] WebSocket error - connection failed or was rejected')
+        console.error('[ws] WebSocket readyState:', ws.readyState, '(0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)')
       }
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        console.log('[ws] Connection closed. Code:', event.code, 'Reason:', event.reason)
         setWsConnected(false)
         wsRef.current = null
         subscribedAddressRef.current = null
 
         // Attempt to reconnect after 3 seconds
+        console.log('[ws] Reconnecting in 3 seconds...')
         reconnectTimeoutRef.current = setTimeout(() => {
           connect()
         }, 3000)
