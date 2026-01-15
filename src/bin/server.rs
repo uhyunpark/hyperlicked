@@ -10,8 +10,11 @@
 //!   RUST_LOG=info        - Log level (error, warn, info, debug, trace)
 //!   BLOCK_TIME_MS=100    - Block interval in milliseconds
 //!   LOG_BLOCKS=true      - Log every block (even empty ones)
+//!   DATA_DIR=/path       - RocksDB persistence directory (optional)
+//!   SNAPSHOT_INTERVAL=1000 - Snapshot every N blocks
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,6 +27,7 @@ use hyperlicked::api::state::PriceLevel;
 use hyperlicked::app::AppState;
 use hyperlicked::config::Config;
 use hyperlicked::consensus::AppHook;
+use hyperlicked::storage::{ConsensusState, PersistentStore, RocksDbStore};
 use hyperlicked::types::Block;
 
 #[tokio::main]
@@ -58,8 +62,56 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(config.port);
 
-    // Create shared state
-    let app_state = AppState::new();
+    // Initialize storage (RocksDB or in-memory)
+    let (store, initial_height, initial_view): (Option<Arc<RocksDbStore>>, u64, u64) =
+        if let Some(ref data_dir) = config.data_dir {
+            info!(path = %data_dir, "Opening persistent storage");
+            let store = Arc::new(RocksDbStore::open(data_dir)?);
+
+            // Recover state from storage
+            let recovery = hyperlicked::storage::recover_from_storage(&*store)?;
+            let height = recovery.consensus_state.committed_height;
+            let view = recovery.consensus_state.current_view;
+
+            info!(
+                committed_height = height,
+                current_view = view,
+                snapshot_height = recovery.snapshot_height,
+                "Recovered from storage"
+            );
+
+            (Some(store), height, view)
+        } else {
+            (None, 0, 0)
+        };
+
+    // Create app state (from recovery or fresh)
+    let app_state = if let Some(ref store) = store {
+        let recovery = hyperlicked::storage::recover_from_storage(&**store)?;
+
+        // Start from snapshot
+        let mut app = AppState::from_snapshot(recovery.snapshot);
+
+        // Replay blocks since snapshot
+        let blocks = hyperlicked::storage::recovery::get_blocks_to_replay(
+            &**store,
+            recovery.snapshot_height,
+            recovery.consensus_state.committed_height,
+        )?;
+
+        for block in &blocks {
+            app.execute(block);
+        }
+
+        if !blocks.is_empty() {
+            info!(count = blocks.len(), "Replayed blocks from storage");
+        }
+
+        app
+    } else {
+        AppState::new()
+    };
+
     let shared_state = SharedState::new(app_state);
 
     println!("Configuration:");
@@ -69,6 +121,14 @@ async fn main() -> Result<()> {
     println!("  Log blocks: {}", config.log_all_blocks);
     if config.mode.is_dev() {
         println!("  Faucet: ${:.2} per account", config.faucet_amount as f64 / 100.0);
+    }
+    if config.data_dir.is_some() {
+        println!("  Storage: {} (snapshot every {} blocks)",
+            config.data_dir.as_ref().unwrap(),
+            config.snapshot_interval);
+        println!("  Recovered: height={}, view={}", initial_height, initial_view);
+    } else {
+        println!("  Storage: in-memory (no persistence)");
     }
     println!("  Markets: BTC-USDT");
     println!();
@@ -85,8 +145,9 @@ async fn main() -> Result<()> {
 
     // Spawn consensus simulation in background
     let consensus_state = shared_state.clone();
+    let consensus_store = store.clone();
     tokio::spawn(async move {
-        run_consensus_loop(consensus_state).await;
+        run_consensus_loop(consensus_state, consensus_store, initial_height, initial_view).await;
     });
 
     // Start server
@@ -115,19 +176,29 @@ async fn main() -> Result<()> {
 
 /// Run consensus loop in background
 /// This simulates block production and executes pending transactions
-async fn run_consensus_loop(state: SharedState) {
+async fn run_consensus_loop(
+    state: SharedState,
+    store: Option<Arc<RocksDbStore>>,
+    initial_height: u64,
+    initial_view: u64,
+) {
     let config = Config::global();
     let block_time_ms = config.block_time_ms;
     let log_all_blocks = config.log_all_blocks;
+    let snapshot_interval = config.snapshot_interval;
 
-    let mut height = 0u64;
-    let mut view = 0u64;
+    let mut height = initial_height;
+    let mut view = initial_view;
+    let mut last_snapshot_height = initial_height;
     let start_time = std::time::Instant::now();
 
     info!(
         block_time_ms,
         log_all_blocks,
         mode = %config.mode,
+        initial_height,
+        initial_view,
+        persistent = store.is_some(),
         "Consensus loop started"
     );
 
@@ -178,6 +249,35 @@ async fn run_consensus_loop(state: SharedState) {
                 (hash, fills, order_updates)
             };
             let exec_time = exec_start.elapsed();
+
+            // Persist block and consensus state (if storage enabled)
+            if let Some(ref store) = store {
+                let consensus_state = ConsensusState {
+                    high_qc: None,      // Simplified: not tracking QCs in server mode
+                    locked_qc: None,
+                    voted_views: vec![], // Simplified: not tracking votes
+                    current_view: view,
+                    committed_height: height,
+                    committed_hash: app_hash,
+                };
+
+                if let Err(e) = store.commit_block(&block, &consensus_state) {
+                    tracing::error!(error = %e, "Failed to persist block");
+                }
+
+                // Periodic snapshot
+                if snapshot_interval > 0 && height - last_snapshot_height >= snapshot_interval {
+                    let snapshot = {
+                        let app = state.app.read().await;
+                        app.create_snapshot(height)
+                    };
+                    if let Err(e) = store.save_snapshot(height, &snapshot) {
+                        tracing::error!(error = %e, "Failed to save snapshot");
+                    } else {
+                        last_snapshot_height = height;
+                    }
+                }
+            }
 
             // Emit user events for fills
             for fill in &fills {

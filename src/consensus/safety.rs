@@ -37,6 +37,19 @@ impl Safety {
         }
     }
 
+    /// Create Safety module with recovered state (for persistence recovery)
+    pub fn with_state(
+        high_qc: Option<Certificate>,
+        locked_qc: Option<Certificate>,
+        voted_views: &[View],
+    ) -> Self {
+        Self {
+            voted_views: voted_views.iter().copied().collect(),
+            high_qc,
+            locked_qc,
+        }
+    }
+
     /// Check if it's safe to vote for this block
     pub fn safe_to_vote(&self, block: &Block, local_app_hash: Hash) -> Result<(), SafetyError> {
         // Rule 1: One vote per view

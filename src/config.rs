@@ -74,6 +74,12 @@ pub struct Config {
 
     /// API port
     pub port: u16,
+
+    /// Path to RocksDB data directory (None = in-memory only)
+    pub data_dir: Option<String>,
+
+    /// Snapshot app state every N committed blocks (0 = disabled)
+    pub snapshot_interval: u64,
 }
 
 impl Config {
@@ -114,6 +120,11 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8080),
+            data_dir: std::env::var("DATA_DIR").ok(),
+            snapshot_interval: std::env::var("SNAPSHOT_INTERVAL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000), // Default: snapshot every 1000 blocks
         }
     }
 
