@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::handlers::{deposit, register_delegation, submit_order_legacy, withdraw};
 use super::state::{PriceLevel, SharedState};
 use super::types::{
-    AccountInfo, ApiState, ChainStatus, FundingInfo, MarketInfo, OrderInfo, OrderbookSnapshot,
+    AccountInfo, ApiState, CandleInfo, ChainStatus, FundingInfo, MarketInfo, OrderInfo, OrderbookSnapshot,
     PositionInfo, SignedTransaction, SubmitOrderResponse,
 };
 use super::verify::{verify_cancel, verify_order};
@@ -28,6 +28,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/markets/:symbol", get(get_market))
         .route("/markets/:symbol/orderbook", get(get_orderbook))
         .route("/markets/:symbol/trades", get(get_trades))
+        .route("/markets/:symbol/candles", get(get_candles))
         .route("/markets/:symbol/funding", get(get_funding))
         // Account endpoints
         .route("/accounts/:address", get(get_account))
@@ -149,6 +150,8 @@ struct TradesQuery {
 /// Trade response format
 #[derive(serde::Serialize)]
 struct TradeResponse {
+    /// Deterministic trade ID for deduplication
+    id: String,
     price: i64,
     size: i64,
     side: String,
@@ -171,7 +174,10 @@ async fn get_trades(
                 crate::app::Side::Bid => "buy",
                 crate::app::Side::Ask => "sell",
             };
+            // Generate deterministic ID from trade content for deduplication
+            let id = format!("{}-{}-{}-{}", f.timestamp, f.price, f.size, side);
             TradeResponse {
+                id,
                 price: f.price,
                 size: f.size,
                 side: side.to_string(),
@@ -181,6 +187,48 @@ async fn get_trades(
         .collect();
 
     Json(trades)
+}
+
+/// Query parameters for candles endpoint
+#[derive(Deserialize)]
+struct CandlesQuery {
+    interval: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn get_candles(
+    State(state): State<ApiState>,
+    Path(symbol): Path<String>,
+    Query(params): Query<CandlesQuery>,
+) -> Result<Json<Vec<CandleInfo>>, StatusCode> {
+    use crate::app::Interval;
+
+    let interval_str = params.interval.as_deref().unwrap_or("1m");
+    let interval = Interval::from_str(interval_str).ok_or(StatusCode::BAD_REQUEST)?;
+    let limit = params.limit.unwrap_or(500).min(500);
+
+    let app = state.shared.app.read().await;
+
+    // Check if market exists
+    if app.orderbook(&symbol).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let candles: Vec<CandleInfo> = app
+        .get_candles(&symbol, interval, limit)
+        .into_iter()
+        .map(|c| CandleInfo {
+            time: c.time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+            trades: c.trades,
+        })
+        .collect();
+
+    Ok(Json(candles))
 }
 
 async fn get_funding(

@@ -153,6 +153,35 @@ pub struct ChainStatus {
 }
 
 // =============================================================================
+// Candle (OHLCV) Types
+// =============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct CandleInfo {
+    /// Candle open time (ms since epoch)
+    #[serde(rename = "t")]
+    pub time: u64,
+    /// Open price (cents)
+    #[serde(rename = "o")]
+    pub open: i64,
+    /// High price (cents)
+    #[serde(rename = "h")]
+    pub high: i64,
+    /// Low price (cents)
+    #[serde(rename = "l")]
+    pub low: i64,
+    /// Close price (cents)
+    #[serde(rename = "c")]
+    pub close: i64,
+    /// Volume (satoshis)
+    #[serde(rename = "v")]
+    pub volume: i64,
+    /// Number of trades
+    #[serde(rename = "n")]
+    pub trades: u32,
+}
+
+// =============================================================================
 // Funding Types
 // =============================================================================
 

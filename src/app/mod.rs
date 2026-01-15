@@ -21,6 +21,7 @@
 //! ```
 
 pub mod accounts;
+pub mod candles;
 pub mod funding;
 pub mod liquidation;
 pub mod mempool;
@@ -28,6 +29,7 @@ pub mod orderbook;
 pub mod state;
 
 pub use accounts::{Account, AccountManager, Position};
+pub use candles::{Candle, CandleManager, Interval};
 pub use funding::FundingResult;
 pub use liquidation::LiquidationResult;
 pub use mempool::Mempool;

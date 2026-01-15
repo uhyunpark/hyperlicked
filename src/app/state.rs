@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     accounts::{AccountManager, AccountError},
+    candles::{CandleManager, Candle, Interval},
     mempool::Mempool,
     orderbook::{Fill, Order, OrderBook, OrderBookError, Side},
     MarketConfig, Symbol, Transaction,
@@ -75,6 +76,8 @@ pub struct AppState {
     pending_funding: Vec<super::funding::FundingResult>,
     /// Deposits from last block (for WebSocket balance updates)
     pending_deposits: Vec<DepositInfo>,
+    /// Candle (OHLCV) aggregation manager
+    candle_manager: CandleManager,
 }
 
 impl AppState {
@@ -96,6 +99,7 @@ impl AppState {
             last_funding_times: HashMap::new(),
             pending_funding: Vec::new(),
             pending_deposits: Vec::new(),
+            candle_manager: CandleManager::new(),
         };
 
         // Add default BTC-USDT market
@@ -261,6 +265,14 @@ impl AppState {
                     while history.len() > MAX_TRADES_PER_SYMBOL {
                         history.pop_front();
                     }
+
+                    // Update candle aggregation
+                    self.candle_manager.add_trade(
+                        &fill.symbol,
+                        fill.price,
+                        fill.size,
+                        fill.timestamp,
+                    );
                 }
 
                 Ok(fills)
@@ -368,6 +380,11 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Get candles for a symbol and interval
+    pub fn get_candles(&self, symbol: &str, interval: Interval, limit: usize) -> Vec<Candle> {
+        self.candle_manager.get_candles(symbol, interval, limit)
+    }
+
     /// Create snapshot of current state
     pub fn create_snapshot(&self, height: u64) -> crate::storage::AppSnapshot {
         crate::storage::AppSnapshot {
@@ -408,6 +425,7 @@ impl AppState {
             last_funding_times,
             pending_funding: Vec::new(),
             pending_deposits: Vec::new(),
+            candle_manager: CandleManager::new(), // Candles are rebuilt from trades
         };
 
         // Restore market configs and create orderbooks

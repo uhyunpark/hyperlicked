@@ -23,6 +23,8 @@ pub enum Event {
     },
     /// Trade executed
     Trade {
+        /// Deterministic trade ID for deduplication
+        id: String,
         symbol: String,
         price: i64,
         size: i64,

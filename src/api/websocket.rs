@@ -187,7 +187,10 @@ impl WebSocketHandler {
         side: &str,
         timestamp: u64,
     ) {
+        // Generate deterministic ID from trade content for deduplication
+        let id = format!("{}-{}-{}-{}", timestamp, price, size, side);
         state.broadcast(Event::Trade {
+            id,
             symbol: symbol.to_string(),
             price,
             size,
