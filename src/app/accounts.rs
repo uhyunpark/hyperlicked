@@ -19,6 +19,12 @@ pub struct Position {
     pub entry_price: Price,
     /// Realized PnL from closed portions (in cents)
     pub realized_pnl: i64,
+    /// Cumulative funding paid (negative) or received (positive)
+    #[serde(default)]
+    pub cumulative_funding: i64,
+    /// Timestamp when funding was last applied to this position
+    #[serde(default)]
+    pub last_funding_timestamp: u64,
 }
 
 impl Position {
@@ -39,6 +45,35 @@ impl Position {
     /// Calculate notional value at mark price
     pub fn notional(&self, mark_price: Price) -> i64 {
         (self.size.abs() * mark_price) / 100_000_000
+    }
+
+    /// Apply funding payment to this position
+    /// funding_rate_bps: positive = longs pay shorts
+    /// index_price: price used to calculate payment (usually mark/index price)
+    /// Returns the payment amount (positive = received, negative = paid)
+    pub fn apply_funding(&mut self, funding_rate_bps: i64, index_price: Price, timestamp: u64) -> i64 {
+        if self.size == 0 {
+            return 0;
+        }
+
+        // Payment = |size| * index_price * funding_rate / 1e8 / 10000
+        // Longs pay when rate > 0, shorts receive
+        // Shorts pay when rate < 0, longs receive
+        let notional = (self.size.abs() * index_price) / 100_000_000;
+        let payment = (notional * funding_rate_bps) / 10000;
+
+        // Positive rate: longs pay, shorts receive
+        // Negative rate: shorts pay, longs receive
+        let signed_payment = if self.size > 0 {
+            -payment // Long pays (or receives if rate negative)
+        } else {
+            payment // Short receives (or pays if rate negative)
+        };
+
+        self.cumulative_funding += signed_payment;
+        self.last_funding_timestamp = timestamp;
+
+        signed_payment
     }
 
     /// Calculate liquidation price given available margin
@@ -259,21 +294,23 @@ impl AccountManager {
 
     /// Get or create account (no faucet - use `get_or_create_with_faucet` for dev mode)
     pub fn get_or_create(&mut self, address: &str) -> &mut Account {
+        let addr_lower = address.to_lowercase();
         self.accounts
-            .entry(address.to_string())
-            .or_insert_with(|| Account::new(address))
+            .entry(addr_lower.clone())
+            .or_insert_with(|| Account::new(&addr_lower))
     }
 
     /// Get or create account with optional faucet funding (for API layer)
     pub fn get_or_create_with_faucet(&mut self, address: &str, faucet_amount: i64) -> &mut Account {
+        let addr_lower = address.to_lowercase();
         self.accounts
-            .entry(address.to_string())
+            .entry(addr_lower.clone())
             .or_insert_with(|| {
-                let mut account = Account::new(address);
+                let mut account = Account::new(&addr_lower);
                 if faucet_amount > 0 {
                     account.balance = faucet_amount;
                     tracing::info!(
-                        address,
+                        address = %addr_lower,
                         balance = faucet_amount,
                         "New account created with faucet funds"
                     );
@@ -284,7 +321,7 @@ impl AccountManager {
 
     /// Get account (read-only)
     pub fn get(&self, address: &str) -> Option<&Account> {
-        self.accounts.get(address)
+        self.accounts.get(&address.to_lowercase())
     }
 
     /// Deposit funds
@@ -323,7 +360,7 @@ impl AccountManager {
 
     /// Unlock collateral (order cancelled/filled)
     pub fn unlock_collateral(&mut self, address: &str, amount: i64) {
-        if let Some(account) = self.accounts.get_mut(address) {
+        if let Some(account) = self.accounts.get_mut(&address.to_lowercase()) {
             let to_unlock = amount.min(account.locked);
             account.locked -= to_unlock;
             account.balance += to_unlock;
@@ -395,7 +432,7 @@ impl AccountManager {
 
     /// Get current nonce for an address
     pub fn get_nonce(&self, address: &str) -> u64 {
-        self.accounts.get(address).map(|a| a.nonce).unwrap_or(0)
+        self.accounts.get(&address.to_lowercase()).map(|a| a.nonce).unwrap_or(0)
     }
 }
 
