@@ -1,10 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
 import { config, isDevelopment } from '@/lib/config'
 import { toast } from '@/components/ui/Toast'
+import { getFunding, getInsuranceFund, ApiFundingInfo, ApiInsuranceFund } from '@/lib/api'
 
 interface NavTabProps {
   label: string
@@ -33,15 +34,73 @@ function NavTab({ label, active, disabled }: NavTabProps) {
   )
 }
 
+// Format countdown from ms timestamp
+function formatCountdown(targetMs: number): string {
+  const now = Date.now()
+  const diff = targetMs - now
+  if (diff <= 0) return '0:00'
+
+  const minutes = Math.floor(diff / 60000)
+  const seconds = Math.floor((diff % 60000) / 1000)
+
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return `${hours}h ${mins}m`
+  }
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`
+}
+
 export function Header() {
   const { selectedSymbol, currentPrice, isConnected: wsConnected } = useTradingStore()
   const wallet = useWallet()
   const [showWalletDropdown, setShowWalletDropdown] = useState(false)
+  const [fundingInfo, setFundingInfo] = useState<ApiFundingInfo | null>(null)
+  const [insuranceFund, setInsuranceFund] = useState<ApiInsuranceFund | null>(null)
+  const [countdown, setCountdown] = useState('')
+
+  // Fetch funding info and insurance fund
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [funding, insurance] = await Promise.all([
+          getFunding(selectedSymbol),
+          getInsuranceFund()
+        ])
+        setFundingInfo(funding)
+        setInsuranceFund(insurance)
+      } catch (e) {
+        // Silently fail - data will show as "--"
+      }
+    }
+
+    fetchData()
+    const interval = setInterval(fetchData, 10000) // Refresh every 10s
+    return () => clearInterval(interval)
+  }, [selectedSymbol])
+
+  // Update countdown timer
+  useEffect(() => {
+    if (!fundingInfo?.nextFundingTime) return
+
+    const updateCountdown = () => {
+      setCountdown(formatCountdown(fundingInfo.nextFundingTime))
+    }
+
+    updateCountdown()
+    const interval = setInterval(updateCountdown, 1000)
+    return () => clearInterval(interval)
+  }, [fundingInfo?.nextFundingTime])
 
   // Calculate 24h change (mock for now)
   const priceChange24h = 1234.56
   const priceChangePercent = 2.53
   const isPositive = priceChangePercent >= 0
+
+  // Funding rate display
+  const fundingRate = fundingInfo?.fundingRate ?? 0
+  const fundingRatePercent = (fundingRate * 100).toFixed(4)
+  const isFundingPositive = fundingRate > 0
 
   // Check if on wrong network
   const isWrongNetwork = wallet.isConnected && wallet.chainId !== config.network.chainId
@@ -189,6 +248,25 @@ export function Header() {
           <div>
             <div className="text-xs text-text-muted">24h Volume</div>
             <div className="text-sm font-mono text-text-primary">$1.2B</div>
+          </div>
+
+          {/* Funding Rate */}
+          <div>
+            <div className="text-xs text-text-muted">Funding / Countdown</div>
+            <div className="flex items-center gap-2">
+              <span className={`text-sm font-mono ${isFundingPositive ? 'text-red-sell' : 'text-green-buy'}`}>
+                {isFundingPositive ? '+' : ''}{fundingRatePercent}%
+              </span>
+              <span className="text-xs text-text-muted">in {countdown || '--:--'}</span>
+            </div>
+          </div>
+
+          {/* Insurance Fund */}
+          <div>
+            <div className="text-xs text-text-muted">Insurance Fund</div>
+            <div className="text-sm font-mono text-text-primary">
+              ${insuranceFund?.balance_usd?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '--'}
+            </div>
           </div>
         </div>
 

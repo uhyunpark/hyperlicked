@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useWallet } from '@/lib/useWallet'
+import { getAccountFunding, ApiFundingPayment, convertSize } from '@/lib/api'
 
 interface FundingPayment {
   id: string
@@ -38,12 +39,17 @@ export function FundingHistory() {
     const fetchPayments = async () => {
       setIsLoading(true)
       try {
-        // TODO: Replace with actual API call when backend endpoint is ready
-        // const response = await fetch(`/account/${wallet.address}/funding`)
-        // const data = await response.json()
-
-        // Mock data for now
-        setPayments([])
+        const data = await getAccountFunding(wallet.address!)
+        // Convert API response to display format
+        const formatted: FundingPayment[] = data.map((p: ApiFundingPayment, i: number) => ({
+          id: `${p.symbol}-${p.timestamp}-${i}`,
+          timestamp: p.timestamp,
+          symbol: p.symbol,
+          fundingRate: p.fundingRateBps / 10000, // bps to decimal
+          positionSize: 0, // Not available in current API, could be added
+          payment: p.paymentUsd, // Already in USD
+        }))
+        setPayments(formatted)
       } catch (error) {
         console.error('[funding-history] Failed to fetch:', error)
         setPayments([])

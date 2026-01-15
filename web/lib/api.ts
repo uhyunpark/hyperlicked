@@ -183,8 +183,9 @@ export async function submitSignedTransaction(signedTx: SignedTransaction): Prom
   })
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(error.message || error.error || 'Failed to submit signed transaction')
+    // Backend returns plain text errors, not JSON
+    const errorText = await res.text()
+    throw new Error(errorText || res.statusText)
   }
 
   return res.json()
@@ -239,4 +240,83 @@ export async function requestFaucet(address: string, amount: number = 10_000_000
 
   const data = await res.json()
   return data.success === true
+}
+
+// ==============================
+// Funding Rate API
+// ==============================
+
+export interface ApiFundingInfo {
+  symbol: string
+  fundingRate: number      // Decimal (0.0001 = 0.01%)
+  fundingRateBps: number   // Basis points
+  nextFundingTime: number  // ms timestamp
+  lastFundingTime: number  // ms timestamp
+}
+
+export interface ApiFundingPayment {
+  symbol: string
+  payment: number          // cents (negative = paid out)
+  paymentUsd: number       // dollars
+  fundingRateBps: number
+  timestamp: number
+}
+
+export async function getFunding(symbol: string): Promise<ApiFundingInfo> {
+  const res = await fetch(`${API_BASE}/markets/${symbol}/funding`)
+  if (!res.ok) throw new Error(`Failed to fetch funding: ${res.statusText}`)
+  return res.json()
+}
+
+export async function getAccountFunding(address: string): Promise<ApiFundingPayment[]> {
+  const res = await fetch(`${API_BASE}/accounts/${address}/funding`)
+  if (!res.ok) throw new Error(`Failed to fetch account funding: ${res.statusText}`)
+  return res.json()
+}
+
+// ==============================
+// Trade History API
+// ==============================
+
+export interface ApiTrade {
+  price: number      // cents
+  size: number       // satoshis
+  side: string       // "buy" or "sell"
+  timestamp: number  // ms
+}
+
+export async function getTrades(symbol: string, limit: number = 100): Promise<ApiTrade[]> {
+  const res = await fetch(`${API_BASE}/markets/${symbol}/trades?limit=${limit}`)
+  if (!res.ok) throw new Error(`Failed to fetch trades: ${res.statusText}`)
+  return res.json()
+}
+
+// ==============================
+// Insurance Fund API
+// ==============================
+
+export interface ApiInsuranceFund {
+  balance: number      // cents
+  balance_usd: number  // dollars
+}
+
+export async function getInsuranceFund(): Promise<ApiInsuranceFund> {
+  const res = await fetch(`${API_BASE}/chain/insurance-fund`)
+  if (!res.ok) throw new Error(`Failed to fetch insurance fund: ${res.statusText}`)
+  return res.json()
+}
+
+// ==============================
+// Nonce API
+// ==============================
+
+export interface ApiNonce {
+  address: string
+  nonce: number
+}
+
+export async function getNonce(address: string): Promise<ApiNonce> {
+  const res = await fetch(`${API_BASE}/accounts/${address}/nonce`)
+  if (!res.ok) throw new Error(`Failed to fetch nonce: ${res.statusText}`)
+  return res.json()
 }
