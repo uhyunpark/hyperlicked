@@ -21,16 +21,18 @@
 //! ```
 
 pub mod accounts;
+pub mod funding;
 pub mod liquidation;
 pub mod mempool;
 pub mod orderbook;
 pub mod state;
 
 pub use accounts::{Account, AccountManager, Position};
+pub use funding::FundingResult;
 pub use liquidation::LiquidationResult;
 pub use mempool::Mempool;
 pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
-pub use state::{AppState, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
+pub use state::{AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
 
 use crate::types::{Price, Size};
 
@@ -101,17 +103,24 @@ pub struct MarketConfig {
     pub min_notional: i64,     // Minimum order value
     pub maker_fee: i64,        // Fee in basis points (e.g., 2 = 0.02%)
     pub taker_fee: i64,        // Fee in basis points
+    // Funding parameters
+    pub funding_interval_ms: u64,  // Funding interval in ms (3600000 = 1 hour)
+    pub interest_rate_bps: i64,    // Interest rate component (1 = 0.01%)
+    pub max_funding_rate_bps: i64, // Max funding rate cap (400 = 4%)
 }
 
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
             symbol: "BTC-USDT".to_string(),
-            tick_size: 1,           // 1 cent
-            lot_size: 1,            // 1 satoshi
-            min_notional: 10_00,    // $10 minimum
-            maker_fee: 2,           // 0.02%
-            taker_fee: 5,           // 0.05%
+            tick_size: 1,                // 1 cent
+            lot_size: 1,                 // 1 satoshi
+            min_notional: 10_00,         // $10 minimum
+            maker_fee: 2,                // 0.02%
+            taker_fee: 5,                // 0.05%
+            funding_interval_ms: 3600000, // 1 hour
+            interest_rate_bps: 1,        // 0.01% interest
+            max_funding_rate_bps: 400,   // 4% max hourly rate
         }
     }
 }

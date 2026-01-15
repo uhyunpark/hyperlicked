@@ -30,6 +30,13 @@ pub struct OrderUpdateInfo {
     pub remaining: i64,
 }
 
+/// Deposit info for WebSocket event emission
+#[derive(Debug, Clone)]
+pub struct DepositInfo {
+    pub trader: String,
+    pub amount: i64,
+}
+
 /// Maintenance margin rate in basis points (500 = 5%)
 pub const MAINTENANCE_MARGIN_BPS: i64 = 500;
 
@@ -57,6 +64,17 @@ pub struct AppState {
     insurance_fund: i64,
     /// Liquidations from the last block execution (for event emission)
     pending_liquidations: Vec<super::liquidation::LiquidationResult>,
+    // Funding rate state
+    /// Rolling premium samples per symbol (in bps)
+    premium_samples: HashMap<Symbol, VecDeque<i64>>,
+    /// Current funding rate per symbol (in bps)
+    current_funding_rates: HashMap<Symbol, i64>,
+    /// Last funding payment time per symbol (ms timestamp)
+    last_funding_times: HashMap<Symbol, u64>,
+    /// Funding events from last block (for event emission)
+    pending_funding: Vec<super::funding::FundingResult>,
+    /// Deposits from last block (for WebSocket balance updates)
+    pending_deposits: Vec<DepositInfo>,
 }
 
 impl AppState {
@@ -73,6 +91,11 @@ impl AppState {
             trade_history: HashMap::new(),
             insurance_fund: 0,
             pending_liquidations: Vec::new(),
+            premium_samples: HashMap::new(),
+            current_funding_rates: HashMap::new(),
+            last_funding_times: HashMap::new(),
+            pending_funding: Vec::new(),
+            pending_deposits: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -110,6 +133,11 @@ impl AppState {
         match tx {
             Transaction::Deposit { trader, amount } => {
                 self.accounts.deposit(&trader, amount)?;
+                // Track deposit for WebSocket balance update
+                self.pending_deposits.push(DepositInfo {
+                    trader: trader.clone(),
+                    amount,
+                });
                 Ok(vec![])
             }
 
@@ -312,6 +340,11 @@ impl AppState {
         std::mem::take(&mut self.pending_liquidations)
     }
 
+    /// Take pending deposits (clears the list)
+    pub fn take_pending_deposits(&mut self) -> Vec<DepositInfo> {
+        std::mem::take(&mut self.pending_deposits)
+    }
+
     /// Get account for position updates
     pub fn accounts(&self) -> &AccountManager {
         &self.accounts
@@ -344,6 +377,8 @@ impl AppState {
             market_configs: self.configs.values().cloned().collect(),
             mark_prices: self.mark_prices.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             insurance_fund: self.insurance_fund,
+            funding_rates: self.current_funding_rates.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            last_funding_times: self.last_funding_times.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         }
     }
 
@@ -353,6 +388,8 @@ impl AppState {
         let mark_prices = snapshot.mark_prices_map();
         let timestamp = snapshot.timestamp;
         let insurance_fund = snapshot.insurance_fund;
+        let funding_rates = snapshot.funding_rates_map();
+        let last_funding_times = snapshot.last_funding_times_map();
 
         let mut state = Self {
             orderbooks: HashMap::new(),
@@ -366,6 +403,11 @@ impl AppState {
             trade_history: HashMap::new(),
             insurance_fund,
             pending_liquidations: Vec::new(),
+            premium_samples: HashMap::new(), // Premium samples are recalculated
+            current_funding_rates: funding_rates,
+            last_funding_times,
+            pending_funding: Vec::new(),
+            pending_deposits: Vec::new(),
         };
 
         // Restore market configs and create orderbooks
@@ -397,6 +439,39 @@ impl AppState {
     pub fn add_to_insurance_fund(&mut self, amount: i64) {
         self.insurance_fund += amount;
     }
+
+    /// Get current funding rate for a symbol (in bps)
+    pub fn funding_rate(&self, symbol: &str) -> i64 {
+        self.current_funding_rates.get(symbol).copied().unwrap_or(0)
+    }
+
+    /// Get last funding time for a symbol (ms timestamp)
+    pub fn last_funding_time(&self, symbol: &str) -> u64 {
+        self.last_funding_times.get(symbol).copied().unwrap_or(0)
+    }
+
+    /// Get next funding time for a symbol (ms timestamp)
+    pub fn next_funding_time(&self, symbol: &str) -> u64 {
+        let last = self.last_funding_time(symbol);
+        let interval = self.configs.get(symbol)
+            .map(|c| c.funding_interval_ms)
+            .unwrap_or(3600000); // 1 hour default
+        if last == 0 {
+            self.timestamp + interval
+        } else {
+            last + interval
+        }
+    }
+
+    /// Take pending funding events (clears the list)
+    pub fn take_pending_funding(&mut self) -> Vec<super::funding::FundingResult> {
+        std::mem::take(&mut self.pending_funding)
+    }
+
+    /// Get all funding rates (for API)
+    pub fn all_funding_rates(&self) -> &HashMap<Symbol, i64> {
+        &self.current_funding_rates
+    }
 }
 
 impl Default for AppState {
@@ -420,6 +495,7 @@ impl AppHook for AppState {
         self.pending_fills.clear();
         self.pending_order_updates.clear();
         self.pending_liquidations.clear();
+        self.pending_funding.clear();
 
         // Get transactions for this block from mempool
         let txs = self.mempool.prepare_block(1000);
@@ -448,6 +524,76 @@ impl AppHook for AppState {
             self.insurance_fund += liq.pnl;
         }
         self.pending_liquidations = liquidations;
+
+        // === Funding Rate Logic ===
+        // 1. Sample premium every block
+        // 2. Apply funding if interval has elapsed
+
+        // Collect symbols to process (avoid borrow issues)
+        let symbols: Vec<(Symbol, MarketConfig)> = self.configs.iter()
+            .map(|(s, c)| (s.clone(), c.clone()))
+            .collect();
+
+        for (symbol, config) in symbols {
+            // Get index price (using mark price as bootstrap index)
+            let index_price = self.mark_prices.get(&symbol).copied().unwrap_or(0);
+            if index_price == 0 {
+                continue;
+            }
+
+            // Sample premium from orderbook
+            if let Some(book) = self.orderbooks.get(&symbol) {
+                let premium = super::funding::sample_premium(book, index_price);
+                self.premium_samples
+                    .entry(symbol.clone())
+                    .or_default()
+                    .push_back(premium);
+
+                // Keep only samples for the funding interval (~1 hour of blocks)
+                // At 100ms blocks, 1 hour = 36000 blocks
+                let max_samples = (config.funding_interval_ms / 100).max(1) as usize;
+                let samples = self.premium_samples.get_mut(&symbol).unwrap();
+                while samples.len() > max_samples {
+                    samples.pop_front();
+                }
+            }
+
+            // Check if funding interval has elapsed
+            let last_funding = self.last_funding_times.get(&symbol).copied().unwrap_or(0);
+            if self.timestamp >= last_funding + config.funding_interval_ms {
+                // Calculate average premium
+                let samples: Vec<i64> = self.premium_samples
+                    .get(&symbol)
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default();
+                let avg_premium = super::funding::average_premium(&samples);
+
+                // Calculate funding rate
+                let funding_rate = super::funding::calculate_funding_rate(
+                    avg_premium,
+                    config.interest_rate_bps,
+                    config.max_funding_rate_bps,
+                );
+
+                // Apply funding to all positions
+                let index_price = self.mark_prices.get(&symbol).copied().unwrap_or(0);
+                let result = super::funding::apply_funding(
+                    &mut self.accounts,
+                    &symbol,
+                    funding_rate,
+                    index_price,
+                    self.timestamp,
+                );
+
+                // Update state
+                self.current_funding_rates.insert(symbol.clone(), funding_rate);
+                self.last_funding_times.insert(symbol.clone(), self.timestamp);
+                self.pending_funding.push(result);
+
+                // Clear premium samples for next period
+                self.premium_samples.remove(&symbol);
+            }
+        }
 
         // Return state hash for Byzantine detection
         self.compute_state_hash()
