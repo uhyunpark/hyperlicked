@@ -1,0 +1,111 @@
+{
+  "version": "1.0",
+  "description": "Skill activation triggers for hyperlicked Claude Code",
+  "skills": {
+    "skill-developer": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Meta-skill for creating and managing Claude Code skills",
+      "promptTriggers": {
+        "keywords": [
+          "skill system",
+          "create skill",
+          "add skill",
+          "skill triggers",
+          "skill rules",
+          "hook system",
+          "skill development",
+          "skill-rules.json"
+        ],
+        "intentPatterns": [
+          "(how do|how does|explain).*?skill",
+          "(create|add|modify|build).*?skill",
+          "skill.*?(work|trigger|activate|system)"
+        ]
+      }
+    },
+    "blockchain-dev-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Rust blockchain development patterns for HotStuff-2 consensus and orderbook",
+      "promptTriggers": {
+        "keywords": [
+          "consensus",
+          "hotstuff",
+          "orderbook",
+          "block",
+          "vote",
+          "certificate",
+          "BLS",
+          "AppHook",
+          "BlockStore",
+          "mempool",
+          "matching engine",
+          "liquidation",
+          "funding",
+          "pacemaker",
+          "safety",
+          "perpetual futures",
+          "perpdex"
+        ],
+        "intentPatterns": [
+          "(create|add|modify|implement).*?(consensus|block|vote|order)",
+          "(how|what).*?(consensus|orderbook|matching|hotstuff)",
+          "rust.*?(pattern|convention|guideline)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "src/**/*.rs"
+        ]
+      }
+    },
+    "frontend-dev-guidelines": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Next.js 15 / Tailwind / Zustand frontend patterns",
+      "promptTriggers": {
+        "keywords": [
+          "component",
+          "zustand",
+          "tailwind",
+          "websocket",
+          "wallet",
+          "next.js",
+          "trading UI",
+          "orderbook UI",
+          "toast",
+          "useWallet",
+          "useWebSocket"
+        ],
+        "intentPatterns": [
+          "(create|add|modify|build).*?(component|page|hook)",
+          "(how|what).*?(zustand|tailwind|wallet|websocket)",
+          "frontend.*?(pattern|convention|guideline)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "web/**/*.tsx",
+          "web/**/*.ts"
+        ]
+      }
+    }
+  },
+  "notes": {
+    "enforcement_types": {
+      "suggest": "Skill suggestion appears but doesn't block execution",
+      "block": "Requires skill to be used before proceeding (guardrail)",
+      "warn": "Shows warning but allows proceeding"
+    },
+    "priority_levels": {
+      "critical": "Highest - Always trigger when matched",
+      "high": "Important - Trigger for most matches",
+      "medium": "Moderate - Trigger for clear matches",
+      "low": "Optional - Trigger only for explicit matches"
+    }
+  }
+}
