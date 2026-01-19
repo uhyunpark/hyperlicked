@@ -38,13 +38,28 @@ src/
 │   └── aggregator.rs   # BLS signature aggregation
 ├── app/                # Business logic layer
 │   ├── mod.rs          # Transaction types, MarketConfig
-│   ├── state.rs        # AppState (implements AppHook)
-│   ├── orderbook.rs    # Heap-based matching engine
-│   ├── accounts.rs     # Position & margin tracking
+│   ├── state/          # AppState (implements AppHook)
+│   │   ├── mod.rs      # Struct definition + accessors
+│   │   ├── execution.rs # Transaction handlers
+│   │   └── consensus.rs # AppHook impl + state hash
+│   ├── orderbook/      # Heap-based matching engine
+│   │   ├── mod.rs      # OrderBook struct + basic ops
+│   │   └── matching.rs # place() + matching logic
+│   ├── accounts.rs     # Account, AccountManager
+│   ├── positions.rs    # Position struct + PnL/funding
 │   ├── mempool.rs      # 3-bucket transaction ordering
 │   ├── candles.rs      # OHLCV aggregation
 │   ├── funding.rs      # Funding rate payments
-│   └── liquidation.rs  # Liquidation engine
+│   ├── liquidation.rs  # Liquidation engine
+│   └── staking/        # Validator staking (NEW)
+│       ├── mod.rs      # Re-exports
+│       ├── types.rs    # Validator, Delegation, etc.
+│       ├── state.rs    # StakingState
+│       ├── epoch.rs    # Epoch transitions
+│       ├── rewards.rs  # Reward distribution
+│       ├── slashing.rs # Slashing logic
+│       ├── jailing.rs  # Jailing/unjailing
+│       └── transactions.rs # Staking tx types
 ├── crypto/             # Cryptographic operations
 │   ├── bls.rs          # BLS12-381 signatures
 │   ├── eip712.rs       # EIP-712 typed data signing

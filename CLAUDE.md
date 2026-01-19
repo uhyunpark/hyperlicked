@@ -69,7 +69,22 @@ hyperlicked/
 │   ├── config.rs          # Runtime config (mode, faucet, etc.)
 │   ├── consensus/         # HotStuff-2 engine + BLS vote aggregation
 │   ├── network/           # TCP transport
-│   ├── app/               # Orderbook, accounts, mempool
+│   ├── app/               # Orderbook, accounts, mempool, staking
+│   │   ├── mod.rs         # Transaction types, MarketConfig
+│   │   ├── state/         # AppState (implements AppHook)
+│   │   │   ├── mod.rs     # Struct + accessors
+│   │   │   ├── execution.rs # Transaction execution
+│   │   │   └── consensus.rs # AppHook impl
+│   │   ├── orderbook/     # Heap-based matching engine
+│   │   │   ├── mod.rs     # OrderBook struct
+│   │   │   └── matching.rs # Matching logic
+│   │   ├── accounts.rs    # Account & AccountManager
+│   │   ├── positions.rs   # Position struct
+│   │   ├── mempool.rs     # 3-bucket ordering
+│   │   ├── candles.rs     # OHLCV aggregation
+│   │   ├── funding.rs     # Funding rate payments
+│   │   ├── liquidation.rs # Liquidation engine
+│   │   └── staking/       # Validator staking system
 │   ├── crypto/            # EIP-712, agent keys, BLS12-381
 │   ├── storage/           # RocksDB persistence, snapshots, recovery
 │   └── api/               # REST + WebSocket
