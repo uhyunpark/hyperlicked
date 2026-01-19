@@ -20,6 +20,17 @@ use super::accounts::AccountManager;
 use super::orderbook::OrderBook;
 use crate::types::Price;
 
+/// Funding errors
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum FundingError {
+    #[error("invalid index price: {0}")]
+    InvalidIndexPrice(i64),
+    #[error("no orderbook for symbol: {0}")]
+    NoOrderbook(String),
+    #[error("funding rate out of bounds: {0}")]
+    RateOutOfBounds(i64),
+}
+
 /// Result of funding application
 #[derive(Debug, Clone)]
 pub struct FundingResult {

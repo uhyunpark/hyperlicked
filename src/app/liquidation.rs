@@ -11,6 +11,17 @@ use super::accounts::AccountManager;
 use super::state::MAINTENANCE_MARGIN_BPS;
 use super::Symbol;
 
+/// Liquidation errors
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum LiquidationError {
+    #[error("account not found: {0}")]
+    AccountNotFound(String),
+    #[error("no mark price for symbol: {0}")]
+    NoMarkPrice(String),
+    #[error("account not liquidatable")]
+    NotLiquidatable,
+}
+
 /// Result of a liquidation
 #[derive(Debug, Clone)]
 pub struct LiquidationResult {

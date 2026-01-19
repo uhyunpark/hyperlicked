@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{Account, MarketConfig, Symbol};
+use crate::app::{Account, MarketConfig, StakingState, Symbol};
 use crate::types::Price;
 
 /// Serializable app state snapshot
@@ -41,6 +41,9 @@ pub struct AppSnapshot {
     /// Last funding payment times per symbol (ms timestamp)
     #[serde(default)]
     pub last_funding_times: Vec<(Symbol, u64)>,
+    /// Staking state (validators, delegations, epochs)
+    #[serde(default)]
+    pub staking: Option<StakingState>,
 }
 
 impl AppSnapshot {
@@ -55,6 +58,7 @@ impl AppSnapshot {
             insurance_fund: 0,
             funding_rates: Vec::new(),
             last_funding_times: Vec::new(),
+            staking: None,
         }
     }
 

@@ -404,9 +404,19 @@ impl ConsensusConfig {
         self.validators.len()
     }
 
+    /// Number of validators with optional dynamic override
+    pub fn n_with(&self, dynamic: Option<&[NodeId]>) -> usize {
+        dynamic.map(|d| d.len()).unwrap_or_else(|| self.validators.len())
+    }
+
     /// Maximum Byzantine faults tolerated: f = (n-1)/3
     pub fn f(&self) -> usize {
         (self.n() - 1) / 3
+    }
+
+    /// Maximum Byzantine faults with optional dynamic override
+    pub fn f_with(&self, dynamic: Option<&[NodeId]>) -> usize {
+        (self.n_with(dynamic) - 1) / 3
     }
 
     /// Quorum size: need majority for safety
@@ -419,15 +429,50 @@ impl ConsensusConfig {
         bft_quorum.max(majority)
     }
 
+    /// Quorum size with optional dynamic override
+    pub fn quorum_with(&self, dynamic: Option<&[NodeId]>) -> usize {
+        let n = self.n_with(dynamic);
+        let f = self.f_with(dynamic);
+        let bft_quorum = 2 * f + 1;
+        let majority = n / 2 + 1;
+        bft_quorum.max(majority)
+    }
+
     /// Check if we are the leader for a given view
     pub fn is_leader(&self, view: View) -> bool {
         self.leader_of(view) == self.node_id
+    }
+
+    /// Check if we are the leader with dynamic validator set
+    pub fn is_leader_with(&self, view: View, dynamic: Option<&[NodeId]>) -> bool {
+        self.leader_of_with(view, dynamic) == self.node_id
     }
 
     /// Get leader for a given view (round-robin)
     pub fn leader_of(&self, view: View) -> NodeId {
         let idx = (view as usize) % self.validators.len();
         self.validators[idx]
+    }
+
+    /// Get leader with dynamic validator set
+    pub fn leader_of_with(&self, view: View, dynamic: Option<&[NodeId]>) -> NodeId {
+        let validators = dynamic.unwrap_or(&self.validators);
+        if validators.is_empty() {
+            return self.node_id; // Single-node fallback
+        }
+        let idx = (view as usize) % validators.len();
+        validators[idx]
+    }
+
+    /// Get active validators, preferring dynamic set if available
+    pub fn active_validators<'a>(&'a self, dynamic: Option<&'a [NodeId]>) -> &'a [NodeId] {
+        dynamic.unwrap_or(&self.validators)
+    }
+
+    /// Update the static validator list (used during epoch transitions)
+    pub fn update_validators(&mut self, validators: Vec<NodeId>, bls_pubkeys: Vec<Vec<u8>>) {
+        self.validators = validators;
+        self.bls_pubkeys = bls_pubkeys;
     }
 
     /// Check if BLS is enabled

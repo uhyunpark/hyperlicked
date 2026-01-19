@@ -26,15 +26,22 @@ pub mod funding;
 pub mod liquidation;
 pub mod mempool;
 pub mod orderbook;
+pub mod positions;
+pub mod staking;
 pub mod state;
 
-pub use accounts::{Account, AccountManager, Position};
+pub use accounts::{Account, AccountManager};
+pub use positions::Position;
 pub use candles::{Candle, CandleManager, Interval};
-pub use funding::FundingResult;
-pub use liquidation::LiquidationResult;
+pub use funding::{FundingError, FundingResult};
+pub use liquidation::{LiquidationError, LiquidationResult};
 pub use mempool::Mempool;
 pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
-pub use state::{AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
+pub use staking::{
+    StakingError, StakingState, StakingTransaction, StakingTxResult,
+    ValidatorInfo, ValidatorStatus, Delegation, EpochSnapshot,
+};
+pub use state::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
 
 use crate::types::{Price, Size};
 
@@ -72,6 +79,44 @@ pub enum Transaction {
         trader: Address,
         amount: i64,
     },
+    /// Register a new validator
+    RegisterValidator {
+        operator: Address,
+        node_id: crate::types::NodeId,
+        bls_pubkey: Vec<u8>,
+        self_stake: i64,
+        commission_bps: i64,
+    },
+    /// Delegate stake to a validator
+    Delegate {
+        delegator: Address,
+        validator: Address,
+        amount: i64,
+    },
+    /// Undelegate stake from a validator
+    Undelegate {
+        delegator: Address,
+        validator: Address,
+        amount: i64,
+    },
+    /// Claim completed unstakes
+    ClaimUnstaked {
+        delegator: Address,
+    },
+    /// Claim staking rewards
+    ClaimRewards {
+        claimant: Address,
+        validator: Option<Address>,
+    },
+    /// Unjail a jailed validator
+    Unjail {
+        operator: Address,
+    },
+    /// Submit evidence of misbehavior
+    SubmitEvidence {
+        submitter: Address,
+        evidence: staking::Evidence,
+    },
 }
 
 impl Transaction {
@@ -79,8 +124,19 @@ impl Transaction {
     /// Lower bucket = higher priority
     pub fn bucket(&self) -> u8 {
         match self {
-            Transaction::Deposit { .. } | Transaction::Withdraw { .. } => 0,
+            // Highest priority: deposits, withdrawals, and staking operations
+            Transaction::Deposit { .. }
+            | Transaction::Withdraw { .. }
+            | Transaction::RegisterValidator { .. }
+            | Transaction::Delegate { .. }
+            | Transaction::Undelegate { .. }
+            | Transaction::ClaimUnstaked { .. }
+            | Transaction::ClaimRewards { .. }
+            | Transaction::Unjail { .. }
+            | Transaction::SubmitEvidence { .. } => 0,
+            // Medium priority: order cancellations
             Transaction::CancelOrder { .. } => 1,
+            // Lower priority: order placements
             Transaction::PlaceOrder { .. } => 2,
         }
     }
