@@ -304,3 +304,59 @@ pub struct WithdrawRequest {
     pub trader: String,
     pub amount: i64,
 }
+
+// =============================================================================
+// Trigger Order Types
+// =============================================================================
+
+/// Trigger order info for API response
+#[derive(Debug, Serialize)]
+pub struct TriggerOrderInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloid: Option<String>,
+    pub symbol: String,
+    pub side: String,
+    #[serde(rename = "triggerType")]
+    pub trigger_type: String,
+    #[serde(rename = "triggerPrice")]
+    pub trigger_price: i64,
+    pub size: i64,
+    #[serde(rename = "limitPrice", skip_serializing_if = "Option::is_none")]
+    pub limit_price: Option<i64>,
+    pub status: String,
+    pub timestamp: u64,
+}
+
+/// Request to place a trigger order
+#[derive(Debug, Deserialize)]
+pub struct PlaceTriggerOrderRequest {
+    pub trader: String,
+    pub symbol: String,
+    #[serde(rename = "triggerType")]
+    pub trigger_type: String,  // "sl" or "tp"
+    #[serde(rename = "triggerPrice")]
+    pub trigger_price: i64,
+    pub size: i64,
+    #[serde(rename = "limitPrice")]
+    pub limit_price: Option<i64>,
+    pub cloid: Option<String>,
+}
+
+/// Response after placing a trigger order
+#[derive(Debug, Serialize)]
+pub struct PlaceTriggerOrderResponse {
+    pub status: String,
+    #[serde(rename = "triggerOrderId")]
+    pub trigger_order_id: String,
+}
+
+/// Request to cancel a trigger order
+#[derive(Debug, Deserialize)]
+pub struct CancelTriggerOrderRequest {
+    pub trader: String,
+    #[serde(rename = "triggerOrderId")]
+    pub trigger_order_id: Option<String>,
+    pub symbol: Option<String>,
+    pub cloid: Option<String>,
+}

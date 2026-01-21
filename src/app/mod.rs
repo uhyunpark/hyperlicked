@@ -29,6 +29,7 @@ pub mod orderbook;
 pub mod positions;
 pub mod staking;
 pub mod state;
+pub mod trigger;
 
 pub use accounts::{Account, AccountManager};
 pub use positions::Position;
@@ -42,6 +43,10 @@ pub use staking::{
     ValidatorInfo, ValidatorStatus, Delegation, EpochSnapshot,
 };
 pub use state::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
+pub use trigger::{
+    Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType,
+    TriggerOrder, TriggerOrderId, TriggerOrderStatus, TriggerType,
+};
 
 use crate::types::{Price, Size};
 
@@ -117,6 +122,27 @@ pub enum Transaction {
         submitter: Address,
         evidence: staking::Evidence,
     },
+    /// Place a trigger order (Stop Loss or Take Profit)
+    PlaceTriggerOrder {
+        trader: Address,
+        symbol: Symbol,
+        trigger_type: TriggerType,
+        trigger_price: Price,
+        size: Size,
+        limit_price: Option<Price>,
+        cloid: Option<Cloid>,
+    },
+    /// Cancel a trigger order by ID
+    CancelTriggerOrder {
+        trader: Address,
+        trigger_order_id: TriggerOrderId,
+    },
+    /// Cancel a trigger order by client order ID
+    CancelTriggerOrderByCloid {
+        trader: Address,
+        symbol: Symbol,
+        cloid: Cloid,
+    },
 }
 
 impl Transaction {
@@ -134,10 +160,13 @@ impl Transaction {
             | Transaction::ClaimRewards { .. }
             | Transaction::Unjail { .. }
             | Transaction::SubmitEvidence { .. } => 0,
-            // Medium priority: order cancellations
-            Transaction::CancelOrder { .. } => 1,
-            // Lower priority: order placements
-            Transaction::PlaceOrder { .. } => 2,
+            // Medium priority: order cancellations (including trigger cancels)
+            Transaction::CancelOrder { .. }
+            | Transaction::CancelTriggerOrder { .. }
+            | Transaction::CancelTriggerOrderByCloid { .. } => 1,
+            // Lower priority: order placements (including trigger orders)
+            Transaction::PlaceOrder { .. }
+            | Transaction::PlaceTriggerOrder { .. } => 2,
         }
     }
 

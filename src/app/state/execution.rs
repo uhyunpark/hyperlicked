@@ -53,6 +53,46 @@ impl AppState {
                 submitter: _,
                 evidence,
             } => self.execute_submit_evidence(evidence),
+
+            // Trigger order transactions
+            Transaction::PlaceTriggerOrder {
+                trader,
+                symbol,
+                trigger_type,
+                trigger_price,
+                size,
+                limit_price,
+                cloid,
+            } => {
+                self.execute_place_trigger_order(
+                    trader,
+                    symbol,
+                    trigger_type,
+                    trigger_price,
+                    size,
+                    limit_price,
+                    cloid,
+                )
+                .map_err(AppError::Trigger)?;
+                Ok(vec![])
+            }
+            Transaction::CancelTriggerOrder {
+                trader,
+                trigger_order_id,
+            } => {
+                self.execute_cancel_trigger_order(trader, trigger_order_id)
+                    .map_err(AppError::Trigger)?;
+                Ok(vec![])
+            }
+            Transaction::CancelTriggerOrderByCloid {
+                trader,
+                symbol,
+                cloid,
+            } => {
+                self.execute_cancel_trigger_order_by_cloid(trader, symbol, cloid)
+                    .map_err(AppError::Trigger)?;
+                Ok(vec![])
+            }
         }
     }
 
@@ -234,6 +274,10 @@ impl AppState {
         validator: String,
         amount: i64,
     ) -> Result<Vec<Fill>, AppError> {
+        // Check validator exists BEFORE withdrawing funds
+        if self.staking.get_validator(&validator).is_none() {
+            return Err(AppError::from(staking::StakingError::ValidatorNotFound));
+        }
         // Deduct delegation amount from account
         self.accounts.withdraw(&delegator, amount)?;
         self.staking

@@ -5,6 +5,7 @@
 
 mod consensus;
 mod execution;
+mod trigger;
 
 use std::collections::{HashMap, VecDeque};
 
@@ -14,7 +15,8 @@ use crate::app::{
     mempool::{Mempool, MempoolError},
     orderbook::{Fill, Order, OrderBook},
     staking::StakingState,
-    MarketConfig, Symbol, Transaction,
+    trigger::{Cloid, TriggerEvent, TriggerOrder, TriggerOrderId},
+    Address, MarketConfig, Symbol, Transaction,
 };
 use crate::types::{Hash, Price, View};
 
@@ -85,6 +87,19 @@ pub struct AppState {
     pub(crate) pending_staking_events: Vec<crate::app::staking::StakingTxResult>,
     /// Current view (for epoch tracking)
     pub(crate) current_view: View,
+    // === Trigger Orders ===
+    /// All trigger orders by ID
+    pub(crate) trigger_orders: HashMap<TriggerOrderId, TriggerOrder>,
+    /// Trigger order IDs by trader address
+    pub(crate) trigger_orders_by_trader: HashMap<Address, Vec<TriggerOrderId>>,
+    /// Trigger order IDs by symbol (for efficient mark price checking)
+    pub(crate) trigger_orders_by_symbol: HashMap<Symbol, Vec<TriggerOrderId>>,
+    /// Trigger order ID by (trader, symbol, cloid) for cloid lookup
+    pub(crate) trigger_orders_by_cloid: HashMap<(Address, Symbol, Cloid), TriggerOrderId>,
+    /// Sequence number for generating trigger order IDs
+    pub(crate) trigger_seq: u64,
+    /// Pending trigger events from last block (for WebSocket emission)
+    pub(crate) pending_trigger_events: Vec<TriggerEvent>,
 }
 
 impl AppState {
@@ -110,6 +125,12 @@ impl AppState {
             staking: StakingState::new(),
             pending_staking_events: Vec::new(),
             current_view: 0,
+            trigger_orders: HashMap::new(),
+            trigger_orders_by_trader: HashMap::new(),
+            trigger_orders_by_symbol: HashMap::new(),
+            trigger_orders_by_cloid: HashMap::new(),
+            trigger_seq: 0,
+            pending_trigger_events: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -309,6 +330,42 @@ impl AppState {
     pub fn current_view(&self) -> View {
         self.current_view
     }
+
+    // === Trigger Order Accessors ===
+
+    /// Get a trigger order by ID
+    pub fn trigger_order(&self, id: &str) -> Option<&TriggerOrder> {
+        self.trigger_orders.get(id)
+    }
+
+    /// Get all trigger orders for a trader
+    pub fn trigger_orders_by_trader(&self, trader: &str) -> Vec<&TriggerOrder> {
+        self.trigger_orders_by_trader
+            .get(trader)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.trigger_orders.get(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all trigger orders for a symbol
+    pub fn trigger_orders_by_symbol(&self, symbol: &str) -> Vec<&TriggerOrder> {
+        self.trigger_orders_by_symbol
+            .get(symbol)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.trigger_orders.get(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Take pending trigger events (clears the list)
+    pub fn take_pending_trigger_events(&mut self) -> Vec<TriggerEvent> {
+        std::mem::take(&mut self.pending_trigger_events)
+    }
 }
 
 impl Default for AppState {
@@ -328,6 +385,8 @@ pub enum AppError {
     OrderBook(#[from] crate::app::orderbook::OrderBookError),
     #[error("staking error: {0}")]
     Staking(#[from] crate::app::staking::StakingError),
+    #[error("trigger order error: {0}")]
+    Trigger(#[from] crate::app::trigger::TriggerError),
     #[error("market not found")]
     MarketNotFound,
     #[error("order not found")]

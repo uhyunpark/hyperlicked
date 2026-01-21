@@ -93,8 +93,10 @@ impl OrderBook {
             }
         }
 
-        // Rest on book if GTC and remaining size
-        if order.size > 0 && order.order_type == OrderType::Gtc {
+        // Rest on book if GTC/ALO and remaining size
+        if order.size > 0
+            && (order.order_type == OrderType::Gtc || order.order_type == OrderType::Alo)
+        {
             self.add_bid(order.clone());
         }
     }
@@ -160,8 +162,10 @@ impl OrderBook {
             }
         }
 
-        // Rest on book if GTC
-        if order.size > 0 && order.order_type == OrderType::Gtc {
+        // Rest on book if GTC/ALO
+        if order.size > 0
+            && (order.order_type == OrderType::Gtc || order.order_type == OrderType::Alo)
+        {
             self.add_ask(order.clone());
         }
     }

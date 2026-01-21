@@ -95,6 +95,31 @@ pub enum UserEvent {
         locked: i64,           // Locked in positions
         timestamp: u64,
     },
+    /// Trigger order placed
+    #[serde(rename = "triggerOrderPlaced")]
+    TriggerOrderPlaced {
+        id: String,
+        symbol: String,
+        trigger_type: String,  // "sl" or "tp"
+        trigger_price: i64,
+        size: i64,
+        timestamp: u64,
+    },
+    /// Trigger order activated (converted to regular order)
+    #[serde(rename = "triggerOrderTriggered")]
+    TriggerOrderTriggered {
+        id: String,
+        symbol: String,
+        order_id: String,      // Resulting order ID
+        timestamp: u64,
+    },
+    /// Trigger order cancelled
+    #[serde(rename = "triggerOrderCancelled")]
+    TriggerOrderCancelled {
+        id: String,
+        symbol: String,
+        timestamp: u64,
+    },
 }
 
 /// User subscription info

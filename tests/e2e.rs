@@ -4,6 +4,23 @@
 //! They serve as the living specification.
 //!
 //! Run with: cargo test --test e2e
+//!
+//! ## Test Organization
+//!
+//! - `e2e/` - Domain-specific test modules
+//!   - `helpers/` - TestContext, builders, assertions
+//!   - `accounts_test.rs` - Deposit, withdraw, account lifecycle
+//!   - `orders_test.rs` - Order placement, cancellation, types
+//!   - `matching_test.rs` - Price-time priority, partial fills
+//!   - `positions_test.rs` - Long/short, PnL, entry prices
+//!   - `liquidation_test.rs` - Margin checks, auto-liquidation
+//!   - `funding_test.rs` - Funding rate payments
+//!   - `triggers_test.rs` - Stop-loss, take-profit
+//!   - `staking_test.rs` - Validators, delegation
+//!   - `integration_test.rs` - Full flow scenarios
+
+#[path = "e2e_tests/mod.rs"]
+mod e2e;
 
 use hyperlicked::app::{AppState, OrderType, Side, Transaction};
 use hyperlicked::consensus::{Engine, MemoryBlockStore};
