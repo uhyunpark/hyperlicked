@@ -159,6 +159,67 @@ cargo build --release
 - `.claude/skills/blockchain-dev-guidelines/` - Rust/consensus patterns
 - `.claude/skills/frontend-dev-guidelines/` - Next.js/Tailwind patterns
 
+## Claude Code Extensions
+
+This project uses Claude Code's extension system for AI-assisted development.
+
+### Skills (`.claude/skills/`)
+
+Skills are markdown files that teach Claude domain-specific knowledge. They activate automatically based on keywords or file patterns. See [Claude Code Skills docs](https://code.claude.com/docs/en/skills).
+
+**Structure:**
+```
+.claude/skills/{skill-name}/
+├── SKILL.md           # Main skill file (max 500 lines)
+└── resources/         # Reference files for detailed info
+```
+
+**Our skills:**
+- `blockchain-dev-guidelines` - Rust/HotStuff-2 patterns (triggers on `src/*.rs`)
+- `frontend-dev-guidelines` - Next.js/Tailwind patterns (triggers on `web/*.tsx`)
+- `skill-developer` - Meta-skill for creating new skills
+
+**SKILL.md format:**
+```yaml
+---
+name: skill-name
+description: What it does and trigger keywords (max 1024 chars)
+---
+# Skill content (markdown)
+```
+
+### Agents (`.claude/agents/`)
+
+Agents are specialized subagents that run in their own context with specific tools and prompts. They're delegated to for complex tasks. See [Claude Code Subagents docs](https://code.claude.com/docs/en/sub-agents).
+
+**Structure:**
+```
+.claude/agents/{agent-name}.md
+```
+
+**Our agents:**
+- `backend-architecture-reviewer` - Reviews Rust code for HotStuff-2/orderbook patterns
+- `frontend-architecture-reviewer` - Reviews React code for Next.js/Tailwind patterns
+
+**Agent format:**
+```yaml
+---
+name: agent-name
+description: When Claude should delegate to this agent
+model: sonnet|opus|haiku
+tools: Read, Grep, Glob, Bash  # Comma-separated tools
+---
+# Agent system prompt (markdown)
+```
+
+**Key differences:**
+| Feature | Skills | Agents |
+|---------|--------|--------|
+| Purpose | Domain knowledge | Task delegation |
+| Context | Shared with main | Separate context |
+| Activation | Auto (keywords/files) | Claude delegates |
+| Tools | Inherits all | Specified per agent |
+
 ## References
 
 - HotStuff-2 paper (2-chain commit, pacemaker)
