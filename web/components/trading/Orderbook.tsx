@@ -21,10 +21,21 @@ function OrderbookRow({
   const depthPercent = (level.size / maxSize) * 100
   const isBid = side === 'bid'
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onClick?.(level.price)
+    }
+  }
+
   return (
     <div
-      className="relative flex cursor-pointer items-center justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary"
+      className="relative flex cursor-pointer items-center justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary focus:bg-bg-tertiary focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
       onClick={() => onClick?.(level.price)}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+      aria-label={`${isBid ? 'Bid' : 'Ask'} at ${level.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}, size ${level.size.toFixed(4)}`}
     >
       {/* Depth bar */}
       <div
@@ -163,7 +174,7 @@ export function Orderbook() {
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
       {/* Tab Header */}
-      <div className="flex border-b border-border">
+      <div className="flex border-b border-border" role="tablist" aria-label="Orderbook and trades">
         <button
           onClick={() => setActiveTab('orderbook')}
           className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
@@ -171,6 +182,10 @@ export function Orderbook() {
               ? 'border-b-2 border-accent text-text-primary'
               : 'text-text-muted hover:text-text-secondary'
           }`}
+          role="tab"
+          aria-selected={activeTab === 'orderbook'}
+          aria-controls="orderbook-panel"
+          id="orderbook-tab"
         >
           Order Book
         </button>
@@ -181,6 +196,10 @@ export function Orderbook() {
               ? 'border-b-2 border-accent text-text-primary'
               : 'text-text-muted hover:text-text-secondary'
           }`}
+          role="tab"
+          aria-selected={activeTab === 'trades'}
+          aria-controls="trades-panel"
+          id="trades-tab"
         >
           Trades
         </button>
@@ -188,9 +207,11 @@ export function Orderbook() {
 
       {/* Tab Content */}
       {activeTab === 'trades' ? (
-        <TradesPanel />
+        <div role="tabpanel" id="trades-panel" aria-labelledby="trades-tab" className="flex-1 overflow-hidden">
+          <TradesPanel />
+        </div>
       ) : (
-        <>
+        <div role="tabpanel" id="orderbook-panel" aria-labelledby="orderbook-tab" className="flex flex-1 flex-col overflow-hidden">
           {/* Column headers */}
           <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
             <div>Price (USDT)</div>
@@ -236,7 +257,7 @@ export function Orderbook() {
               ))}
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   )

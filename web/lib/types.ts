@@ -64,3 +64,20 @@ export interface Account {
   lockedCollateral: number
   totalEquity: number
 }
+
+// Trigger Order Types (Stop Loss / Take Profit)
+export type TriggerType = 'sl' | 'tp'
+export type TriggerOrderStatus = 'pending' | 'triggered' | 'cancelled' | 'failed'
+
+export interface TriggerOrder {
+  id: string
+  cloid?: string
+  symbol: string
+  triggerType: TriggerType
+  side: Side
+  triggerPrice: number
+  size: number
+  limitPrice?: number
+  status: TriggerOrderStatus
+  timestamp: number
+}

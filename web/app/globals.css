@@ -83,10 +83,30 @@ input[type="number"]::-webkit-outer-spin-button {
   opacity: 1;
 }
 
-/* Focus states */
+/* Focus states - provide visible focus for accessibility */
 input:focus,
 button:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Remove default outline when using focus-visible (keyboard navigation only) */
+input:focus:not(:focus-visible),
+button:focus:not(:focus-visible) {
   outline: none;
+}
+
+/* Screen reader only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
 
 /* Range slider styling */

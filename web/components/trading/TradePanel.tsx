@@ -7,7 +7,7 @@ import { toast } from '@/components/ui/Toast'
 import type { Side, OrderType, TimeInForce } from '@/lib/types'
 import { TIF_CODES } from '@/lib/types'
 import { isDevelopment } from '@/lib/config'
-import { requestFaucet } from '@/lib/api'
+import { requestFaucet, placeTriggerOrder, convertToApiPrice, convertToApiSize } from '@/lib/api'
 
 interface AccountData {
   balance: number
@@ -27,6 +27,11 @@ export function TradePanel() {
   const [price, setPrice] = useState('')
   const [size, setSize] = useState('')
   const [leverage, setLeverage] = useState(10)
+
+  // TP/SL state
+  const [tpSlEnabled, setTpSlEnabled] = useState(false)
+  const [tpPrice, setTpPrice] = useState('')
+  const [slPrice, setSlPrice] = useState('')
 
   // Account data from API
   const [account, setAccount] = useState<AccountData | null>(null)
@@ -188,8 +193,48 @@ export function TradePanel() {
       if (response.status === 'submitted') {
         const method = agentMode ? 'Agent Key' : (wallet.isRabby ? 'Rabby' : 'MetaMask')
         toast.success('Order Submitted', `Order #${response.orderId} signed with ${method}`)
+
+        // Place TP/SL orders if enabled and this is not a reduce-only order
+        if (tpSlEnabled && !reduceOnly) {
+          const orderSizeApi = convertToApiSize(parseFloat(size))
+
+          // Place Take Profit if set
+          if (tpPrice && parseFloat(tpPrice) > 0) {
+            try {
+              await placeTriggerOrder({
+                trader: wallet.address!,
+                symbol: selectedSymbol,
+                triggerType: 'tp',
+                triggerPrice: convertToApiPrice(parseFloat(tpPrice)),
+                size: orderSizeApi,
+              })
+              toast.success('Take Profit Set', `TP at $${parseFloat(tpPrice).toLocaleString()}`)
+            } catch (err: any) {
+              toast.warning('TP Failed', err.message)
+            }
+          }
+
+          // Place Stop Loss if set
+          if (slPrice && parseFloat(slPrice) > 0) {
+            try {
+              await placeTriggerOrder({
+                trader: wallet.address!,
+                symbol: selectedSymbol,
+                triggerType: 'sl',
+                triggerPrice: convertToApiPrice(parseFloat(slPrice)),
+                size: orderSizeApi,
+              })
+              toast.success('Stop Loss Set', `SL at $${parseFloat(slPrice).toLocaleString()}`)
+            } catch (err: any) {
+              toast.warning('SL Failed', err.message)
+            }
+          }
+        }
+
         setSize('')
         if (orderType === 'limit') setPrice('')
+        setTpPrice('')
+        setSlPrice('')
 
         // Immediately refresh open orders so the new order appears
         try {
@@ -321,9 +366,10 @@ export function TradePanel() {
             type="checkbox"
             checked={reduceOnly}
             onChange={(e) => setReduceOnly(e.target.checked)}
-            className="h-4 w-4 rounded border-border accent-accent"
+            className="h-4 w-4 rounded border-border accent-accent focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-bg-secondary"
+            aria-describedby="reduce-only-description"
           />
-          <span className="text-xs text-text-secondary" title="Only reduce existing position, never increase">
+          <span id="reduce-only-description" className="text-xs text-text-secondary" title="Only reduce existing position, never increase">
             Reduce Only
           </span>
         </label>
@@ -374,8 +420,9 @@ export function TradePanel() {
         {/* Price Input (Limit only) */}
         {orderType === 'limit' && (
           <div className="mb-4">
-            <label className="mb-1 block text-xs text-text-muted">Price (USDT)</label>
+            <label htmlFor="price-input" className="mb-1 block text-xs text-text-muted">Price (USDT)</label>
             <input
+              id="price-input"
               type="number"
               value={price}
               onChange={(e) => setPrice(e.target.value)}
@@ -387,8 +434,9 @@ export function TradePanel() {
 
         {/* Size Input */}
         <div className="mb-3">
-          <label className="mb-1 block text-xs text-text-muted">Size (BTC)</label>
+          <label htmlFor="size-input" className="mb-1 block text-xs text-text-muted">Size (BTC)</label>
           <input
+            id="size-input"
             type="number"
             value={size}
             onChange={(e) => setSize(e.target.value)}
@@ -416,16 +464,21 @@ export function TradePanel() {
         {/* Leverage Slider */}
         <div className="mb-4">
           <div className="mb-2 flex items-center justify-between">
-            <label className="text-xs text-text-muted">Leverage</label>
-            <div className="text-sm font-mono font-semibold text-text-primary">{leverage}x</div>
+            <label htmlFor="leverage-slider" className="text-xs text-text-muted">Leverage</label>
+            <div className="text-sm font-mono font-semibold text-text-primary" aria-hidden="true">{leverage}x</div>
           </div>
           <input
+            id="leverage-slider"
             type="range"
             min="1"
             max="50"
             value={leverage}
             onChange={(e) => setLeverage(parseInt(e.target.value))}
             className="w-full accent-accent"
+            aria-valuemin={1}
+            aria-valuemax={50}
+            aria-valuenow={leverage}
+            aria-valuetext={`${leverage}x leverage`}
           />
           <div className="mt-1 flex justify-between text-xs text-text-muted">
             <span>1x</span>
@@ -433,6 +486,73 @@ export function TradePanel() {
             <span>50x</span>
           </div>
         </div>
+
+        {/* TP/SL Section */}
+        {!reduceOnly && (
+          <div className="mb-4 rounded border border-border bg-bg-primary">
+            <button
+              onClick={() => setTpSlEnabled(!tpSlEnabled)}
+              className="flex w-full items-center justify-between p-3 text-left"
+            >
+              <span className="text-xs font-medium text-text-secondary">
+                TP / SL
+              </span>
+              <span className={`text-xs ${tpSlEnabled ? 'text-accent' : 'text-text-muted'}`}>
+                {tpSlEnabled ? '▲ Enabled' : '▼ Disabled'}
+              </span>
+            </button>
+
+            {tpSlEnabled && (
+              <div className="space-y-3 border-t border-border p-3">
+                {/* Take Profit */}
+                <div>
+                  <label htmlFor="tp-input" className="mb-1 flex items-center justify-between text-xs">
+                    <span className="text-green-buy">Take Profit</span>
+                    <span className="text-text-muted">
+                      {side === 'buy' ? '> Mark' : '< Mark'}
+                    </span>
+                  </label>
+                  <input
+                    id="tp-input"
+                    type="number"
+                    value={tpPrice}
+                    onChange={(e) => setTpPrice(e.target.value)}
+                    placeholder={side === 'buy'
+                      ? (currentPrice * 1.05).toFixed(2)
+                      : (currentPrice * 0.95).toFixed(2)
+                    }
+                    className="w-full rounded border border-border bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-green-buy focus:outline-none"
+                  />
+                </div>
+
+                {/* Stop Loss */}
+                <div>
+                  <label htmlFor="sl-input" className="mb-1 flex items-center justify-between text-xs">
+                    <span className="text-red-sell">Stop Loss</span>
+                    <span className="text-text-muted">
+                      {side === 'buy' ? '< Mark' : '> Mark'}
+                    </span>
+                  </label>
+                  <input
+                    id="sl-input"
+                    type="number"
+                    value={slPrice}
+                    onChange={(e) => setSlPrice(e.target.value)}
+                    placeholder={side === 'buy'
+                      ? (currentPrice * 0.95).toFixed(2)
+                      : (currentPrice * 1.05).toFixed(2)
+                    }
+                    className="w-full rounded border border-border bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-red-sell focus:outline-none"
+                  />
+                </div>
+
+                <p className="text-xs text-text-muted">
+                  TP/SL will be placed after your order fills
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Margin Info */}
         <div className="mb-4 rounded border border-border bg-bg-primary p-3">

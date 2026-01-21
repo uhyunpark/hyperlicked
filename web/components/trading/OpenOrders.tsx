@@ -80,6 +80,7 @@ export function OpenOrders() {
           </div>
         ) : (
           <table className="w-full text-xs">
+            <caption className="sr-only">Open orders with price, size, fill status, and actions</caption>
             <thead className="sticky top-0 border-b border-border bg-bg-secondary">
               <tr className="text-text-muted">
                 <th className="px-4 py-2 text-left font-medium">Time</th>

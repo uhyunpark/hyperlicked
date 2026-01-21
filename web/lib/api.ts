@@ -347,3 +347,91 @@ export async function getNonce(address: string): Promise<ApiNonce> {
   if (!res.ok) throw new Error(`Failed to fetch nonce: ${res.statusText}`)
   return res.json()
 }
+
+// ==============================
+// Trigger Order API
+// ==============================
+
+export interface ApiTriggerOrder {
+  id: string
+  cloid?: string
+  symbol: string
+  side: string        // "buy" or "sell"
+  triggerType: string // "sl" or "tp"
+  triggerPrice: number // cents
+  size: number         // satoshis
+  limitPrice?: number  // cents (optional)
+  status: string       // "pending", "triggered", "cancelled", "failed"
+  timestamp: number
+}
+
+export interface PlaceTriggerOrderRequest {
+  trader: string
+  symbol: string
+  triggerType: 'sl' | 'tp'
+  triggerPrice: number  // cents
+  size: number          // satoshis
+  limitPrice?: number   // cents (optional)
+  cloid?: string
+}
+
+export interface PlaceTriggerOrderResponse {
+  status: string
+  triggerOrderId: string
+}
+
+export async function getTriggerOrders(address: string): Promise<ApiTriggerOrder[]> {
+  const res = await fetch(`${API_BASE}/accounts/${address}/trigger-orders`)
+  if (!res.ok) throw new Error(`Failed to fetch trigger orders: ${res.statusText}`)
+  return res.json()
+}
+
+export async function placeTriggerOrder(req: PlaceTriggerOrderRequest): Promise<PlaceTriggerOrderResponse> {
+  const res = await fetch(`${API_BASE}/trigger-orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req)
+  })
+
+  if (!res.ok) {
+    const errorText = await res.text()
+    throw new Error(errorText || res.statusText)
+  }
+
+  return res.json()
+}
+
+export async function cancelTriggerOrder(
+  triggerOrderId: string,
+  trader: string
+): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/trigger-orders/${triggerOrderId}?trader=${encodeURIComponent(trader)}`, {
+    method: 'DELETE'
+  })
+
+  if (!res.ok) {
+    const errorText = await res.text()
+    throw new Error(errorText || res.statusText)
+  }
+
+  return res.json()
+}
+
+export async function cancelTriggerOrderByCloid(
+  trader: string,
+  symbol: string,
+  cloid: string
+): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/trigger-orders/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trader, symbol, cloid })
+  })
+
+  if (!res.ok) {
+    const errorText = await res.text()
+    throw new Error(errorText || res.statusText)
+  }
+
+  return res.json()
+}

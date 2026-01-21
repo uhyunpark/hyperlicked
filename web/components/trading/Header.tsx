@@ -16,6 +16,9 @@ interface NavTabProps {
 function NavTab({ label, active, disabled }: NavTabProps) {
   return (
     <button
+      role="tab"
+      aria-selected={active}
+      aria-disabled={disabled}
       disabled={disabled}
       className={`relative px-4 py-2 text-sm font-medium transition-colors ${
         disabled
@@ -140,6 +143,7 @@ export function Header() {
               <button
                 onClick={() => wallet.clearError()}
                 className="text-xs text-red-sell hover:text-red-sell/80"
+                aria-label="Dismiss error"
               >
                 ✕
               </button>
@@ -153,7 +157,12 @@ export function Header() {
         {/* Left: Logo + Online indicator */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-green-500" title={wsConnected ? 'Online' : 'Connecting...'} />
+            <div
+              className="h-2 w-2 rounded-full bg-green-500"
+              title={wsConnected ? 'Online' : 'Connecting...'}
+              role="status"
+              aria-label={wsConnected ? 'Connection status: Online' : 'Connection status: Connecting'}
+            />
             <div className="text-lg font-bold text-text-primary">HyperLicked</div>
             {isDevelopment && (
               <span className="rounded bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-500">
@@ -164,7 +173,7 @@ export function Header() {
         </div>
 
         {/* Center: Navigation */}
-        <nav className="flex items-center">
+        <nav className="flex items-center" role="tablist" aria-label="Main navigation">
           <NavTab label="Trade" active />
           <NavTab label="Vaults" disabled />
           <NavTab label="Portfolio" disabled />
@@ -178,30 +187,46 @@ export function Header() {
               <button
                 onClick={() => setShowWalletDropdown(!showWalletDropdown)}
                 className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-mono font-medium text-white transition-opacity hover:opacity-90"
+                aria-expanded={showWalletDropdown}
+                aria-haspopup="menu"
+                aria-label={`Wallet ${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}, click to ${showWalletDropdown ? 'close' : 'open'} menu`}
               >
-                {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <span aria-hidden="true">{wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}</span>
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
               </button>
               {showWalletDropdown && (
-                <div className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border bg-bg-primary shadow-lg">
-                  <div className="border-b border-border px-4 py-2">
-                    <div className="text-xs text-text-muted">Connected</div>
-                    <div className="font-mono text-sm text-text-primary">
-                      {wallet.address.slice(0, 8)}...{wallet.address.slice(-6)}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      wallet.disconnect()
-                      setShowWalletDropdown(false)
-                    }}
-                    className="w-full px-4 py-2 text-left text-sm text-red-sell transition-colors hover:bg-red-sell/10"
+                <>
+                  {/* Backdrop to close dropdown on outside click */}
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setShowWalletDropdown(false)}
+                    aria-hidden="true"
+                  />
+                  <div
+                    className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border bg-bg-primary shadow-lg"
+                    role="menu"
+                    aria-orientation="vertical"
                   >
-                    Disconnect
-                  </button>
-                </div>
+                    <div className="border-b border-border px-4 py-2">
+                      <div className="text-xs text-text-muted">Connected</div>
+                      <div className="font-mono text-sm text-text-primary">
+                        {wallet.address.slice(0, 8)}...{wallet.address.slice(-6)}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        wallet.disconnect()
+                        setShowWalletDropdown(false)
+                      }}
+                      className="w-full px-4 py-2 text-left text-sm text-red-sell transition-colors hover:bg-red-sell/10"
+                      role="menuitem"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                </>
               )}
             </>
           ) : (
@@ -283,6 +308,7 @@ export function Header() {
                   <button
                     onClick={() => wallet.disableTrading()}
                     className="ml-2 text-xs text-text-muted hover:text-red-sell"
+                    aria-label="Disable trading"
                   >
                     Disable
                   </button>
