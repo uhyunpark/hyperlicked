@@ -38,6 +38,39 @@ pub enum Event {
         hash: String,
         tx_count: usize,
     },
+    /// Mark price update (broadcast every block with trades)
+    #[serde(rename = "markPrice")]
+    MarkPriceUpdate {
+        symbol: String,
+        mark_price: i64,
+        index_price: Option<i64>,
+        timestamp: u64,
+    },
+    /// Asset context update (market stats, streamed every block)
+    #[serde(rename = "assetCtx")]
+    AssetCtx {
+        symbol: String,
+        #[serde(rename = "markPrice")]
+        mark_price: i64,
+        #[serde(rename = "oraclePrice")]
+        oracle_price: Option<i64>,
+        #[serde(rename = "midPrice")]
+        mid_price: i64,
+        #[serde(rename = "fundingRate")]
+        funding_rate: i64, // 1/1M units
+        premium: i64,      // 1/1M units
+        #[serde(rename = "openInterest")]
+        open_interest: i64, // satoshis
+        #[serde(rename = "prevDayPrice")]
+        prev_day_price: i64, // cents
+        #[serde(rename = "dayVolume")]
+        day_volume: i64, // satoshis
+        #[serde(rename = "dayNotionalVolume")]
+        day_notional_volume: i64, // cents
+        #[serde(rename = "nextFundingTime")]
+        next_funding_time: u64,
+        timestamp: u64,
+    },
 }
 
 /// Price level for API responses
@@ -128,6 +161,25 @@ pub enum UserEvent {
         close_price: i64,
         realized_pnl: i64,
         triggering_liquidation: String,
+        timestamp: u64,
+    },
+    /// Funding payment received/paid
+    #[serde(rename = "fundingPayment")]
+    FundingPayment {
+        symbol: String,
+        payment: i64,          // cents: positive = received, negative = paid
+        position_size: i64,
+        funding_rate_bps: i64,
+        timestamp: u64,
+    },
+    /// Position was liquidated
+    #[serde(rename = "liquidated")]
+    Liquidated {
+        symbol: String,
+        size: i64,
+        price: i64,
+        pnl: i64,
+        was_long: bool,
         timestamp: u64,
     },
 }
@@ -302,6 +354,46 @@ impl UserRegistry {
             close_price,
             realized_pnl,
             triggering_liquidation: triggering_liquidation.to_string(),
+            timestamp,
+        }).await;
+    }
+
+    /// Send funding payment event to a user
+    pub async fn notify_funding_payment(
+        &self,
+        address: &str,
+        symbol: &str,
+        payment: i64,
+        position_size: i64,
+        funding_rate_bps: i64,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::FundingPayment {
+            symbol: symbol.to_string(),
+            payment,
+            position_size,
+            funding_rate_bps,
+            timestamp,
+        }).await;
+    }
+
+    /// Send liquidated event to a user
+    pub async fn notify_liquidated(
+        &self,
+        address: &str,
+        symbol: &str,
+        size: i64,
+        price: i64,
+        pnl: i64,
+        was_long: bool,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::Liquidated {
+            symbol: symbol.to_string(),
+            size,
+            price,
+            pnl,
+            was_long,
             timestamp,
         }).await;
     }

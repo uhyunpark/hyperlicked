@@ -3,13 +3,7 @@
 //! Real-time streaming of orderbook updates, trades, and blocks.
 //! Supports user-specific subscriptions for fills and position updates.
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
-    },
-    response::Response,
-};
+use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -25,17 +19,9 @@ pub struct WebSocketHandler;
 struct SubscribeRequest {
     op: String,
     #[serde(default)]
-    channels: Vec<String>,
+    _channels: Vec<String>, // Reserved for future channel-specific subscriptions
     #[serde(default)]
     address: Option<String>,
-}
-
-/// Upgrade HTTP to WebSocket
-pub async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<SharedState>,
-) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
 /// Handle WebSocket connection
@@ -207,4 +193,54 @@ impl WebSocketHandler {
             tx_count,
         });
     }
+
+    /// Broadcast mark price update to all clients
+    pub fn broadcast_mark_price(
+        state: &SharedState,
+        symbol: &str,
+        mark_price: i64,
+        index_price: Option<i64>,
+        timestamp: u64,
+    ) {
+        state.broadcast(Event::MarkPriceUpdate {
+            symbol: symbol.to_string(),
+            mark_price,
+            index_price,
+            timestamp,
+        });
+    }
+
+    /// Broadcast asset context (market stats) to all clients
+    pub fn broadcast_asset_ctx(state: &SharedState, ctx: AssetCtxData) {
+        state.broadcast(Event::AssetCtx {
+            symbol: ctx.symbol,
+            mark_price: ctx.mark_price,
+            oracle_price: ctx.oracle_price,
+            mid_price: ctx.mid_price,
+            funding_rate: ctx.funding_rate,
+            premium: ctx.premium,
+            open_interest: ctx.open_interest,
+            prev_day_price: ctx.prev_day_price,
+            day_volume: ctx.day_volume,
+            day_notional_volume: ctx.day_notional_volume,
+            next_funding_time: ctx.next_funding_time,
+            timestamp: ctx.timestamp,
+        });
+    }
+}
+
+/// Data for asset context broadcast
+pub struct AssetCtxData {
+    pub symbol: String,
+    pub mark_price: i64,
+    pub oracle_price: Option<i64>,
+    pub mid_price: i64,
+    pub funding_rate: i64,
+    pub premium: i64,
+    pub open_interest: i64,
+    pub prev_day_price: i64,
+    pub day_volume: i64,
+    pub day_notional_volume: i64,
+    pub next_funding_time: u64,
+    pub timestamp: u64,
 }

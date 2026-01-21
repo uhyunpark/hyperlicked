@@ -178,3 +178,55 @@ pub async fn get_funding(
         last_funding_time,
     }))
 }
+
+/// Asset context response (market stats)
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetCtxResponse {
+    pub symbol: String,
+    pub mark_price: i64,
+    pub oracle_price: Option<i64>,
+    pub mid_price: i64,
+    pub funding_rate: i64,     // 1/1M units
+    pub premium: i64,          // 1/1M units
+    pub open_interest: i64,    // satoshis
+    pub prev_day_price: i64,   // cents
+    pub day_volume: i64,       // satoshis
+    pub day_notional_volume: i64, // cents
+    pub next_funding_time: u64,
+    pub timestamp: u64,
+}
+
+/// Get asset context (market statistics)
+pub async fn get_asset_ctx(
+    State(state): State<ApiState>,
+    Path(symbol): Path<String>,
+) -> Result<Json<AssetCtxResponse>, StatusCode> {
+    let app = state.shared.app.read().await;
+
+    // Check if market exists
+    if app.orderbook(&symbol).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Convert funding rate from bps to 1/1M units
+    // bps = basis points (1/10000), 1/1M = (1/1000000)
+    // So multiply by 100 to convert
+    let funding_rate_bps = app.funding_rate(&symbol);
+    let funding_rate_1m = funding_rate_bps * 100;
+
+    Ok(Json(AssetCtxResponse {
+        symbol: symbol.clone(),
+        mark_price: app.mark_price(&symbol).unwrap_or(0),
+        oracle_price: app.oracle_price(&symbol),
+        mid_price: app.mid_price(&symbol).unwrap_or(app.mark_price(&symbol).unwrap_or(0)),
+        funding_rate: funding_rate_1m,
+        premium: app.premium(&symbol).unwrap_or(0),
+        open_interest: app.get_open_interest(&symbol),
+        prev_day_price: app.prev_day_price(&symbol).unwrap_or(0),
+        day_volume: app.day_volume(&symbol),
+        day_notional_volume: app.day_notional_volume(&symbol),
+        next_funding_time: app.next_funding_time(&symbol),
+        timestamp: app.timestamp,
+    }))
+}

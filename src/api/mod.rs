@@ -25,4 +25,4 @@ mod websocket;
 pub use routes::create_router;
 pub use state::SharedState;
 pub use types::ApiState;
-pub use websocket::WebSocketHandler;
+pub use websocket::{AssetCtxData, WebSocketHandler};

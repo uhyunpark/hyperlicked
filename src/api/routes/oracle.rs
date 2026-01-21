@@ -10,6 +10,7 @@ use axum::{
 
 use crate::api::types::ApiState;
 use crate::app::{OraclePrice, PriceSource, Transaction};
+use crate::config::Config;
 
 /// Oracle price response
 #[derive(serde::Serialize)]
@@ -191,4 +192,29 @@ pub async fn submit_oracle_update(
         }))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
+}
+
+/// Request to enable/disable oracle (dev mode only)
+#[derive(serde::Deserialize)]
+pub struct SetOracleEnabledRequest {
+    pub enabled: bool,
+}
+
+/// Enable or disable oracle (dev mode only)
+pub async fn set_oracle_enabled(
+    State(state): State<ApiState>,
+    Json(req): Json<SetOracleEnabledRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Only allow in dev mode
+    if !Config::global().mode.is_dev() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut app = state.shared.app.write().await;
+    app.oracle_mut().set_enabled(req.enabled);
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "oracle_enabled": req.enabled
+    })))
 }

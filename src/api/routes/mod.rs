@@ -31,6 +31,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/markets/:symbol/trades", get(market::get_trades))
         .route("/markets/:symbol/candles", get(market::get_candles))
         .route("/markets/:symbol/funding", get(market::get_funding))
+        .route("/markets/:symbol/ctx", get(market::get_asset_ctx))
         // Account endpoints
         .route("/accounts/:address", get(account::get_account))
         .route("/accounts/:address/positions", get(account::get_positions))
@@ -54,6 +55,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/oracle/:symbol", get(oracle::get_oracle_price))
         .route("/oracle/:symbol/sources", get(oracle::get_oracle_sources))
         .route("/oracle/submit", post(oracle::submit_oracle_update))
+        .route("/oracle/enable", post(oracle::set_oracle_enabled))
         // Order submission
         .route("/orders", post(order::submit_order))
         .route("/orders/cancel", post(order::cancel_order))

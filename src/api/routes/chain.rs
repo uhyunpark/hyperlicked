@@ -11,11 +11,11 @@ pub async fn get_chain_status(State(state): State<ApiState>) -> Json<ChainStatus
     let (b0, b1, b2) = app.mempool_stats();
 
     Json(ChainStatus {
-        height: 0,
-        view: 0,
+        height: app.committed_height(),
+        view: app.current_view(),
         avg_block_time: 100.0,
         mempool_size: b0 + b1 + b2,
-        validators: 4,
+        validators: app.staking().validators.len(),
     })
 }
 
