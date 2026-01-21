@@ -435,3 +435,49 @@ export async function cancelTriggerOrderByCloid(
 
   return res.json()
 }
+
+// ==============================
+// Oracle API
+// ==============================
+
+export interface ApiOraclePrice {
+  symbol: string
+  enabled: boolean
+  price: number | null      // cents (null if not available)
+  timestamp: number | null  // ms
+}
+
+export interface ApiOracleStatus {
+  enabled: boolean
+  symbols: string[]
+  provider: string
+}
+
+export async function getOraclePrice(symbol: string): Promise<ApiOraclePrice | null> {
+  const res = await fetch(`${API_BASE}/oracle/${symbol}`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+export async function getOracleStatus(): Promise<ApiOracleStatus | null> {
+  const res = await fetch(`${API_BASE}/oracle/status`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+// ==============================
+// Chain Status API
+// ==============================
+
+export interface ApiChainStatus {
+  height: number
+  view: number
+  validators: number
+  epoch: number
+}
+
+export async function getChainStatus(): Promise<ApiChainStatus | null> {
+  const res = await fetch(`${API_BASE}/chain/status`)
+  if (!res.ok) return null
+  return res.json()
+}

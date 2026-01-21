@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useTradingStore, useWalletStore } from './store'
 import { convertPrice, convertSize, getOrders, getPositions } from './api'
+import { toast } from '@/components/ui/Toast'
 import type { OrderbookData } from './types'
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080/ws'
@@ -67,6 +68,49 @@ interface WSBalanceUpdate {
   timestamp: number
 }
 
+interface WSFundingPayment {
+  type: 'fundingPayment'
+  symbol: string
+  payment: number       // cents: positive = received, negative = paid
+  positionSize: number
+  fundingRateBps: number
+  timestamp: number
+}
+
+interface WSLiquidated {
+  type: 'liquidated'
+  symbol: string
+  size: number
+  price: number
+  pnl: number
+  wasLong: boolean
+  timestamp: number
+}
+
+interface WSMarkPriceUpdate {
+  type: 'markPrice'
+  symbol: string
+  markPrice: number
+  indexPrice: number | null
+  timestamp: number
+}
+
+interface WSAssetCtx {
+  type: 'assetCtx'
+  symbol: string
+  markPrice: number        // cents
+  oraclePrice: number | null // cents
+  midPrice: number         // cents
+  fundingRate: number      // 1/1M units
+  premium: number          // 1/1M units
+  openInterest: number     // satoshis
+  prevDayPrice: number     // cents
+  dayVolume: number        // satoshis
+  dayNotionalVolume: number // cents
+  nextFundingTime: number
+  timestamp: number
+}
+
 interface WSSubscribed {
   type: 'subscribed'
   channel: string
@@ -79,7 +123,7 @@ export function useWebSocket() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
   const subscribedAddressRef = useRef<string | null>(null)
 
-  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions, triggerBalanceRefresh } = useTradingStore()
+  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions, triggerBalanceRefresh, updateMarkPrice, updateAssetCtx } = useTradingStore()
   const { isConnected: walletConnected, address } = useWalletStore()
 
   // Fetch user data (orders and positions)
@@ -227,6 +271,62 @@ export function useWebSocket() {
               }
               // Also trigger the balance refresh callback
               triggerBalanceRefresh()
+              break
+            }
+
+            case 'fundingPayment': {
+              const fp = data as WSFundingPayment
+              const paymentUsd = convertPrice(fp.payment)
+              const sign = paymentUsd >= 0 ? '+' : ''
+              console.log(`[ws] Funding payment: ${sign}$${paymentUsd.toFixed(2)} for ${fp.symbol}`)
+              // Show toast notification
+              if (paymentUsd >= 0) {
+                toast.success('Funding Received', `${sign}$${paymentUsd.toFixed(2)} on ${fp.symbol}`)
+              } else {
+                toast.info('Funding Paid', `$${Math.abs(paymentUsd).toFixed(2)} on ${fp.symbol}`)
+              }
+              // Trigger balance refresh to show updated balance
+              triggerBalanceRefresh()
+              if (subscribedAddressRef.current) {
+                fetchUserData(subscribedAddressRef.current)
+              }
+              break
+            }
+
+            case 'liquidated': {
+              const liq = data as WSLiquidated
+              const pnlUsd = convertPrice(liq.pnl)
+              console.log(`[ws] Liquidated: ${liq.symbol} position (${liq.wasLong ? 'long' : 'short'})`)
+              // Show toast notification
+              toast.error('Position Liquidated', `${liq.symbol} ${liq.wasLong ? 'long' : 'short'} liquidated. PnL: $${pnlUsd.toFixed(2)}`)
+              // Trigger refresh to show position closed
+              triggerBalanceRefresh()
+              if (subscribedAddressRef.current) {
+                fetchUserData(subscribedAddressRef.current)
+              }
+              break
+            }
+
+            case 'markPrice': {
+              const mp = data as WSMarkPriceUpdate
+              updateMarkPrice(mp.symbol, convertPrice(mp.markPrice))
+              break
+            }
+
+            case 'assetCtx': {
+              const ctx = data as WSAssetCtx
+              updateAssetCtx({
+                markPrice: convertPrice(ctx.markPrice),
+                oraclePrice: ctx.oraclePrice ? convertPrice(ctx.oraclePrice) : null,
+                midPrice: convertPrice(ctx.midPrice),
+                fundingRate: ctx.fundingRate / 1_000_000, // 1/1M to decimal
+                premium: ctx.premium / 1_000_000,         // 1/1M to decimal
+                openInterest: convertSize(ctx.openInterest),
+                prevDayPrice: convertPrice(ctx.prevDayPrice),
+                dayVolume: convertSize(ctx.dayVolume),
+                dayNotionalVolume: convertPrice(ctx.dayNotionalVolume),
+                nextFundingTime: ctx.nextFundingTime,
+              })
               break
             }
 

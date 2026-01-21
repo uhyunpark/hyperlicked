@@ -73,11 +73,26 @@ export const useWalletStore = create<WalletStoreState>((set) => ({
 // Trading Store
 // =============================================================================
 
+interface AssetCtx {
+  markPrice: number           // dollars
+  oraclePrice: number | null  // dollars (null if oracle disabled)
+  midPrice: number            // dollars
+  fundingRate: number         // decimal (0.0001 = 0.01%)
+  premium: number             // decimal
+  openInterest: number        // BTC (base units)
+  prevDayPrice: number        // dollars
+  dayVolume: number           // BTC (base units)
+  dayNotionalVolume: number   // dollars
+  nextFundingTime: number     // ms timestamp
+}
+
 interface TradingState {
   // Market data
   orderbook: OrderbookData
   trades: Trade[]
   currentPrice: number
+  markPrices: Record<string, number>
+  assetCtx: AssetCtx | null   // Market stats from activeAssetCtx channel
 
   // User data
   positions: Position[]
@@ -96,6 +111,8 @@ interface TradingState {
   setSelectedSymbol: (symbol: string) => void
   setWsConnected: (connected: boolean) => void
   triggerBalanceRefresh: () => void
+  updateMarkPrice: (symbol: string, price: number) => void
+  updateAssetCtx: (ctx: AssetCtx) => void
 }
 
 export const useTradingStore = create<TradingState>((set) => ({
@@ -108,6 +125,8 @@ export const useTradingStore = create<TradingState>((set) => ({
   },
   trades: [],
   currentPrice: 0,
+  markPrices: {},
+  assetCtx: null,
   positions: [],
   openOrders: [],
   selectedSymbol: 'BTC-USDT',
@@ -130,5 +149,9 @@ export const useTradingStore = create<TradingState>((set) => ({
   setOpenOrders: (orders) => set({ openOrders: orders }),
   setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol }),
   setWsConnected: (connected) => set({ isConnected: connected }),
-  triggerBalanceRefresh: () => set((state) => ({ balanceRefreshTrigger: state.balanceRefreshTrigger + 1 }))
+  triggerBalanceRefresh: () => set((state) => ({ balanceRefreshTrigger: state.balanceRefreshTrigger + 1 })),
+  updateMarkPrice: (symbol, price) => set((state) => ({
+    markPrices: { ...state.markPrices, [symbol]: price }
+  })),
+  updateAssetCtx: (ctx) => set({ assetCtx: ctx })
 }))
