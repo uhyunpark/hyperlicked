@@ -11,7 +11,7 @@ use super::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAX_TRADES_PER_SYM
 
 impl AppState {
     /// Execute a single transaction
-    pub(crate) fn execute_tx(&mut self, tx: Transaction) -> Result<Vec<Fill>, AppError> {
+    pub fn execute_tx(&mut self, tx: Transaction) -> Result<Vec<Fill>, AppError> {
         match tx {
             Transaction::Deposit { trader, amount } => self.execute_deposit(trader, amount),
             Transaction::Withdraw { trader, amount } => self.execute_withdraw(trader, amount),

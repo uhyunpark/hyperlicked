@@ -69,6 +69,16 @@ where
         }
     }
 
+    /// Get reference to the application state
+    pub fn app(&self) -> &A {
+        &self.app
+    }
+
+    /// Get mutable reference to the application state
+    pub fn app_mut(&mut self) -> &mut A {
+        &mut self.app
+    }
+
     /// Run one iteration of the consensus loop
     ///
     /// Returns the committed block if one was committed this round.
