@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{Account, MarketConfig, StakingState, Symbol};
+use crate::app::{Account, MarketConfig, OracleState, StakingState, Symbol};
 use crate::types::Price;
 
 /// Serializable app state snapshot
@@ -44,6 +44,9 @@ pub struct AppSnapshot {
     /// Staking state (validators, delegations, epochs)
     #[serde(default)]
     pub staking: Option<StakingState>,
+    /// Oracle state (price feeds)
+    #[serde(default)]
+    pub oracle: Option<OracleState>,
 }
 
 impl AppSnapshot {
@@ -59,6 +62,7 @@ impl AppSnapshot {
             funding_rates: Vec::new(),
             last_funding_times: Vec::new(),
             staking: None,
+            oracle: None,
         }
     }
 

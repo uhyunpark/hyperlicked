@@ -26,6 +26,7 @@ pub mod candles;
 pub mod funding;
 pub mod liquidation;
 pub mod mempool;
+pub mod oracle;
 pub mod orderbook;
 pub mod positions;
 pub mod staking;
@@ -44,6 +45,7 @@ pub use staking::{
     StakingError, StakingState, StakingTransaction, StakingTxResult,
     ValidatorInfo, ValidatorStatus, Delegation, EpochSnapshot,
 };
+pub use oracle::{OracleConfig, OracleError, OraclePrice, OracleState, PriceSource};
 pub use state::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
 pub use trigger::{
     Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType,
@@ -145,6 +147,13 @@ pub enum Transaction {
         symbol: Symbol,
         cloid: Cloid,
     },
+    /// Update oracle prices (authorized validators only)
+    OraclePriceUpdate {
+        operator: Address,
+        symbol: Symbol,
+        sources: Vec<oracle::PriceSource>,
+        signature: Vec<u8>,
+    },
 }
 
 impl Transaction {
@@ -152,7 +161,7 @@ impl Transaction {
     /// Lower bucket = higher priority
     pub fn bucket(&self) -> u8 {
         match self {
-            // Highest priority: deposits, withdrawals, and staking operations
+            // Highest priority: deposits, withdrawals, staking, and oracle operations
             Transaction::Deposit { .. }
             | Transaction::Withdraw { .. }
             | Transaction::RegisterValidator { .. }
@@ -161,7 +170,8 @@ impl Transaction {
             | Transaction::ClaimUnstaked { .. }
             | Transaction::ClaimRewards { .. }
             | Transaction::Unjail { .. }
-            | Transaction::SubmitEvidence { .. } => 0,
+            | Transaction::SubmitEvidence { .. }
+            | Transaction::OraclePriceUpdate { .. } => 0,
             // Medium priority: order cancellations (including trigger cancels)
             Transaction::CancelOrder { .. }
             | Transaction::CancelTriggerOrder { .. }

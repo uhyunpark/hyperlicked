@@ -34,3 +34,4 @@ pub mod triggers_test;
 // Phase 3: Staking & Integration
 pub mod staking_test;
 pub mod integration_test;
+pub mod oracle_test;

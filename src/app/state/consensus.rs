@@ -178,6 +178,22 @@ impl AppState {
             hasher.update(order.timestamp.to_le_bytes());
         }
 
+        // === Oracle prices (sorted by symbol) ===
+        if self.oracle.enabled {
+            hasher.update(&[1u8]); // Oracle enabled flag
+            let mut oracle_prices: Vec<_> = self.oracle.prices.iter().collect();
+            oracle_prices.sort_by_key(|(k, _)| *k);
+            for (symbol, oracle_price) in oracle_prices {
+                hasher.update(symbol.as_bytes());
+                hasher.update(oracle_price.price.to_le_bytes());
+                hasher.update(oracle_price.timestamp.to_le_bytes());
+                hasher.update(oracle_price.source_count.to_le_bytes());
+                hasher.update(oracle_price.confidence_bps.to_le_bytes());
+            }
+        } else {
+            hasher.update(&[0u8]); // Oracle disabled flag
+        }
+
         hasher.finalize().into()
     }
 
@@ -205,11 +221,14 @@ impl AppState {
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
             staking: Some(self.staking.clone()),
+            oracle: Some(self.oracle.clone()),
         }
     }
 
     /// Restore state from snapshot (for recovery)
     pub fn from_snapshot(snapshot: crate::storage::AppSnapshot) -> Self {
+        use crate::app::oracle::OracleState;
+
         // Extract fields from snapshot (consuming it)
         let mark_prices = snapshot.mark_prices_map();
         let timestamp = snapshot.timestamp;
@@ -220,6 +239,9 @@ impl AppState {
         // Restore staking state if present
         let mut staking = snapshot.staking.unwrap_or_else(StakingState::new);
         staking.rebuild_index(); // Rebuild transient indexes
+
+        // Restore oracle state if present
+        let oracle = snapshot.oracle.unwrap_or_else(OracleState::new);
 
         let mut state = Self {
             orderbooks: HashMap::new(),
@@ -250,6 +272,7 @@ impl AppState {
             trigger_seq: 0,
             pending_trigger_events: Vec::new(),
             pending_adl_events: Vec::new(),
+            oracle,
         };
 
         // Restore market configs and create orderbooks
@@ -424,8 +447,8 @@ impl AppState {
             .collect();
 
         for (symbol, config) in symbols {
-            // Get index price (using mark price as bootstrap index)
-            let index_price = self.mark_prices.get(&symbol).copied().unwrap_or(0);
+            // Get index price (oracle with mark price fallback)
+            let index_price = self.index_price(&symbol).unwrap_or(0);
             if index_price == 0 {
                 continue;
             }
@@ -466,7 +489,7 @@ impl AppState {
                 );
 
                 // Apply funding to all positions
-                let index_price = self.mark_prices.get(&symbol).copied().unwrap_or(0);
+                let index_price = self.index_price(&symbol).unwrap_or(0);
                 let result = crate::app::funding::apply_funding(
                     &mut self.accounts,
                     &symbol,

@@ -13,6 +13,7 @@ use crate::app::{
     accounts::AccountManager,
     candles::{Candle, CandleManager, Interval},
     mempool::{Mempool, MempoolError},
+    oracle::OracleState,
     orderbook::{Fill, Order, OrderBook},
     staking::StakingState,
     trigger::{Cloid, TriggerEvent, TriggerOrder, TriggerOrderId},
@@ -102,6 +103,8 @@ pub struct AppState {
     pub(crate) pending_trigger_events: Vec<TriggerEvent>,
     /// Pending ADL events from last block (for WebSocket emission)
     pub(crate) pending_adl_events: Vec<crate::app::adl::ADLResult>,
+    /// Oracle state (external price feeds for funding rate)
+    pub(crate) oracle: OracleState,
 }
 
 impl AppState {
@@ -134,6 +137,7 @@ impl AppState {
             trigger_seq: 0,
             pending_trigger_events: Vec::new(),
             pending_adl_events: Vec::new(),
+            oracle: OracleState::new(),
         };
 
         // Add default BTC-USDT market
@@ -379,6 +383,36 @@ impl AppState {
     pub fn take_pending_adl_events(&mut self) -> Vec<crate::app::adl::ADLResult> {
         std::mem::take(&mut self.pending_adl_events)
     }
+
+    // === Oracle Accessors ===
+
+    /// Get index price for a symbol (oracle with mark price fallback).
+    ///
+    /// Used for funding rate calculation. Falls back to mark price if:
+    /// - Oracle is disabled (bootstrap mode)
+    /// - Oracle price is stale or unavailable
+    /// - Oracle price deviates too much from mark (circuit breaker)
+    pub fn index_price(&self, symbol: &str) -> Option<Price> {
+        self.oracle.get_price(symbol, self.mark_prices.get(symbol).copied())
+    }
+
+    /// Get oracle state (read-only)
+    pub fn oracle(&self) -> &OracleState {
+        &self.oracle
+    }
+
+    /// Get mutable oracle state
+    pub fn oracle_mut(&mut self) -> &mut OracleState {
+        &mut self.oracle
+    }
+
+    /// Get oracle price for a symbol (without mark fallback)
+    pub fn oracle_price(&self, symbol: &str) -> Option<Price> {
+        if !self.oracle.enabled {
+            return None;
+        }
+        self.oracle.prices.get(symbol).map(|p| p.price)
+    }
 }
 
 impl Default for AppState {
@@ -400,6 +434,8 @@ pub enum AppError {
     Staking(#[from] crate::app::staking::StakingError),
     #[error("trigger order error: {0}")]
     Trigger(#[from] crate::app::trigger::TriggerError),
+    #[error("oracle error: {0}")]
+    Oracle(#[from] crate::app::oracle::OracleError),
     #[error("market not found")]
     MarketNotFound,
     #[error("order not found")]

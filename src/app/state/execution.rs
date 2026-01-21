@@ -3,6 +3,7 @@
 //! Handles execution of individual transactions within AppState.
 
 use crate::app::{
+    oracle::PriceSource,
     orderbook::{Fill, Order, Side},
     staking, MarketConfig, OrderType, Symbol, Transaction,
 };
@@ -93,6 +94,14 @@ impl AppState {
                     .map_err(AppError::Trigger)?;
                 Ok(vec![])
             }
+
+            // Oracle price update
+            Transaction::OraclePriceUpdate {
+                operator,
+                symbol,
+                sources,
+                signature,
+            } => self.execute_oracle_update(operator, symbol, sources, signature),
         }
     }
 
@@ -380,6 +389,46 @@ impl AppState {
                 offender,
                 slashed_amount,
             });
+        Ok(vec![])
+    }
+
+    // === Oracle Transaction Handlers ===
+
+    fn execute_oracle_update(
+        &mut self,
+        operator: String,
+        symbol: Symbol,
+        sources: Vec<PriceSource>,
+        _signature: Vec<u8>,
+    ) -> Result<Vec<Fill>, AppError> {
+        // Check operator authorization (must be registered validator)
+        // Skip check if signature verification is disabled (dev mode)
+        let skip_verify = std::env::var("SKIP_SIG_VERIFY")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        if !skip_verify && self.staking.get_validator(&operator).is_none() {
+            return Err(AppError::Oracle(
+                crate::app::oracle::OracleError::UnauthorizedOperator(operator),
+            ));
+        }
+
+        // TODO: Verify BLS signature over price data in production
+        // For now, we trust the operator authorization check
+
+        // Get mark price for circuit breaker check
+        let mark_price = self.mark_prices.get(&symbol).copied();
+
+        // Process the oracle update
+        self.oracle.process_update(&symbol, sources, self.timestamp, mark_price)?;
+
+        tracing::debug!(
+            operator = %operator,
+            symbol = %symbol,
+            price = ?self.oracle.prices.get(&symbol).map(|p| p.price),
+            "Oracle price updated"
+        );
+
         Ok(vec![])
     }
 }

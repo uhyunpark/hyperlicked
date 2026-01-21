@@ -6,6 +6,7 @@ mod account;
 mod adl;
 mod chain;
 mod market;
+mod oracle;
 mod order;
 mod staking;
 mod trigger;
@@ -48,6 +49,11 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/staking/validators/:operator", get(staking::get_validator))
         .route("/staking/delegations/:address", get(staking::get_delegations))
         .route("/staking/epoch", get(staking::get_epoch))
+        // Oracle endpoints
+        .route("/oracle/status", get(oracle::get_oracle_status))
+        .route("/oracle/:symbol", get(oracle::get_oracle_price))
+        .route("/oracle/:symbol/sources", get(oracle::get_oracle_sources))
+        .route("/oracle/submit", post(oracle::submit_oracle_update))
         // Order submission
         .route("/orders", post(order::submit_order))
         .route("/orders/cancel", post(order::cancel_order))
