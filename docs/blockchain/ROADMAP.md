@@ -22,6 +22,7 @@
 
 ### Recently Completed
 
+- **Market Stats (activeAssetCtx)** ✅ - Real-time market statistics WebSocket channel
 - **Candles API** ✅ - Backend OHLCV aggregation (1m, 5m, 15m, 1h, 4h, 1d intervals)
 - **Self-trade Prevention** ✅ - Orderbook skips matching against same trader
 - **Trade Deduplication** ✅ - Deterministic trade IDs for WebSocket/REST consistency
@@ -70,6 +71,17 @@ Reduce vote size:
 
 ### P2: Hyperlicked Features
 
+#### Market Stats (activeAssetCtx) ✅
+Real-time market statistics (like Hyperliquid's activeAssetCtx):
+- ✅ WebSocket `assetCtx` event streamed every block
+- ✅ REST endpoint `GET /api/v1/markets/:symbol/ctx`
+- ✅ 24h volume tracking (base + notional)
+- ✅ 24h price change (prev day close tracking)
+- ✅ Open interest calculation
+- ✅ Mark/oracle/mid price + premium
+- ✅ Funding rate + countdown
+- ✅ Frontend Header integration
+
 #### Funding Rates ✅
 Perpetual funding mechanism:
 - ✅ Premium sampling every block (~100ms)
@@ -77,19 +89,22 @@ Perpetual funding mechanism:
 - ✅ Interest rate component (0.01%)
 - ✅ Funding rate clamping (±4% max)
 - ✅ Position cumulative funding tracking
-- Bootstrap mode: uses mark price as index (no external oracle)
+- ✅ Oracle index price integration (with mark price fallback)
 
-#### Oracle System
+#### Oracle System ✅
 Multi-source price feeds:
-- Aggregate from 8+ venues
-- Weighted median
-- 3-second update cadence
+- ✅ Weighted median aggregation
+- ✅ Circuit breaker (10% max deviation from mark)
+- ✅ Staleness detection (3s default)
+- ✅ Validator authorization for submissions
+- ✅ Bootstrap mode (falls back to mark price when disabled)
+- External fetcher service (out of scope - future work)
 
-#### Insurance Fund
+#### Insurance Fund ✅
 Socialized loss mechanism:
 - ✅ Collect liquidation fees (from liquidation engine)
-- Cover underwater positions
-- ADL (auto-deleverage) as last resort
+- ✅ Cover underwater positions
+- ✅ ADL (auto-deleverage) when insurance fund insufficient
 
 ### P3: Advanced Features
 

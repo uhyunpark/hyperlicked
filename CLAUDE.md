@@ -132,6 +132,7 @@ cargo build --release
 | `DATA_DIR` | None | RocksDB persistence path (None = in-memory only) |
 | `SNAPSHOT_INTERVAL` | 1000 | Snapshot app state every N blocks (0 = disabled) |
 | `SKIP_SIG_VERIFY` | false | Skip signature verification (dev mode only, unsafe!) |
+| `ORACLE_ENABLED` | false | Enable oracle system at startup (dev mode) |
 
 ## Golden Rules
 
