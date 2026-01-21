@@ -1,4 +1,4 @@
-//! 3-Bucket Mempool
+//! 3-Bucket Mempool with Two-Phase Commit
 //!
 //! Orders transactions by priority:
 //! 1. Non-order txs (deposits, withdrawals) - bucket 0
@@ -6,11 +6,16 @@
 //! 3. Orders (GTC, IOC, ALO) - bucket 2
 //!
 //! Within each bucket, FIFO order is maintained.
+//!
+//! Two-phase commit protocol:
+//! 1. `peek_block()` - marks txs as "in proposal", returns refs
+//! 2. `commit_proposal()` - removes committed txs by hash
+//! 3. `rollback_proposal()` - clears pending set on view change
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use super::Transaction;
-use crate::types::Hash;
+use crate::types::{Hash, View};
 
 /// Transaction with metadata
 #[derive(Debug, Clone)]
@@ -30,6 +35,10 @@ pub struct Mempool {
     bucket2: VecDeque<PendingTx>,
     /// Maximum transactions per bucket
     max_per_bucket: usize,
+    /// Hashes of transactions currently in an uncommitted proposal
+    pending_proposal: HashSet<Hash>,
+    /// View number of the current proposal (for validation)
+    proposal_view: View,
 }
 
 impl Mempool {
@@ -39,6 +48,8 @@ impl Mempool {
             bucket1: VecDeque::new(),
             bucket2: VecDeque::new(),
             max_per_bucket,
+            pending_proposal: HashSet::new(),
+            proposal_view: 0,
         }
     }
 
@@ -95,11 +106,59 @@ impl Mempool {
         result
     }
 
-    /// Peek transactions for a block without removing them (for multi-node payload)
-    pub fn peek_block(&self, max_txs: usize) -> Vec<Transaction> {
+    /// Peek transactions for a block without removing them (two-phase: step 1)
+    ///
+    /// Marks transactions as "in proposal" for the given view.
+    /// Call `commit_proposal()` after block commits, or `rollback_proposal()` on view change.
+    pub fn peek_block(&mut self, max_txs: usize, view: View) -> Vec<(Transaction, Hash)> {
+        // Clear any stale proposal from a previous view
+        if self.proposal_view != view {
+            self.pending_proposal.clear();
+            self.proposal_view = view;
+        }
+
         let mut result = Vec::with_capacity(max_txs);
 
         // Read from bucket 0 first (highest priority)
+        for pending in &self.bucket0 {
+            if result.len() >= max_txs {
+                break;
+            }
+            if !self.pending_proposal.contains(&pending.hash) {
+                result.push((pending.tx.clone(), pending.hash));
+                self.pending_proposal.insert(pending.hash);
+            }
+        }
+
+        // Then bucket 1
+        for pending in &self.bucket1 {
+            if result.len() >= max_txs {
+                break;
+            }
+            if !self.pending_proposal.contains(&pending.hash) {
+                result.push((pending.tx.clone(), pending.hash));
+                self.pending_proposal.insert(pending.hash);
+            }
+        }
+
+        // Finally bucket 2
+        for pending in &self.bucket2 {
+            if result.len() >= max_txs {
+                break;
+            }
+            if !self.pending_proposal.contains(&pending.hash) {
+                result.push((pending.tx.clone(), pending.hash));
+                self.pending_proposal.insert(pending.hash);
+            }
+        }
+
+        result
+    }
+
+    /// Legacy peek for backward compatibility (single-node mode)
+    pub fn peek_block_txs(&self, max_txs: usize) -> Vec<Transaction> {
+        let mut result = Vec::with_capacity(max_txs);
+
         for pending in &self.bucket0 {
             if result.len() >= max_txs {
                 return result;
@@ -107,7 +166,6 @@ impl Mempool {
             result.push(pending.tx.clone());
         }
 
-        // Then bucket 1
         for pending in &self.bucket1 {
             if result.len() >= max_txs {
                 return result;
@@ -115,7 +173,6 @@ impl Mempool {
             result.push(pending.tx.clone());
         }
 
-        // Finally bucket 2
         for pending in &self.bucket2 {
             if result.len() >= max_txs {
                 return result;
@@ -126,7 +183,29 @@ impl Mempool {
         result
     }
 
-    /// Drain transactions that were previously peeked (after block commit)
+    /// Commit a proposal by removing transactions by hash (two-phase: step 2)
+    ///
+    /// Called after a block is committed to finalize removal.
+    pub fn commit_proposal(&mut self, tx_hashes: &[Hash]) {
+        let hash_set: HashSet<_> = tx_hashes.iter().collect();
+
+        // Remove from all buckets
+        self.bucket0.retain(|p| !hash_set.contains(&p.hash));
+        self.bucket1.retain(|p| !hash_set.contains(&p.hash));
+        self.bucket2.retain(|p| !hash_set.contains(&p.hash));
+
+        // Clear pending set
+        self.pending_proposal.clear();
+    }
+
+    /// Rollback a proposal on view change (two-phase: abort)
+    ///
+    /// Transactions stay in mempool for the next leader.
+    pub fn rollback_proposal(&mut self) {
+        self.pending_proposal.clear();
+    }
+
+    /// Drain transactions that were previously peeked (legacy, for single-node)
     pub fn drain_block(&mut self, count: usize) {
         let mut remaining = count;
 
