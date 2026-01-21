@@ -5,7 +5,12 @@ import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
 import { config, isDevelopment } from '@/lib/config'
 import { toast } from '@/components/ui/Toast'
-import { getFunding, getInsuranceFund, ApiFundingInfo, ApiInsuranceFund } from '@/lib/api'
+import {
+  getFunding,
+  getInsuranceFund,
+  type ApiFundingInfo,
+  type ApiInsuranceFund,
+} from '@/lib/api'
 
 interface NavTabProps {
   label: string
@@ -54,8 +59,16 @@ function formatCountdown(targetMs: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
+// Format large numbers to K, M, B notation
+function formatLargeNumber(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`
+  return n.toFixed(2)
+}
+
 export function Header() {
-  const { selectedSymbol, currentPrice, isConnected: wsConnected } = useTradingStore()
+  const { selectedSymbol, currentPrice, isConnected: wsConnected, assetCtx } = useTradingStore()
   const wallet = useWallet()
   const [showWalletDropdown, setShowWalletDropdown] = useState(false)
   const [fundingInfo, setFundingInfo] = useState<ApiFundingInfo | null>(null)
@@ -68,7 +81,7 @@ export function Header() {
       try {
         const [funding, insurance] = await Promise.all([
           getFunding(selectedSymbol),
-          getInsuranceFund()
+          getInsuranceFund(),
         ])
         setFundingInfo(funding)
         setInsuranceFund(insurance)
@@ -95,10 +108,16 @@ export function Header() {
     return () => clearInterval(interval)
   }, [fundingInfo?.nextFundingTime])
 
-  // Calculate 24h change (mock for now)
-  const priceChange24h = 1234.56
-  const priceChangePercent = 2.53
+  // Calculate 24h change from assetCtx
+  const prevDayPrice = assetCtx?.prevDayPrice ?? 0
+  const priceChange24h = prevDayPrice > 0 ? currentPrice - prevDayPrice : 0
+  const priceChangePercent = prevDayPrice > 0 ? ((priceChange24h / prevDayPrice) * 100) : 0
   const isPositive = priceChangePercent >= 0
+
+  // Get volume and open interest from assetCtx
+  const volume24h = assetCtx?.dayNotionalVolume ?? 0
+  const openInterest = assetCtx?.openInterest ?? 0
+  const openInterestUsd = openInterest * currentPrice
 
   // Funding rate display
   const fundingRate = fundingInfo?.fundingRate ?? 0
@@ -258,6 +277,16 @@ export function Header() {
             </div>
           </div>
 
+          {/* Oracle/Index Price */}
+          <div>
+            <div className="text-xs text-text-muted">Index Price</div>
+            <div className="text-lg font-mono font-semibold text-accent">
+              {assetCtx?.oraclePrice != null
+                ? `$${assetCtx.oraclePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : '--'}
+            </div>
+          </div>
+
           {/* 24h Change */}
           <div>
             <div className="text-xs text-text-muted">24h Change</div>
@@ -272,7 +301,17 @@ export function Header() {
           {/* 24h Volume */}
           <div>
             <div className="text-xs text-text-muted">24h Volume</div>
-            <div className="text-sm font-mono text-text-primary">$1.2B</div>
+            <div className="text-sm font-mono text-text-primary">
+              ${volume24h > 0 ? formatLargeNumber(volume24h) : '--'}
+            </div>
+          </div>
+
+          {/* Open Interest */}
+          <div>
+            <div className="text-xs text-text-muted">Open Interest</div>
+            <div className="text-sm font-mono text-text-primary">
+              ${openInterestUsd > 0 ? formatLargeNumber(openInterestUsd) : '--'}
+            </div>
           </div>
 
           {/* Funding Rate */}

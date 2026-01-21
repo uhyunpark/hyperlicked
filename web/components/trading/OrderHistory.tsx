@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useWallet } from '@/lib/useWallet'
+import { getOrders, convertPrice, convertSize, type ApiOrder } from '@/lib/api'
 
 interface HistoricalOrder {
   id: string
@@ -32,31 +33,49 @@ export function OrderHistory() {
   const [orders, setOrders] = useState<HistoricalOrder[]>([])
   const [isLoading, setIsLoading] = useState(false)
 
+  const fetchOrders = useCallback(async () => {
+    if (!wallet.address) return
+
+    setIsLoading(true)
+    try {
+      const apiOrders = await getOrders(wallet.address)
+
+      // Filter to only show historical orders (filled/cancelled)
+      const history: HistoricalOrder[] = apiOrders
+        .filter(o => o.status === 'filled' || o.status === 'cancelled')
+        .map((o: ApiOrder) => ({
+          id: o.id,
+          timestamp: o.timestamp,
+          symbol: o.symbol,
+          side: o.side as 'buy' | 'sell',
+          type: o.type as 'limit' | 'market' | 'stop',
+          price: convertPrice(o.price),
+          size: convertSize(o.size),
+          filled: convertSize(o.filled),
+          status: o.status as 'filled' | 'cancelled'
+        }))
+        .sort((a, b) => b.timestamp - a.timestamp) // Most recent first
+
+      setOrders(history)
+    } catch (error) {
+      console.error('[order-history] Failed to fetch:', error)
+      setOrders([])
+    } finally {
+      setIsLoading(false)
+    }
+  }, [wallet.address])
+
   useEffect(() => {
     if (!wallet.isConnected || !wallet.address) {
       setOrders([])
       return
     }
 
-    const fetchOrders = async () => {
-      setIsLoading(true)
-      try {
-        // TODO: Replace with actual API call when backend endpoint is ready
-        // const response = await fetch(`/account/${wallet.address}/orders`)
-        // const data = await response.json()
-
-        // Mock data for now
-        setOrders([])
-      } catch (error) {
-        console.error('[order-history] Failed to fetch:', error)
-        setOrders([])
-      } finally {
-        setIsLoading(false)
-      }
-    }
-
     fetchOrders()
-  }, [wallet.isConnected, wallet.address])
+    // Refresh every 10 seconds
+    const interval = setInterval(fetchOrders, 10000)
+    return () => clearInterval(interval)
+  }, [wallet.isConnected, wallet.address, fetchOrders])
 
   const getStatusColor = (status: HistoricalOrder['status']) => {
     switch (status) {

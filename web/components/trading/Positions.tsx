@@ -2,9 +2,18 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useTradingStore } from '@/lib/store'
-import { useWallet } from '@/lib/useWallet'
+import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
-import { getTriggerOrders, cancelTriggerOrder, convertPrice, type ApiTriggerOrder } from '@/lib/api'
+import {
+  getTriggerOrders,
+  cancelTriggerOrder,
+  convertPrice,
+  convertToApiPrice,
+  convertToApiSize,
+  submitSignedTransaction,
+  getNonce,
+  type ApiTriggerOrder
+} from '@/lib/api'
 
 interface PositionTriggers {
   tp?: ApiTriggerOrder
@@ -49,10 +58,67 @@ export function Positions() {
     return () => clearInterval(interval)
   }, [wallet.address, fetchTriggerOrders])
 
-  const handleClose = (symbol: string, size: number) => {
-    console.log('Closing position:', symbol, size)
-    // TODO: Submit market order to close
-    toast.info('Closing Position', `Closing ${Math.abs(size).toFixed(4)} ${symbol}`)
+  const handleClose = async (symbol: string, size: number, markPrice: number) => {
+    if (!wallet.address) {
+      toast.warning('Not Connected', 'Please connect your wallet first')
+      return
+    }
+
+    if (!wallet.tradingEnabled) {
+      toast.warning('Trading Disabled', 'Please enable trading first')
+      return
+    }
+
+    try {
+      // Get fresh nonce from server
+      const nonceData = await getNonce(wallet.address)
+      const currentNonce = nonceData.nonce
+
+      // Close = market order in opposite direction with reduce_only
+      // Long position (size > 0) → Sell (side = 2)
+      // Short position (size < 0) → Buy (side = 1)
+      const side = size > 0 ? 2 : 1
+      const orderSize = Math.abs(size)
+
+      // Use sweep price to ensure execution
+      // Sell: Use minimum price (0.01) to sweep all bids
+      // Buy: Use very high price (2x mark) to sweep all asks
+      const orderPrice = side === 2 ? 0.01 : markPrice * 2
+
+      const orderToSign: OrderToSign = {
+        symbol,
+        side,
+        type: 2, // IOC (immediate-or-cancel) for market order
+        price: convertToApiPrice(orderPrice).toString(),
+        qty: convertToApiSize(orderSize).toString(),
+        nonce: currentNonce.toString(),
+        deadline: '0',
+        leverage: 1, // Leverage doesn't matter for reduce-only
+        owner: wallet.address,
+        reduce_only: true
+      }
+
+      const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
+
+      const signedTx = {
+        type: 'order' as const,
+        order: orderToSign,
+        signature,
+        agent_mode: agentMode,
+        delegation_id: delegationId
+      }
+
+      const response = await submitSignedTransaction(signedTx)
+
+      if (response.status === 'submitted') {
+        toast.success('Position Closed', `Closed ${orderSize.toFixed(4)} ${symbol}`)
+      } else {
+        toast.error('Close Failed', response.message || 'Unknown error')
+      }
+    } catch (error: any) {
+      console.error('[position-close] Error:', error)
+      toast.error('Close Failed', error.message || 'Unknown error')
+    }
   }
 
   const handleCancelTrigger = async (triggerOrderId: string, symbol: string, type: 'tp' | 'sl') => {
@@ -171,7 +237,7 @@ export function Positions() {
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button
-                        onClick={() => handleClose(position.symbol, position.size)}
+                        onClick={() => handleClose(position.symbol, position.size, position.markPrice)}
                         className="rounded border border-accent/30 bg-accent/10 px-2 py-1 text-accent transition-colors hover:bg-accent/20"
                       >
                         Close
