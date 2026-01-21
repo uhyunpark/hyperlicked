@@ -49,3 +49,5 @@ data/*.log
 *.swp
 *.swo
 *~
+# Development session context
+dev/
