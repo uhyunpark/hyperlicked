@@ -12,6 +12,7 @@
 //!   LOG_BLOCKS=true      - Log every block (even empty ones)
 //!   DATA_DIR=/path       - RocksDB persistence directory (optional)
 //!   SNAPSHOT_INTERVAL=1000 - Snapshot every N blocks
+//!   ORACLE_ENABLED=true  - Enable oracle system at startup (dev mode)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,8 +23,9 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use hyperlicked::api::{create_router, SharedState, WebSocketHandler};
+use hyperlicked::api::{create_router, AssetCtxData, SharedState, WebSocketHandler};
 use hyperlicked::api::state::PriceLevel;
+use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
 use hyperlicked::app::AppState;
 use hyperlicked::config::Config;
 use hyperlicked::consensus::AppHook;
@@ -112,6 +114,21 @@ async fn main() -> Result<()> {
         AppState::new()
     };
 
+    // Enable oracle if configured (dev mode)
+    let mut app_state = app_state;
+    if config.oracle_enabled {
+        app_state.oracle_mut().set_enabled(true);
+        // Configure oracle for BTC-USDT with relaxed settings for dev
+        // High deviation allowed because mark price starts at $50k but real BTC is ~$100k+
+        app_state.oracle_mut().set_config("BTC-USDT", OracleConfig {
+            max_staleness_ms: 10_000,   // 10 seconds (more lenient)
+            min_sources: 1,              // Accept even 1 source in dev
+            max_deviation_bps: 10000,    // 100% deviation allowed (dev mode only!)
+            fallback_to_mark: true,
+        });
+        info!("Oracle system enabled via ORACLE_ENABLED env var");
+    }
+
     let shared_state = SharedState::new(app_state);
 
     println!("Configuration:");
@@ -131,6 +148,7 @@ async fn main() -> Result<()> {
         println!("  Storage: in-memory (no persistence)");
     }
     println!("  Markets: BTC-USDT");
+    println!("  Oracle: {}", if config.oracle_enabled { "enabled" } else { "disabled" });
     println!();
 
     // Create router with CORS
@@ -150,6 +168,14 @@ async fn main() -> Result<()> {
         run_consensus_loop(consensus_state, consensus_store, initial_height, initial_view).await;
     });
 
+    // Spawn oracle price fetcher if enabled
+    if config.oracle_enabled {
+        let oracle_state = shared_state.clone();
+        tokio::spawn(async move {
+            run_oracle_fetcher(oracle_state).await;
+        });
+    }
+
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("Starting server on http://{}", addr);
@@ -159,6 +185,7 @@ async fn main() -> Result<()> {
     println!("  GET  /api/v1/markets              - List markets");
     println!("  GET  /api/v1/markets/:sym         - Get market info");
     println!("  GET  /api/v1/markets/:sym/orderbook - Get orderbook");
+    println!("  GET  /api/v1/markets/:sym/ctx     - Get market stats");
     println!("  GET  /api/v1/accounts/:addr       - Get account");
     println!("  GET  /api/v1/accounts/:addr/positions - Get positions");
     println!("  POST /api/v1/orders               - Submit signed order");
@@ -241,16 +268,28 @@ async fn run_consensus_loop(
 
             // Execute block (processes mempool transactions)
             let exec_start = std::time::Instant::now();
-            let (app_hash, fills, order_updates, deposits, adl_events) = {
+            let (app_hash, fills, order_updates, deposits, adl_events, funding_events, liquidation_events) = {
                 let mut app = state.app.write().await;
+                // Reset daily stats at day boundary (before processing)
+                app.maybe_reset_daily_stats(block.timestamp);
                 let hash = app.execute(&block);
                 let fills = app.take_pending_fills();
                 let order_updates = app.take_pending_order_updates();
                 let deposits = app.take_pending_deposits();
                 let adl_events = app.take_pending_adl_events();
-                (hash, fills, order_updates, deposits, adl_events)
+                let funding_events = app.take_pending_funding();
+                let liquidation_events = app.take_pending_liquidations();
+                (hash, fills, order_updates, deposits, adl_events, funding_events, liquidation_events)
             };
             let exec_time = exec_start.elapsed();
+
+            // Record fill volumes for daily stats
+            if !fills.is_empty() {
+                let mut app = state.app.write().await;
+                for fill in &fills {
+                    app.record_fill_volume(&fill.symbol, fill.size, fill.price);
+                }
+            }
 
             // Persist block and consensus state (if storage enabled)
             if let Some(ref store) = store {
@@ -314,6 +353,56 @@ async fn run_consensus_loop(
                     side,
                     block.timestamp,
                 );
+
+                // Send position and balance updates to both maker and taker
+                let app = state.app.read().await;
+                let mark_price = app.mark_price(&fill.symbol).unwrap_or(0);
+
+                // Maker position/balance update
+                if let Some(account) = app.account(&fill.maker) {
+                    let pos = account.position(&fill.symbol);
+                    let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    state.users.notify_position_update(
+                        &fill.maker,
+                        &fill.symbol,
+                        pos.size,
+                        pos.entry_price,
+                        mark_price,
+                        unrealized_pnl,
+                        block.timestamp,
+                    ).await;
+
+                    state.users.notify_balance_update(
+                        &fill.maker,
+                        account.balance,
+                        account.balance,
+                        account.locked,
+                        block.timestamp,
+                    ).await;
+                }
+
+                // Taker position/balance update
+                if let Some(account) = app.account(&fill.taker) {
+                    let pos = account.position(&fill.symbol);
+                    let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    state.users.notify_position_update(
+                        &fill.taker,
+                        &fill.symbol,
+                        pos.size,
+                        pos.entry_price,
+                        mark_price,
+                        unrealized_pnl,
+                        block.timestamp,
+                    ).await;
+
+                    state.users.notify_balance_update(
+                        &fill.taker,
+                        account.balance,
+                        account.balance,
+                        account.locked,
+                        block.timestamp,
+                    ).await;
+                }
             }
 
             // Emit user events for order updates
@@ -373,6 +462,70 @@ async fn run_consensus_loop(
                 }
             }
 
+            // Emit user events for funding payments
+            for funding_result in &funding_events {
+                for user_payment in &funding_result.user_payments {
+                    state.users.notify_funding_payment(
+                        &user_payment.address,
+                        &user_payment.symbol,
+                        user_payment.payment,
+                        user_payment.position_size,
+                        user_payment.funding_rate_bps,
+                        user_payment.timestamp,
+                    ).await;
+
+                    // Also send balance update after funding
+                    let app = state.app.read().await;
+                    if let Some(account) = app.account(&user_payment.address) {
+                        state.users.notify_balance_update(
+                            &user_payment.address,
+                            account.balance,
+                            account.balance,
+                            account.locked,
+                            block.timestamp,
+                        ).await;
+                    }
+                }
+            }
+
+            // Emit user events for liquidations
+            for liq in &liquidation_events {
+                state.users.notify_liquidated(
+                    &liq.address,
+                    &liq.symbol,
+                    liq.size,
+                    liq.price,
+                    liq.pnl,
+                    liq.was_long,
+                    block.timestamp,
+                ).await;
+
+                // Send position update (position closed) and balance update
+                let app = state.app.read().await;
+                if let Some(account) = app.account(&liq.address) {
+                    let pos = account.position(&liq.symbol);
+                    let mark_price = app.mark_price(&liq.symbol).unwrap_or(0);
+                    let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    state.users.notify_position_update(
+                        &liq.address,
+                        &liq.symbol,
+                        pos.size,
+                        pos.entry_price,
+                        mark_price,
+                        unrealized_pnl,
+                        block.timestamp,
+                    ).await;
+
+                    state.users.notify_balance_update(
+                        &liq.address,
+                        account.balance,
+                        account.balance,
+                        account.locked,
+                        block.timestamp,
+                    ).await;
+                }
+            }
+
             // Broadcast block committed event
             WebSocketHandler::broadcast_block(
                 &state,
@@ -402,6 +555,51 @@ async fn run_consensus_loop(
             };
 
             WebSocketHandler::broadcast_orderbook_update(&state, "BTC-USDT", bids, asks);
+
+            // Broadcast mark price update when there are trades
+            if !fills.is_empty() {
+                let (mark_price, index_price) = {
+                    let app = state.app.read().await;
+                    let mark = app.mark_price("BTC-USDT").unwrap_or(0);
+                    let index = app.oracle_price("BTC-USDT");
+                    (mark, index)
+                };
+
+                WebSocketHandler::broadcast_mark_price(
+                    &state,
+                    "BTC-USDT",
+                    mark_price,
+                    index_price,
+                    block.timestamp,
+                );
+            }
+
+            // Broadcast asset context (market stats) every block
+            {
+                let app = state.app.read().await;
+                let symbol = "BTC-USDT";
+
+                // Convert funding rate from bps to 1/1M units (multiply by 100)
+                let funding_rate_bps = app.funding_rate(symbol);
+                let funding_rate_1m = funding_rate_bps * 100;
+
+                let ctx = AssetCtxData {
+                    symbol: symbol.to_string(),
+                    mark_price: app.mark_price(symbol).unwrap_or(0),
+                    oracle_price: app.oracle_price(symbol),
+                    mid_price: app.mid_price(symbol).unwrap_or(app.mark_price(symbol).unwrap_or(0)),
+                    funding_rate: funding_rate_1m,
+                    premium: app.premium(symbol).unwrap_or(0),
+                    open_interest: app.get_open_interest(symbol),
+                    prev_day_price: app.prev_day_price(symbol).unwrap_or(0),
+                    day_volume: app.day_volume(symbol),
+                    day_notional_volume: app.day_notional_volume(symbol),
+                    next_funding_time: app.next_funding_time(symbol),
+                    timestamp: block.timestamp,
+                };
+
+                WebSocketHandler::broadcast_asset_ctx(&state, ctx);
+            }
 
             // Log block production
             if total_pending > 0 {
@@ -438,5 +636,74 @@ async fn run_consensus_loop(
                 );
             }
         }
+    }
+}
+
+/// Run oracle price fetcher loop
+/// Polls external CEXs and updates oracle prices
+async fn run_oracle_fetcher(state: SharedState) {
+    let config = FetcherConfig::default();
+    let fetcher = OracleFetcher::new(config.clone());
+
+    info!(
+        poll_interval_ms = config.poll_interval_ms,
+        symbols = ?config.symbols,
+        "Oracle fetcher started"
+    );
+
+    loop {
+        // Fetch prices for each symbol
+        for symbol in &config.symbols {
+            tracing::debug!(symbol = %symbol, "Fetching oracle prices...");
+            let sources = fetcher.fetch_prices(symbol).await;
+
+            if sources.is_empty() {
+                tracing::warn!(symbol = %symbol, "No oracle prices fetched");
+                continue;
+            }
+
+            tracing::info!(
+                symbol = %symbol,
+                sources = sources.len(),
+                "Fetched {} price sources",
+                sources.len()
+            );
+
+            // Aggregate and update oracle state
+            if let Some(oracle_price) = fetcher.aggregate(symbol, &sources) {
+                let mut app = state.app.write().await;
+                let mark_price = app.mark_price(symbol);
+
+                // Update oracle with fetched prices
+                let result = app.oracle_mut().process_update(
+                    symbol,
+                    sources.clone(),
+                    oracle_price.timestamp,
+                    mark_price,
+                );
+
+                match result {
+                    Ok(()) => {
+                        tracing::info!(
+                            symbol = %symbol,
+                            price = oracle_price.price,
+                            price_usd = format!("${:.2}", oracle_price.price as f64 / 100.0),
+                            sources = oracle_price.source_count,
+                            "🔮 Oracle price updated"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            symbol = %symbol,
+                            error = %e,
+                            "Failed to update oracle price"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Wait for next poll interval
+        tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
     }
 }
