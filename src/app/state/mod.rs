@@ -19,7 +19,7 @@ use crate::app::{
     trigger::{Cloid, TriggerEvent, TriggerOrder, TriggerOrderId},
     Address, MarketConfig, Symbol, Transaction,
 };
-use crate::types::{Hash, Price, View};
+use crate::types::{Hash, Price, Size, View};
 
 /// Maximum trades stored per symbol
 pub const MAX_TRADES_PER_SYMBOL: usize = 1000;
@@ -105,6 +105,17 @@ pub struct AppState {
     pub(crate) pending_adl_events: Vec<crate::app::adl::ADLResult>,
     /// Oracle state (external price feeds for funding rate)
     pub(crate) oracle: OracleState,
+    /// Committed block height (for API status)
+    pub(crate) committed_height: u64,
+    // === Daily Stats (for 24h metrics) ===
+    /// Start-of-day price per symbol (for 24h change calculation)
+    pub(crate) prev_day_prices: HashMap<Symbol, Price>,
+    /// Start-of-day timestamp (ms)
+    pub(crate) day_start: u64,
+    /// Cumulative daily volume per symbol (satoshis)
+    pub(crate) day_volume: HashMap<Symbol, Size>,
+    /// Cumulative daily notional volume per symbol (cents)
+    pub(crate) day_notional_volume: HashMap<Symbol, i64>,
 }
 
 impl AppState {
@@ -138,6 +149,11 @@ impl AppState {
             pending_trigger_events: Vec::new(),
             pending_adl_events: Vec::new(),
             oracle: OracleState::new(),
+            committed_height: 0,
+            prev_day_prices: HashMap::new(),
+            day_start: 0,
+            day_volume: HashMap::new(),
+            day_notional_volume: HashMap::new(),
         };
 
         // Add default BTC-USDT market
@@ -343,6 +359,11 @@ impl AppState {
         self.current_view
     }
 
+    /// Get committed block height
+    pub fn committed_height(&self) -> u64 {
+        self.committed_height
+    }
+
     // === Trigger Order Accessors ===
 
     /// Get a trigger order by ID
@@ -412,6 +433,77 @@ impl AppState {
             return None;
         }
         self.oracle.prices.get(symbol).map(|p| p.price)
+    }
+
+    // === Daily Stats Methods ===
+
+    /// Reset daily stats at start of new day (UTC)
+    pub fn maybe_reset_daily_stats(&mut self, timestamp: u64) {
+        let day_ms = 24 * 60 * 60 * 1000;
+        let current_day = timestamp / day_ms;
+        let stored_day = self.day_start / day_ms;
+
+        if current_day > stored_day || self.day_start == 0 {
+            // New day - store previous close prices
+            for (symbol, price) in &self.mark_prices {
+                self.prev_day_prices.insert(symbol.clone(), *price);
+            }
+            self.day_volume.clear();
+            self.day_notional_volume.clear();
+            self.day_start = timestamp;
+        }
+    }
+
+    /// Record volume from a fill
+    pub fn record_fill_volume(&mut self, symbol: &str, size: Size, price: Price) {
+        *self.day_volume.entry(symbol.to_string()).or_insert(0) += size.abs();
+        let notional = (size.abs() * price) / 100_000_000; // Convert to cents
+        *self.day_notional_volume.entry(symbol.to_string()).or_insert(0) += notional;
+    }
+
+    /// Get mid price (average of best bid and ask)
+    pub fn mid_price(&self, symbol: &str) -> Option<Price> {
+        let book = self.orderbooks.get(symbol)?;
+        let best_bid = book.best_bid()?;
+        let best_ask = book.best_ask()?;
+        Some((best_bid + best_ask) / 2)
+    }
+
+    /// Get premium (mark - oracle) / oracle in 1/1M units
+    pub fn premium(&self, symbol: &str) -> Option<i64> {
+        let mark = self.mark_prices.get(symbol)?;
+        let oracle = self.oracle.get_price(symbol, Some(*mark))?;
+        if oracle == 0 {
+            return Some(0);
+        }
+        Some(((mark - oracle) * 1_000_000) / oracle)
+    }
+
+    /// Get open interest (sum of absolute position sizes)
+    pub fn get_open_interest(&self, symbol: &str) -> Size {
+        self.accounts
+            .all_accounts()
+            .iter()
+            .filter_map(|a| a.positions.get(symbol))
+            .filter(|p| p.size != 0)
+            .map(|p| p.size.abs())
+            .sum::<Size>()
+            / 2 // Divide by 2 since each trade has both a long and short side
+    }
+
+    /// Get previous day price for a symbol
+    pub fn prev_day_price(&self, symbol: &str) -> Option<Price> {
+        self.prev_day_prices.get(symbol).copied()
+    }
+
+    /// Get day volume for a symbol (satoshis)
+    pub fn day_volume(&self, symbol: &str) -> Size {
+        self.day_volume.get(symbol).copied().unwrap_or(0)
+    }
+
+    /// Get day notional volume for a symbol (cents)
+    pub fn day_notional_volume(&self, symbol: &str) -> i64 {
+        self.day_notional_volume.get(symbol).copied().unwrap_or(0)
     }
 }
 

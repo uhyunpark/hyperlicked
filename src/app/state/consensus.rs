@@ -273,6 +273,11 @@ impl AppState {
             pending_trigger_events: Vec::new(),
             pending_adl_events: Vec::new(),
             oracle,
+            committed_height: 0, // Will be set by consensus after replay
+            prev_day_prices: HashMap::new(),
+            day_start: 0,
+            day_volume: HashMap::new(),
+            day_notional_volume: HashMap::new(),
         };
 
         // Restore market configs and create orderbooks
@@ -305,6 +310,7 @@ impl AppHook for AppState {
     fn execute(&mut self, block: &Block) -> Hash {
         self.timestamp = block.timestamp;
         self.current_view = block.view;
+        self.committed_height = block.height;
 
         // Clear pending events from previous block
         self.pending_fills.clear();

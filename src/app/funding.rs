@@ -31,6 +31,23 @@ pub enum FundingError {
     RateOutOfBounds(i64),
 }
 
+/// Per-user funding payment for WebSocket notification
+#[derive(Debug, Clone)]
+pub struct UserFundingPayment {
+    /// Trader address
+    pub address: String,
+    /// Symbol
+    pub symbol: String,
+    /// Payment in cents (positive = received, negative = paid)
+    pub payment: i64,
+    /// Position size at time of funding
+    pub position_size: i64,
+    /// Funding rate in basis points
+    pub funding_rate_bps: i64,
+    /// Timestamp
+    pub timestamp: u64,
+}
+
 /// Result of funding application
 #[derive(Debug, Clone)]
 pub struct FundingResult {
@@ -44,6 +61,8 @@ pub struct FundingResult {
     pub shorts_received: i64,
     /// Timestamp of funding
     pub timestamp: u64,
+    /// Per-user funding payments (for WebSocket notifications)
+    pub user_payments: Vec<UserFundingPayment>,
 }
 
 /// Sample premium index from orderbook
@@ -106,7 +125,7 @@ pub fn calculate_funding_rate(
 /// Iterates through all accounts with positions in the symbol and applies
 /// the funding payment based on position size and direction.
 ///
-/// Returns FundingResult with totals
+/// Returns FundingResult with totals and per-user payments
 pub fn apply_funding(
     accounts: &mut AccountManager,
     symbol: &str,
@@ -116,6 +135,7 @@ pub fn apply_funding(
 ) -> FundingResult {
     let mut longs_paid: i64 = 0;
     let mut shorts_received: i64 = 0;
+    let mut user_payments: Vec<UserFundingPayment> = Vec::new();
 
     // Get addresses with positions (need to collect to avoid borrow issues)
     let addresses: Vec<String> = accounts
@@ -129,10 +149,11 @@ pub fn apply_funding(
     for address in addresses {
         let account = accounts.get_or_create(&address);
         if let Some(position) = account.positions.get_mut(symbol) {
+            let position_size = position.size;
             let payment = position.apply_funding(funding_rate_bps, index_price, timestamp);
 
             // Track totals
-            if position.size > 0 {
+            if position_size > 0 {
                 // Long position
                 longs_paid += -payment; // payment is negative for longs
             } else {
@@ -142,6 +163,16 @@ pub fn apply_funding(
 
             // Apply to balance
             account.balance += payment;
+
+            // Record per-user payment for WebSocket notification
+            user_payments.push(UserFundingPayment {
+                address: address.clone(),
+                symbol: symbol.to_string(),
+                payment,
+                position_size,
+                funding_rate_bps,
+                timestamp,
+            });
         }
     }
 
@@ -159,6 +190,7 @@ pub fn apply_funding(
         longs_paid,
         shorts_received,
         timestamp,
+        user_payments,
     }
 }
 
