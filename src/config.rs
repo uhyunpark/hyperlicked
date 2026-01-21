@@ -80,6 +80,9 @@ pub struct Config {
 
     /// Snapshot app state every N committed blocks (0 = disabled)
     pub snapshot_interval: u64,
+
+    /// Enable oracle system at startup (dev mode only)
+    pub oracle_enabled: bool,
 }
 
 impl Config {
@@ -125,6 +128,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1000), // Default: snapshot every 1000 blocks
+            oracle_enabled: std::env::var("ORACLE_ENABLED")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false),
         }
     }
 

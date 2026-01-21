@@ -14,9 +14,11 @@
 //! Authorization reuses existing staking infrastructure.
 
 pub mod aggregation;
+pub mod fetcher;
 pub mod types;
 
 pub use aggregation::{calculate_confidence, check_deviation, filter_stale, weighted_median};
+pub use fetcher::{FetcherConfig, OracleFetcher};
 pub use types::{OracleConfig, OraclePrice, PriceSource};
 
 use std::collections::HashMap;
