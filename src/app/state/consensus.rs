@@ -107,6 +107,13 @@ impl AppState {
             staking,
             pending_staking_events: Vec::new(),
             current_view: 0,
+            // Trigger orders are restored from snapshot if present
+            trigger_orders: HashMap::new(),
+            trigger_orders_by_trader: HashMap::new(),
+            trigger_orders_by_symbol: HashMap::new(),
+            trigger_orders_by_cloid: HashMap::new(),
+            trigger_seq: 0,
+            pending_trigger_events: Vec::new(),
         };
 
         // Restore market configs and create orderbooks
@@ -124,10 +131,14 @@ impl AppState {
 
 impl AppHook for AppState {
     fn prepare_payload(&self, _parent: &Block) -> Vec<u8> {
-        // Get pending transactions (without removing them yet)
-        // This is called before propose, actual removal happens on commit
-        // For now, just return empty - real impl would serialize pending txs
-        vec![]
+        // Peek pending transactions (without removing them yet)
+        // They get drained after block commit on the leader
+        let txs = self.mempool.peek_block(1000);
+        if txs.is_empty() {
+            return vec![];
+        }
+        // Serialize transactions for propagation to followers
+        bincode::serialize(&txs).unwrap_or_default()
     }
 
     fn execute(&mut self, block: &Block) -> Hash {
@@ -140,6 +151,7 @@ impl AppHook for AppState {
         self.pending_liquidations.clear();
         self.pending_funding.clear();
         self.pending_staking_events.clear();
+        self.pending_trigger_events.clear();
 
         // === Staking: Epoch Transition ===
         if self.staking.enabled && self.staking.should_transition_epoch(block.view) {
@@ -164,8 +176,22 @@ impl AppHook for AppState {
             self.staking.add_block_reward();
         }
 
-        // Get transactions for this block from mempool
-        let txs = self.mempool.prepare_block(1000);
+        // Get transactions for this block
+        // In multi-node: use payload (propagated from leader)
+        // In single-node or if payload is empty: use local mempool
+        let txs: Vec<crate::app::Transaction> = if !block.payload.is_empty() {
+            // Deserialize transactions from block payload (multi-node mode)
+            bincode::deserialize(&block.payload).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to deserialize payload, using mempool");
+                self.mempool.prepare_block(1000)
+            })
+        } else {
+            // Single-node mode or empty payload: drain from local mempool
+            self.mempool.prepare_block(1000)
+        };
+
+        // Track how many transactions we're executing (for leader's mempool drain)
+        let tx_count = txs.len();
 
         // Execute each transaction
         for tx in txs {
@@ -178,6 +204,12 @@ impl AppHook for AppState {
                     tracing::warn!(error = %e, "Transaction failed");
                 }
             }
+        }
+
+        // If we executed from payload (multi-node), drain the leader's mempool
+        // to prevent re-execution of the same transactions
+        if !block.payload.is_empty() && tx_count > 0 {
+            self.mempool.drain_block(tx_count);
         }
 
         // Check and execute liquidations after all transactions
@@ -194,6 +226,11 @@ impl AppHook for AppState {
 
         // === Funding Rate Logic ===
         self.process_funding();
+
+        // === Trigger Order Processing ===
+        // Check and execute trigger orders after all transactions are processed
+        let trigger_fills = self.process_triggers();
+        self.pending_fills.extend(trigger_fills);
 
         // Return state hash for Byzantine detection
         self.compute_state_hash()

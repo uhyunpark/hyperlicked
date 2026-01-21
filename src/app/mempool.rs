@@ -95,6 +95,60 @@ impl Mempool {
         result
     }
 
+    /// Peek transactions for a block without removing them (for multi-node payload)
+    pub fn peek_block(&self, max_txs: usize) -> Vec<Transaction> {
+        let mut result = Vec::with_capacity(max_txs);
+
+        // Read from bucket 0 first (highest priority)
+        for pending in &self.bucket0 {
+            if result.len() >= max_txs {
+                return result;
+            }
+            result.push(pending.tx.clone());
+        }
+
+        // Then bucket 1
+        for pending in &self.bucket1 {
+            if result.len() >= max_txs {
+                return result;
+            }
+            result.push(pending.tx.clone());
+        }
+
+        // Finally bucket 2
+        for pending in &self.bucket2 {
+            if result.len() >= max_txs {
+                return result;
+            }
+            result.push(pending.tx.clone());
+        }
+
+        result
+    }
+
+    /// Drain transactions that were previously peeked (after block commit)
+    pub fn drain_block(&mut self, count: usize) {
+        let mut remaining = count;
+
+        // Drain from bucket 0 first
+        while remaining > 0 && !self.bucket0.is_empty() {
+            self.bucket0.pop_front();
+            remaining -= 1;
+        }
+
+        // Then bucket 1
+        while remaining > 0 && !self.bucket1.is_empty() {
+            self.bucket1.pop_front();
+            remaining -= 1;
+        }
+
+        // Finally bucket 2
+        while remaining > 0 && !self.bucket2.is_empty() {
+            self.bucket2.pop_front();
+            remaining -= 1;
+        }
+    }
+
     /// Check how many transactions are pending
     pub fn len(&self) -> usize {
         self.bucket0.len() + self.bucket1.len() + self.bucket2.len()

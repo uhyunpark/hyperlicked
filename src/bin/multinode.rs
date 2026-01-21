@@ -6,14 +6,31 @@
 //!   cargo run --bin multinode -- --node 0
 //!   cargo run --bin multinode -- --node 1
 //!   cargo run --bin multinode -- --node 2
+//!
+//! Environment variables:
+//!   ENABLE_BLS=1  - Enable BLS signature aggregation (default: disabled)
 
 use std::time::Duration;
 
 use anyhow::Result;
 use hyperlicked::app::AppState;
 use hyperlicked::consensus::ConsensusRunner;
+use hyperlicked::crypto::bls::BlsSecretKey;
 use hyperlicked::network::{NetworkConfig, TcpNetwork};
 use hyperlicked::types::{hash_short, ConsensusConfig};
+
+/// Generate deterministic BLS keypair from node index
+fn generate_bls_keypair(node_index: usize) -> (BlsSecretKey, Vec<u8>) {
+    // Deterministic seed based on node index
+    let mut seed = [0u8; 32];
+    seed[0] = (node_index + 1) as u8;
+    seed[31] = 0xBE; // BLS marker
+
+    let sk = BlsSecretKey::from_seed(&seed);
+    let pk = sk.public_key().to_bytes().to_vec();
+
+    (sk, pk)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,6 +53,9 @@ async fn main() -> Result<()> {
         panic!("Node index must be 0, 1, or 2");
     }
 
+    // Check if BLS is enabled via environment
+    let enable_bls = std::env::var("ENABLE_BLS").map(|v| v == "1").unwrap_or(false);
+
     println!("╔════════════════════════════════════════╗");
     println!("║   Hyperliquid-RS Multi-Node v0.1.0     ║");
     println!("║   HotStuff-2 Consensus Engine          ║");
@@ -49,28 +69,53 @@ async fn main() -> Result<()> {
     println!("  Index: {}", node_index);
     println!("  Node ID: {}", hash_short(&net_config.node_id));
     println!("  Listen: {}", net_config.listen_addr);
-    println!("  Peers: {:?}", net_config.peers.iter().map(|(_, addr)| addr).collect::<Vec<_>>());
+    println!(
+        "  Peers: {:?}",
+        net_config
+            .peers
+            .iter()
+            .map(|(_, addr)| addr)
+            .collect::<Vec<_>>()
+    );
     println!();
 
     // Create consensus config
-    let node_ids = [
-        [1u8; 32],
-        [2u8; 32],
-        [3u8; 32],
-    ];
+    let node_ids = [[1u8; 32], [2u8; 32], [3u8; 32]];
+
+    // Generate BLS keys for all nodes (deterministic)
+    let (bls_pubkeys, bls_secret_key) = if enable_bls {
+        // Generate BLS keys for all validators
+        let all_pubkeys: Vec<Vec<u8>> = (0..3).map(|i| generate_bls_keypair(i).1).collect();
+
+        // Get our secret key seed
+        let (sk, _) = generate_bls_keypair(node_index);
+        let seed = sk.to_bytes();
+
+        (all_pubkeys, Some(seed))
+    } else {
+        (vec![], None)
+    };
 
     let consensus_config = ConsensusConfig {
         node_id: net_config.node_id,
         validators: node_ids.to_vec(),
         view_timeout_ms: 3000,
-        bls_pubkeys: vec![], // BLS disabled for testing
-        bls_secret_key: None,
+        bls_pubkeys,
+        bls_secret_key,
     };
 
     println!("Consensus Configuration:");
     println!("  Validators: {}", consensus_config.n());
     println!("  Quorum: {}", consensus_config.quorum());
     println!("  Byzantine fault tolerance: {}", consensus_config.f());
+    println!(
+        "  BLS Signatures: {}",
+        if consensus_config.bls_enabled() {
+            "ENABLED"
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     // Create and start network
@@ -83,7 +128,8 @@ async fn main() -> Result<()> {
 
     // Create and run consensus with AppState
     let app_state = AppState::new();
-    let mut runner = ConsensusRunner::new(consensus_config, network).await?
+    let mut runner = ConsensusRunner::new(consensus_config, network)
+        .await?
         .with_app(app_state);
 
     println!("Starting consensus with orderbook...");

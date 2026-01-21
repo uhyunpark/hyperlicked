@@ -24,8 +24,10 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
+mod mock;
 mod transport;
 
+pub use mock::MockNetwork;
 pub use transport::TcpNetwork;
 
 use async_trait::async_trait;
