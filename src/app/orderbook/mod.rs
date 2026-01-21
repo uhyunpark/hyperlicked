@@ -273,16 +273,22 @@ impl OrderBook {
     }
 
     pub(crate) fn remove_from_bid_heap(&mut self, price: Price) {
-        let heap_vec: Vec<_> = self.bid_heap.drain().filter(|&p| p != price).collect();
+        let mut heap_vec: Vec<_> = self.bid_heap.drain().filter(|&p| p != price).collect();
+        // Explicit sort for determinism across validators
+        // BinaryHeap::drain() order is unspecified, so we must sort before rebuilding
+        heap_vec.sort_by(|a, b| b.cmp(a)); // Descending for max-heap
         self.bid_heap = heap_vec.into_iter().collect();
     }
 
     pub(crate) fn remove_from_ask_heap(&mut self, price: Price) {
-        let heap_vec: Vec<_> = self
+        let mut heap_vec: Vec<_> = self
             .ask_heap
             .drain()
             .filter(|Reverse(p)| *p != price)
             .collect();
+        // Explicit sort for determinism across validators
+        // BinaryHeap::drain() order is unspecified, so we must sort before rebuilding
+        heap_vec.sort(); // Ascending for min-heap (Reverse wrapping handles this)
         self.ask_heap = heap_vec.into_iter().collect();
     }
 }
