@@ -21,6 +21,7 @@
 //! ```
 
 pub mod accounts;
+pub mod adl;
 pub mod candles;
 pub mod funding;
 pub mod liquidation;
@@ -36,6 +37,7 @@ pub use positions::Position;
 pub use candles::{Candle, CandleManager, Interval};
 pub use funding::{FundingError, FundingResult};
 pub use liquidation::{LiquidationError, LiquidationResult};
+pub use adl::{ADLError, ADLResult, ADLSummary};
 pub use mempool::Mempool;
 pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
 pub use staking::{

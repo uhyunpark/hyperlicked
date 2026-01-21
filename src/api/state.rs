@@ -120,6 +120,16 @@ pub enum UserEvent {
         symbol: String,
         timestamp: u64,
     },
+    /// Position was auto-deleveraged
+    #[serde(rename = "adl")]
+    ADL {
+        symbol: String,
+        size_reduced: i64,
+        close_price: i64,
+        realized_pnl: i64,
+        triggering_liquidation: String,
+        timestamp: u64,
+    },
 }
 
 /// User subscription info
@@ -271,6 +281,27 @@ impl UserRegistry {
             balance,
             available,
             locked,
+            timestamp,
+        }).await;
+    }
+
+    /// Send ADL event to a user
+    pub async fn notify_adl(
+        &self,
+        address: &str,
+        symbol: &str,
+        size_reduced: i64,
+        close_price: i64,
+        realized_pnl: i64,
+        triggering_liquidation: &str,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::ADL {
+            symbol: symbol.to_string(),
+            size_reduced,
+            close_price,
+            realized_pnl,
+            triggering_liquidation: triggering_liquidation.to_string(),
             timestamp,
         }).await;
     }

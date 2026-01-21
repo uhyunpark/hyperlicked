@@ -241,13 +241,14 @@ async fn run_consensus_loop(
 
             // Execute block (processes mempool transactions)
             let exec_start = std::time::Instant::now();
-            let (app_hash, fills, order_updates, deposits) = {
+            let (app_hash, fills, order_updates, deposits, adl_events) = {
                 let mut app = state.app.write().await;
                 let hash = app.execute(&block);
                 let fills = app.take_pending_fills();
                 let order_updates = app.take_pending_order_updates();
                 let deposits = app.take_pending_deposits();
-                (hash, fills, order_updates, deposits)
+                let adl_events = app.take_pending_adl_events();
+                (hash, fills, order_updates, deposits, adl_events)
             };
             let exec_time = exec_start.elapsed();
 
@@ -337,6 +338,36 @@ async fn run_consensus_loop(
                         account.balance,
                         account.balance, // available = balance (simplified)
                         account.locked,
+                        block.timestamp,
+                    ).await;
+                }
+            }
+
+            // Emit user events for ADL (auto-deleveraging)
+            for adl_event in &adl_events {
+                state.users.notify_adl(
+                    &adl_event.address,
+                    &adl_event.symbol,
+                    adl_event.size_reduced,
+                    adl_event.close_price,
+                    adl_event.realized_pnl,
+                    &adl_event.triggering_liquidation,
+                    adl_event.timestamp,
+                ).await;
+
+                // Also send position update after ADL
+                let app = state.app.read().await;
+                if let Some(account) = app.account(&adl_event.address) {
+                    let pos = account.position(&adl_event.symbol);
+                    let mark_price = app.mark_price(&adl_event.symbol).unwrap_or(0);
+                    let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    state.users.notify_position_update(
+                        &adl_event.address,
+                        &adl_event.symbol,
+                        pos.size,
+                        pos.entry_price,
+                        mark_price,
+                        unrealized_pnl,
                         block.timestamp,
                     ).await;
                 }

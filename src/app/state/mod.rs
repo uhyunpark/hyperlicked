@@ -100,6 +100,8 @@ pub struct AppState {
     pub(crate) trigger_seq: u64,
     /// Pending trigger events from last block (for WebSocket emission)
     pub(crate) pending_trigger_events: Vec<TriggerEvent>,
+    /// Pending ADL events from last block (for WebSocket emission)
+    pub(crate) pending_adl_events: Vec<crate::app::adl::ADLResult>,
 }
 
 impl AppState {
@@ -131,6 +133,7 @@ impl AppState {
             trigger_orders_by_cloid: HashMap::new(),
             trigger_seq: 0,
             pending_trigger_events: Vec::new(),
+            pending_adl_events: Vec::new(),
         };
 
         // Add default BTC-USDT market
@@ -299,6 +302,11 @@ impl AppState {
         &self.current_funding_rates
     }
 
+    /// Set funding rate for a symbol (for testing)
+    pub fn set_funding_rate(&mut self, symbol: &str, rate: i64) {
+        self.current_funding_rates.insert(symbol.to_string(), rate);
+    }
+
     // === Staking Accessors ===
 
     /// Get staking state (read-only)
@@ -365,6 +373,11 @@ impl AppState {
     /// Take pending trigger events (clears the list)
     pub fn take_pending_trigger_events(&mut self) -> Vec<TriggerEvent> {
         std::mem::take(&mut self.pending_trigger_events)
+    }
+
+    /// Take pending ADL events (clears the list)
+    pub fn take_pending_adl_events(&mut self) -> Vec<crate::app::adl::ADLResult> {
+        std::mem::take(&mut self.pending_adl_events)
     }
 }
 
