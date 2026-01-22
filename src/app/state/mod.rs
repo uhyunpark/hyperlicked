@@ -5,6 +5,7 @@
 
 mod consensus;
 mod execution;
+pub mod incremental_hash;
 mod trigger;
 
 use std::collections::{HashMap, VecDeque};
