@@ -25,6 +25,7 @@ use tracing::info;
 
 use hyperlicked::api::{create_router, AssetCtxData, SharedState, WebSocketHandler};
 use hyperlicked::api::state::PriceLevel;
+use hyperlicked::app::market_maker::{MarketMakerConfig, MarketMakerState};
 use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
 use hyperlicked::app::AppState;
 use hyperlicked::config::Config;
@@ -149,6 +150,7 @@ async fn main() -> Result<()> {
     }
     println!("  Markets: BTC-USDT");
     println!("  Oracle: {}", if config.oracle_enabled { "enabled" } else { "disabled" });
+    println!("  Market Maker: {}", if config.mm_enabled { "enabled" } else { "disabled" });
     println!();
 
     // Create router with CORS
@@ -173,6 +175,14 @@ async fn main() -> Result<()> {
         let oracle_state = shared_state.clone();
         tokio::spawn(async move {
             run_oracle_fetcher(oracle_state).await;
+        });
+    }
+
+    // Spawn market maker if enabled (requires oracle for price reference)
+    if config.mm_enabled && config.mode.is_dev() {
+        let mm_state = shared_state.clone();
+        tokio::spawn(async move {
+            run_market_maker_loop(mm_state).await;
         });
     }
 
@@ -336,6 +346,9 @@ async fn run_consensus_loop(
                     &fill.taker,
                     &fill.symbol,
                     &fill.maker_order_id,
+                    &fill.taker_order_id,
+                    None,  // maker_cloid - TODO: add when Order supports cloid
+                    None,  // taker_cloid - TODO: add when Order supports cloid
                     side,
                     fill.price,
                     fill.size,
@@ -362,6 +375,11 @@ async fn run_consensus_loop(
                 if let Some(account) = app.account(&fill.maker) {
                     let pos = account.position(&fill.symbol);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    let available_margin = account.balance + account.locked;
+                    let liquidation_price = pos.liquidation_price(available_margin, 500);
+                    let notional = pos.notional(mark_price);
+                    let margin = account.locked;
+                    let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &fill.maker,
                         &fill.symbol,
@@ -369,6 +387,9 @@ async fn run_consensus_loop(
                         pos.entry_price,
                         mark_price,
                         unrealized_pnl,
+                        liquidation_price,
+                        margin,
+                        leverage,
                         block.timestamp,
                     ).await;
 
@@ -385,6 +406,11 @@ async fn run_consensus_loop(
                 if let Some(account) = app.account(&fill.taker) {
                     let pos = account.position(&fill.symbol);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    let available_margin = account.balance + account.locked;
+                    let liquidation_price = pos.liquidation_price(available_margin, 500);
+                    let notional = pos.notional(mark_price);
+                    let margin = account.locked;
+                    let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &fill.taker,
                         &fill.symbol,
@@ -392,6 +418,9 @@ async fn run_consensus_loop(
                         pos.entry_price,
                         mark_price,
                         unrealized_pnl,
+                        liquidation_price,
+                        margin,
+                        leverage,
                         block.timestamp,
                     ).await;
 
@@ -416,6 +445,21 @@ async fn run_consensus_loop(
                     order_update.remaining,
                     block.timestamp,
                 ).await;
+
+                // Emit orderClosed event for completed orders
+                if order_update.status == "filled" || order_update.status == "cancelled" {
+                    state.users.notify_order_closed(
+                        &order_update.trader,
+                        &order_update.order_id,
+                        &order_update.symbol,
+                        &order_update.side,
+                        order_update.price,
+                        order_update.original_size,
+                        order_update.filled,
+                        &order_update.status,
+                        block.timestamp,
+                    ).await;
+                }
             }
 
             // Emit user events for deposits (balance updates)
@@ -450,6 +494,11 @@ async fn run_consensus_loop(
                     let pos = account.position(&adl_event.symbol);
                     let mark_price = app.mark_price(&adl_event.symbol).unwrap_or(0);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    let available_margin = account.balance + account.locked;
+                    let liquidation_price = pos.liquidation_price(available_margin, 500);
+                    let notional = pos.notional(mark_price);
+                    let margin = account.locked;
+                    let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &adl_event.address,
                         &adl_event.symbol,
@@ -457,6 +506,9 @@ async fn run_consensus_loop(
                         pos.entry_price,
                         mark_price,
                         unrealized_pnl,
+                        liquidation_price,
+                        margin,
+                        leverage,
                         block.timestamp,
                     ).await;
                 }
@@ -506,6 +558,12 @@ async fn run_consensus_loop(
                     let pos = account.position(&liq.symbol);
                     let mark_price = app.mark_price(&liq.symbol).unwrap_or(0);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
+                    // After liquidation, position is typically closed so these are 0
+                    let available_margin = account.balance + account.locked;
+                    let liquidation_price = pos.liquidation_price(available_margin, 500);
+                    let notional = pos.notional(mark_price);
+                    let margin = account.locked;
+                    let leverage = if margin > 0 { notional / margin } else { 0 };
                     state.users.notify_position_update(
                         &liq.address,
                         &liq.symbol,
@@ -513,6 +571,9 @@ async fn run_consensus_loop(
                         pos.entry_price,
                         mark_price,
                         unrealized_pnl,
+                        liquidation_price,
+                        margin,
+                        leverage,
                         block.timestamp,
                     ).await;
 
@@ -523,6 +584,56 @@ async fn run_consensus_loop(
                         account.locked,
                         block.timestamp,
                     ).await;
+                }
+            }
+
+            // Emit user events for trigger orders (TP/SL)
+            let trigger_events = {
+                let mut app = state.app.write().await;
+                app.take_pending_trigger_events()
+            };
+            for event in &trigger_events {
+                use hyperlicked::app::trigger::TriggerEventType;
+                match &event.event_type {
+                    TriggerEventType::Placed => {
+                        // Look up the trigger order to get trigger_type, price, size
+                        let app = state.app.read().await;
+                        if let Some(order) = app.trigger_order(&event.id) {
+                            let trigger_type = match order.trigger_type {
+                                hyperlicked::app::trigger::TriggerType::StopLoss => "sl",
+                                hyperlicked::app::trigger::TriggerType::TakeProfit => "tp",
+                            };
+                            state.users.notify_trigger_placed(
+                                &event.trader,
+                                &event.id,
+                                &event.symbol,
+                                trigger_type,
+                                order.trigger_price,
+                                order.size,
+                                event.timestamp,
+                            ).await;
+                        }
+                    }
+                    TriggerEventType::Triggered { order_id } => {
+                        state.users.notify_trigger_triggered(
+                            &event.trader,
+                            &event.id,
+                            &event.symbol,
+                            order_id,
+                            event.timestamp,
+                        ).await;
+                    }
+                    TriggerEventType::Cancelled => {
+                        state.users.notify_trigger_cancelled(
+                            &event.trader,
+                            &event.id,
+                            &event.symbol,
+                            event.timestamp,
+                        ).await;
+                    }
+                    TriggerEventType::Failed { reason: _ } => {
+                        // Currently no specific event for failures - could add later
+                    }
                 }
             }
 
@@ -705,5 +816,92 @@ async fn run_oracle_fetcher(state: SharedState) {
 
         // Wait for next poll interval
         tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
+    }
+}
+
+/// Run market maker loop
+/// Generates synthetic trading activity using oracle price as reference
+async fn run_market_maker_loop(state: SharedState) {
+    let mm_config = MarketMakerConfig::from_env();
+
+    info!(
+        intensity = %mm_config.intensity.description(),
+        accounts = mm_config.total_accounts(),
+        interval_ms = mm_config.interval_ms,
+        seed = mm_config.seed,
+        "Market maker starting"
+    );
+
+    let mut mm = MarketMakerState::new(mm_config.clone());
+
+    // Log strategy breakdown
+    for (strategy_type, count) in mm.strategy_counts() {
+        info!(
+            strategy = strategy_type.name(),
+            accounts = count,
+            "Strategy initialized"
+        );
+    }
+
+    // Initialize accounts with deposits
+    let deposits = mm.init_deposits();
+    {
+        let mut app = state.app.write().await;
+        for tx in deposits {
+            if let Err(e) = app.submit_tx(tx) {
+                tracing::warn!(error = %e, "Failed to submit MM deposit");
+            }
+        }
+    }
+    info!(accounts = mm.config().total_accounts(), "MM deposits queued");
+
+    // Wait for deposits to be processed (a few blocks)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    info!("🤖 Market maker started");
+
+    loop {
+        // Get current market state
+        let (oracle_price, best_bid, best_ask, timestamp) = {
+            let app = state.app.read().await;
+            let oracle = app.oracle_price(&mm_config.symbol);
+            let book = app.orderbook(&mm_config.symbol);
+            let bid = book.and_then(|b| b.best_bid());
+            let ask = book.and_then(|b| b.best_ask());
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            (oracle, bid, ask, ts)
+        };
+
+        // Generate transactions
+        let transactions = mm.tick(oracle_price, best_bid, best_ask, timestamp);
+
+        if !transactions.is_empty() {
+            let tx_count = transactions.len();
+
+            // Submit transactions to mempool
+            let mut app = state.app.write().await;
+            let mut submitted = 0;
+            for tx in transactions {
+                if app.submit_tx(tx).is_ok() {
+                    submitted += 1;
+                }
+            }
+
+            if mm.tick_count() % 100 == 0 {
+                tracing::debug!(
+                    tick = mm.tick_count(),
+                    submitted,
+                    generated = tx_count,
+                    oracle = oracle_price,
+                    "MM tick"
+                );
+            }
+        }
+
+        // Wait for next interval
+        tokio::time::sleep(Duration::from_millis(mm_config.interval_ms)).await;
     }
 }

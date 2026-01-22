@@ -25,6 +25,7 @@ pub mod adl;
 pub mod candles;
 pub mod funding;
 pub mod liquidation;
+pub mod market_maker;
 pub mod mempool;
 pub mod oracle;
 pub mod orderbook;
@@ -46,6 +47,7 @@ pub use staking::{
     ValidatorInfo, ValidatorStatus, Delegation, EpochSnapshot,
 };
 pub use oracle::{OracleConfig, OracleError, OraclePrice, OracleState, PriceSource};
+pub use market_maker::{MarketMakerConfig, MarketMakerState, Intensity as MMIntensity};
 pub use state::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
 pub use trigger::{
     Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType,

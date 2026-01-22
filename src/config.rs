@@ -83,6 +83,9 @@ pub struct Config {
 
     /// Enable oracle system at startup (dev mode only)
     pub oracle_enabled: bool,
+
+    /// Enable artificial market maker (dev mode only)
+    pub mm_enabled: bool,
 }
 
 impl Config {
@@ -129,6 +132,9 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1000), // Default: snapshot every 1000 blocks
             oracle_enabled: std::env::var("ORACLE_ENABLED")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false),
+            mm_enabled: std::env::var("MM_ENABLED")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(false),
         }

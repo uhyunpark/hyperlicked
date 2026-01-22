@@ -1372,6 +1372,7 @@ dependencies = [
  "getrandom 0.2.16",
  "hex",
  "k256",
+ "rand 0.8.5",
  "reqwest",
  "rocksdb",
  "serde",
