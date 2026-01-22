@@ -21,6 +21,63 @@ pub struct Prepare {
     pub qc: Certificate,
 }
 
+/// Timeout message: sent when a validator times out waiting for leader.
+///
+/// This is a simplified message specifically for timeout aggregation.
+/// Contains only the essential data needed for BLS signature aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Timeout {
+    /// The view that timed out
+    pub view: View,
+    /// The sender's highest QC view (for leader election tie-breaking)
+    pub high_qc_view: View,
+    /// The sender's node ID
+    pub sender: NodeId,
+    /// BLS signature over (view, high_qc_view)
+    pub signature: Signature,
+}
+
+impl Timeout {
+    /// Data to be signed for this timeout
+    ///
+    /// Only the view is signed - high_qc_view is self-reported for tie-breaking
+    /// but not cryptographically bound (validators could lie about it regardless).
+    pub fn signing_data(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"TIMEOUT"); // Domain separator
+        data.extend_from_slice(&self.view.to_le_bytes());
+        data
+    }
+}
+
+/// TimeoutCertificate: cryptographic proof that 2f+1 validators timed out.
+///
+/// This provides Byzantine safety for view changes - proves that enough
+/// honest validators agreed the leader failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutCertificate {
+    /// The view that timed out
+    pub view: View,
+    /// The highest high_qc_view among all timeouts (for leader election)
+    pub high_qc_view: View,
+    /// Node IDs that contributed to this TC
+    pub signers: Vec<NodeId>,
+    /// Aggregated BLS signature over the view number
+    pub agg_signature: Signature,
+}
+
+impl TimeoutCertificate {
+    /// Get the signing data that was aggregated
+    ///
+    /// Only the view is signed (same as individual Timeout messages).
+    pub fn signing_data(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"TIMEOUT");
+        data.extend_from_slice(&self.view.to_le_bytes());
+        data
+    }
+}
+
 /// ViewChange message: sent when a validator times out waiting for leader.
 ///
 /// In HotStuff-2, when a leader fails:
@@ -157,6 +214,7 @@ pub enum Message {
     Prepare(Prepare),
     ViewChange(ViewChange),
     NewView(NewView),
+    Timeout(Timeout),
     // Sync messages
     SyncRequest(SyncRequest),
     SyncResponse(SyncResponse),

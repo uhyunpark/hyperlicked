@@ -23,6 +23,7 @@ mod message_handler;
 mod pacemaker;
 pub mod runner;
 mod safety;
+pub mod timeout;
 pub mod view_change;
 
 pub use aggregator::VoteAggregator;
@@ -30,7 +31,13 @@ pub use engine::Engine;
 pub use pacemaker::Pacemaker;
 pub use runner::ConsensusRunner;
 pub use safety::Safety;
-pub use view_change::{ViewChangeCollector, ViewChangeError};
+pub use timeout::{
+    create_signed_timeout, verify_timeout_certificate, TimeoutCollector, TimeoutError,
+};
+pub use view_change::{
+    create_signed_view_change, validate_view_change, validate_view_change_with_sig,
+    ViewChangeCollector, ViewChangeError,
+};
 
 use crate::types::{Block, Hash};
 

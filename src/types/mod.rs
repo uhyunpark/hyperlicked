@@ -15,7 +15,7 @@ pub use certificate::{Certificate, Vote};
 pub use config::ConsensusConfig;
 pub use messages::{
     Message, NewView, Prepare, Propose, SnapshotRequest, SnapshotResponse, SyncRequest,
-    SyncResponse, ViewChange, ViewChangeCertificate,
+    SyncResponse, Timeout, TimeoutCertificate, ViewChange, ViewChangeCertificate,
 };
 
 use sha2::{Digest, Sha256};
