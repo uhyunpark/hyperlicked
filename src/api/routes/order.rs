@@ -53,7 +53,7 @@ async fn submit_order_tx(
     let verified = verify_order(&req, &state.eip712_signer, &state.agent_signer, delegation.as_ref(), current_timestamp_ms)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Validate and consume nonce
+    // Validate and consume nonce, then validate margin/position
     {
         let mut app = state.shared.app.write().await;
         let address_str = format!("{:?}", verified.owner);
@@ -61,6 +61,60 @@ async fn submit_order_tx(
         app.accounts_mut()
             .use_nonce(&address_str, verified.nonce)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        // Pre-submission validation: check balance and position constraints
+        // This prevents "Order Submitted" toast when the order will fail at execution
+        if let Some(account) = app.account(&address_str) {
+            if verified.reduce_only {
+                // Reduce-only validation: must have position in correct direction
+                let pos = account.position(&verified.symbol);
+                // side: 1 = Buy, 2 = Sell
+                // Long (pos.size > 0) can only reduce with Sell (2)
+                // Short (pos.size < 0) can only reduce with Buy (1)
+                let is_reducing =
+                    (pos.size > 0 && verified.side == 2) || (pos.size < 0 && verified.side == 1);
+                if pos.size == 0 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Reduce-only order invalid: no open position".to_string(),
+                    ));
+                }
+                if !is_reducing {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Reduce-only order invalid: wrong direction".to_string(),
+                    ));
+                }
+            } else {
+                // Margin check for non-reduce-only orders
+                // notional = (price * size) / 100_000_000 (size is in satoshis)
+                let notional = (verified.price * verified.size) / 100_000_000;
+                // required_margin = notional / 10 (10x leverage)
+                let required_margin = notional / 10;
+                if account.balance < required_margin {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Insufficient margin: need {} cents, have {} cents",
+                            required_margin, account.balance
+                        ),
+                    ));
+                }
+            }
+        } else {
+            // Account doesn't exist - only allow if in dev mode with faucet
+            // For non-dev mode, reject orders from non-existent accounts
+            if !verified.reduce_only {
+                let notional = (verified.price * verified.size) / 100_000_000;
+                let required_margin = notional / 10;
+                if required_margin > 0 {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Insufficient margin: account has no funds".to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     // Convert to internal types
