@@ -202,7 +202,8 @@ export function Positions() {
                 const realtimePnL = getRealtimePnL(position)
                 const realtimeMarkPrice = getRealtimeMarkPrice(position)
                 const isProfitable = realtimePnL > 0
-                const pnlPercent = ((realtimePnL / position.margin) * 100)
+                // Protect against division by zero if margin is 0
+                const pnlPercent = position.margin > 0 ? ((realtimePnL / position.margin) * 100) : 0
                 const triggers = triggersBySymbol[position.symbol] || {}
 
                 return (

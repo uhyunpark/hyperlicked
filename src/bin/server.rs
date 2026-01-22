@@ -382,7 +382,18 @@ async fn run_consensus_loop(
                     let available_margin = account.balance + account.locked;
                     let liquidation_price = pos.liquidation_price(available_margin, 500);
                     let notional = pos.notional(mark_price);
-                    let margin = account.locked;
+                    // Calculate margin proportionally (same as REST API)
+                    let total_notional: i64 = account
+                        .positions
+                        .values()
+                        .filter(|p| p.size != 0)
+                        .map(|p| p.notional(mark_price))
+                        .sum();
+                    let margin = if total_notional > 0 {
+                        (available_margin * notional) / total_notional
+                    } else {
+                        available_margin
+                    };
                     let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &fill.maker,
@@ -413,7 +424,18 @@ async fn run_consensus_loop(
                     let available_margin = account.balance + account.locked;
                     let liquidation_price = pos.liquidation_price(available_margin, 500);
                     let notional = pos.notional(mark_price);
-                    let margin = account.locked;
+                    // Calculate margin proportionally (same as REST API)
+                    let total_notional: i64 = account
+                        .positions
+                        .values()
+                        .filter(|p| p.size != 0)
+                        .map(|p| p.notional(mark_price))
+                        .sum();
+                    let margin = if total_notional > 0 {
+                        (available_margin * notional) / total_notional
+                    } else {
+                        available_margin
+                    };
                     let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &fill.taker,
@@ -501,7 +523,18 @@ async fn run_consensus_loop(
                     let available_margin = account.balance + account.locked;
                     let liquidation_price = pos.liquidation_price(available_margin, 500);
                     let notional = pos.notional(mark_price);
-                    let margin = account.locked;
+                    // Calculate margin proportionally (same as REST API)
+                    let total_notional: i64 = account
+                        .positions
+                        .values()
+                        .filter(|p| p.size != 0)
+                        .map(|p| p.notional(mark_price))
+                        .sum();
+                    let margin = if total_notional > 0 {
+                        (available_margin * notional) / total_notional
+                    } else {
+                        available_margin
+                    };
                     let leverage = if margin > 0 { notional / margin } else { 1 };
                     state.users.notify_position_update(
                         &adl_event.address,
@@ -566,7 +599,18 @@ async fn run_consensus_loop(
                     let available_margin = account.balance + account.locked;
                     let liquidation_price = pos.liquidation_price(available_margin, 500);
                     let notional = pos.notional(mark_price);
-                    let margin = account.locked;
+                    // Calculate margin proportionally (same as REST API)
+                    let total_notional: i64 = account
+                        .positions
+                        .values()
+                        .filter(|p| p.size != 0)
+                        .map(|p| p.notional(mark_price))
+                        .sum();
+                    let margin = if total_notional > 0 {
+                        (available_margin * notional) / total_notional
+                    } else {
+                        available_margin
+                    };
                     let leverage = if margin > 0 { notional / margin } else { 0 };
                     state.users.notify_position_update(
                         &liq.address,

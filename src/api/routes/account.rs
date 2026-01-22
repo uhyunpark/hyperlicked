@@ -160,10 +160,11 @@ pub async fn get_account_funding(
     };
 
     // Return cumulative funding for each position
+    // Only include positions that have had funding applied (timestamp > 0)
     let payments: Vec<FundingPayment> = account
         .positions
         .iter()
-        .filter(|(_, pos)| pos.cumulative_funding != 0 || pos.size != 0)
+        .filter(|(_, pos)| pos.last_funding_timestamp > 0 && (pos.cumulative_funding != 0 || pos.size != 0))
         .map(|(symbol, pos)| FundingPayment {
             symbol: symbol.clone(),
             payment: pos.cumulative_funding,
