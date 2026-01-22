@@ -86,6 +86,50 @@ impl ConsensusConfig {
         validators[idx]
     }
 
+    /// Get leader using weighted selection based on stake
+    ///
+    /// Leaders are selected proportionally to stake. A validator with 2x stake
+    /// is 2x more likely to be leader than one with 1x stake.
+    ///
+    /// # Algorithm
+    ///
+    /// Given stakes [100, 200, 300] (total 600):
+    /// - view % 600 in [0, 100) -> validator 0
+    /// - view % 600 in [100, 300) -> validator 1
+    /// - view % 600 in [300, 600) -> validator 2
+    pub fn leader_of_weighted(&self, view: View, stakes: &[(NodeId, u64)]) -> NodeId {
+        if stakes.is_empty() {
+            return self.node_id; // Single-node fallback
+        }
+
+        let total_stake: u64 = stakes.iter().map(|(_, s)| s).sum();
+        if total_stake == 0 {
+            // All stakes are zero, fall back to round-robin
+            let idx = (view as usize) % stakes.len();
+            return stakes[idx].0;
+        }
+
+        // Use view to select a slot in [0, total_stake)
+        let slot = (view % total_stake) as u64;
+
+        // Find the validator whose cumulative stake range contains this slot
+        let mut cumulative: u64 = 0;
+        for (node_id, stake) in stakes {
+            cumulative += stake;
+            if slot < cumulative {
+                return *node_id;
+            }
+        }
+
+        // Shouldn't reach here, but fallback to last validator
+        stakes.last().map(|(id, _)| *id).unwrap_or(self.node_id)
+    }
+
+    /// Check if we are the leader using weighted selection
+    pub fn is_leader_weighted(&self, view: View, stakes: &[(NodeId, u64)]) -> bool {
+        self.leader_of_weighted(view, stakes) == self.node_id
+    }
+
     /// Get active validators, preferring dynamic set if available
     pub fn active_validators<'a>(&'a self, dynamic: Option<&'a [NodeId]>) -> &'a [NodeId] {
         dynamic.unwrap_or(&self.validators)
@@ -131,5 +175,126 @@ impl ConsensusConfig {
     /// Get our BLS secret key
     pub fn bls_secret_key(&self) -> Option<BlsSecretKey> {
         self.bls_secret_key.map(|seed| BlsSecretKey::from_seed(&seed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> ConsensusConfig {
+        ConsensusConfig {
+            node_id: [1u8; 32],
+            validators: vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            view_timeout_ms: 3000,
+            bls_pubkeys: vec![],
+            bls_secret_key: None,
+        }
+    }
+
+    #[test]
+    fn test_round_robin_leader() {
+        let config = test_config();
+
+        // Round-robin should cycle through validators
+        assert_eq!(config.leader_of(0), [1u8; 32]);
+        assert_eq!(config.leader_of(1), [2u8; 32]);
+        assert_eq!(config.leader_of(2), [3u8; 32]);
+        assert_eq!(config.leader_of(3), [1u8; 32]); // Wraps around
+    }
+
+    #[test]
+    fn test_weighted_leader_equal_stakes() {
+        let config = test_config();
+
+        // Equal stakes should behave like round-robin
+        let stakes = vec![
+            ([1u8; 32], 100),
+            ([2u8; 32], 100),
+            ([3u8; 32], 100),
+        ];
+
+        // Total 300, so slots 0-99 -> v1, 100-199 -> v2, 200-299 -> v3
+        assert_eq!(config.leader_of_weighted(0, &stakes), [1u8; 32]);
+        assert_eq!(config.leader_of_weighted(100, &stakes), [2u8; 32]);
+        assert_eq!(config.leader_of_weighted(200, &stakes), [3u8; 32]);
+        assert_eq!(config.leader_of_weighted(300, &stakes), [1u8; 32]); // Wraps
+    }
+
+    #[test]
+    fn test_weighted_leader_unequal_stakes() {
+        let config = test_config();
+
+        // Validator 2 has 2x the stake of others
+        let stakes = vec![
+            ([1u8; 32], 100),
+            ([2u8; 32], 200),
+            ([3u8; 32], 100),
+        ];
+
+        // Total 400: 0-99 -> v1, 100-299 -> v2, 300-399 -> v3
+        assert_eq!(config.leader_of_weighted(0, &stakes), [1u8; 32]);
+        assert_eq!(config.leader_of_weighted(50, &stakes), [1u8; 32]);
+        assert_eq!(config.leader_of_weighted(100, &stakes), [2u8; 32]);
+        assert_eq!(config.leader_of_weighted(200, &stakes), [2u8; 32]);
+        assert_eq!(config.leader_of_weighted(300, &stakes), [3u8; 32]);
+        assert_eq!(config.leader_of_weighted(400, &stakes), [1u8; 32]); // Wraps
+    }
+
+    #[test]
+    fn test_weighted_leader_distribution() {
+        let config = test_config();
+
+        // Validator 1 has 10%, validator 2 has 30%, validator 3 has 60%
+        let stakes = vec![
+            ([1u8; 32], 100),
+            ([2u8; 32], 300),
+            ([3u8; 32], 600),
+        ];
+
+        // Count how many times each validator is leader over 1000 views
+        let mut counts = [0u32; 3];
+        for view in 0..1000 {
+            let leader = config.leader_of_weighted(view, &stakes);
+            if leader == [1u8; 32] {
+                counts[0] += 1;
+            } else if leader == [2u8; 32] {
+                counts[1] += 1;
+            } else {
+                counts[2] += 1;
+            }
+        }
+
+        // Should be proportional to stake (10%, 30%, 60%)
+        // With 1000 views, expect roughly 100, 300, 600
+        assert_eq!(counts[0], 100);
+        assert_eq!(counts[1], 300);
+        assert_eq!(counts[2], 600);
+    }
+
+    #[test]
+    fn test_weighted_leader_empty_stakes() {
+        let config = test_config();
+
+        // Empty stakes should return self
+        let stakes: Vec<(NodeId, u64)> = vec![];
+        assert_eq!(config.leader_of_weighted(0, &stakes), config.node_id);
+    }
+
+    #[test]
+    fn test_weighted_leader_zero_stakes() {
+        let config = test_config();
+
+        // All zero stakes should fall back to round-robin
+        let stakes = vec![
+            ([1u8; 32], 0),
+            ([2u8; 32], 0),
+            ([3u8; 32], 0),
+        ];
+
+        // Falls back to round-robin
+        assert_eq!(config.leader_of_weighted(0, &stakes), [1u8; 32]);
+        assert_eq!(config.leader_of_weighted(1, &stakes), [2u8; 32]);
+        assert_eq!(config.leader_of_weighted(2, &stakes), [3u8; 32]);
     }
 }
