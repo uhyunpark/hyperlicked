@@ -3,11 +3,12 @@
 //! Account information, positions, orders, and nonces.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
+use serde::Deserialize;
 
-use crate::api::types::{AccountInfo, ApiState, FundingPayment, OrderInfo, PositionInfo};
+use crate::api::types::{AccountInfo, ApiState, FillInfo, FundingPayment, OrderInfo, PositionInfo};
 
 pub async fn get_account(
     State(state): State<ApiState>,
@@ -173,4 +174,64 @@ pub async fn get_account_funding(
         .collect();
 
     Json(payments)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FillsQuery {
+    pub limit: Option<usize>,
+}
+
+/// Get user's trade fills (trades where user is taker or maker)
+pub async fn get_user_fills(
+    State(state): State<ApiState>,
+    Path(address): Path<String>,
+    Query(query): Query<FillsQuery>,
+) -> Json<Vec<FillInfo>> {
+    use crate::app::orderbook::Side;
+
+    let app = state.shared.app.read().await;
+    let limit = query.limit.unwrap_or(100).min(500);
+    let address_lower = address.to_lowercase();
+
+    // Get all user fills using the AppState method
+    let raw_fills = app.get_user_fills(&address, limit);
+
+    // Convert to FillInfo, determining if user is maker or taker for each fill
+    let fills: Vec<FillInfo> = raw_fills
+        .iter()
+        .map(|fill| {
+            let is_maker = fill.maker.to_lowercase() == address_lower;
+            let side = if is_maker {
+                // Maker is opposite side of taker
+                match fill.side {
+                    Side::Bid => "sell",
+                    Side::Ask => "buy",
+                }
+            } else {
+                // Taker
+                match fill.side {
+                    Side::Bid => "buy",
+                    Side::Ask => "sell",
+                }
+            };
+            let id = if is_maker {
+                fill.maker_order_id.clone()
+            } else {
+                format!("{}-taker", fill.taker_order_id)
+            };
+
+            FillInfo {
+                id,
+                symbol: fill.symbol.clone(),
+                side: side.to_string(),
+                price: fill.price,
+                size: fill.size,
+                fee: 0, // TODO: Calculate actual fee
+                is_maker,
+                timestamp: fill.timestamp,
+            }
+        })
+        .collect();
+
+    Json(fills)
 }

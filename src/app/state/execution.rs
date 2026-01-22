@@ -121,7 +121,24 @@ impl AppState {
 
     fn execute_cancel(&mut self, order_id: String) -> Result<Vec<Fill>, AppError> {
         for book in self.orderbooks.values_mut() {
-            if book.cancel(&order_id) {
+            if let Some(cancelled) = book.cancel(&order_id) {
+                // Emit order update with cancelled status
+                let side_str = match cancelled.side {
+                    Side::Bid => "buy",
+                    Side::Ask => "sell",
+                };
+                let filled = cancelled.original_size - cancelled.size;
+                self.pending_order_updates.push(OrderUpdateInfo {
+                    trader: cancelled.trader,
+                    order_id: cancelled.id,
+                    symbol: cancelled.symbol,
+                    side: side_str.to_string(),
+                    price: cancelled.price,
+                    original_size: cancelled.original_size,
+                    status: "cancelled".to_string(),
+                    filled,
+                    remaining: 0, // Cancelled orders have no remaining
+                });
                 return Ok(vec![]);
             }
         }
@@ -207,10 +224,17 @@ impl AppState {
         };
 
         // Emit order update for the taker (order placer)
+        let side_str = match side {
+            Side::Bid => "buy",
+            Side::Ask => "sell",
+        };
         self.pending_order_updates.push(OrderUpdateInfo {
             trader: trader.clone(),
             order_id: order_id.clone(),
             symbol: symbol.clone(),
+            side: side_str.to_string(),
+            price,
+            original_size: size,
             status: status.to_string(),
             filled,
             remaining,

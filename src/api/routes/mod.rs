@@ -38,6 +38,7 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/accounts/:address/orders", get(account::get_orders))
         .route("/accounts/:address/nonce", get(account::get_nonce))
         .route("/accounts/:address/funding", get(account::get_account_funding))
+        .route("/accounts/:address/fills", get(account::get_user_fills))
         .route(
             "/accounts/:address/trigger-orders",
             get(trigger::get_trigger_orders),

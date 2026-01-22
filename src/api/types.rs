@@ -360,3 +360,21 @@ pub struct CancelTriggerOrderRequest {
     pub symbol: Option<String>,
     pub cloid: Option<String>,
 }
+
+// =============================================================================
+// Fill Types
+// =============================================================================
+
+/// User fill info for API response
+#[derive(Debug, Serialize)]
+pub struct FillInfo {
+    pub id: String,
+    pub symbol: String,
+    pub side: String,
+    pub price: i64,
+    pub size: i64,
+    pub fee: i64,
+    #[serde(rename = "isMaker")]
+    pub is_maker: bool,
+    pub timestamp: u64,
+}

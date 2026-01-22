@@ -93,6 +93,8 @@ pub enum UserEvent {
     UserFill {
         symbol: String,
         order_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cloid: Option<String>,  // Client order ID for correlation
         side: String,
         price: i64,
         size: i64,
@@ -110,6 +112,18 @@ pub enum UserEvent {
         remaining: i64,        // Remaining size
         timestamp: u64,
     },
+    /// Order fully filled or cancelled (for order history streaming)
+    #[serde(rename = "orderClosed")]
+    OrderClosed {
+        order_id: String,
+        symbol: String,
+        side: String,
+        price: i64,
+        size: i64,             // Original size
+        filled: i64,           // Total filled
+        status: String,        // "filled" or "cancelled"
+        timestamp: u64,
+    },
     /// User's position changed
     #[serde(rename = "positionUpdate")]
     PositionUpdate {
@@ -118,6 +132,9 @@ pub enum UserEvent {
         entry_price: i64,
         mark_price: i64,
         unrealized_pnl: i64,
+        liquidation_price: i64,
+        margin: i64,
+        leverage: i64,         // Integer leverage (1-100x)
         timestamp: u64,
     },
     /// User's account balance changed
@@ -245,7 +262,10 @@ impl UserRegistry {
         maker: &str,
         taker: &str,
         symbol: &str,
-        order_id: &str,
+        maker_order_id: &str,
+        taker_order_id: &str,
+        maker_cloid: Option<&str>,
+        taker_cloid: Option<&str>,
         side: &str,
         price: i64,
         size: i64,
@@ -256,7 +276,8 @@ impl UserRegistry {
         // Notify maker
         self.send_to_user(maker, UserEvent::UserFill {
             symbol: symbol.to_string(),
-            order_id: order_id.to_string(),
+            order_id: maker_order_id.to_string(),
+            cloid: maker_cloid.map(|s| s.to_string()),
             side: side.to_string(),
             price,
             size,
@@ -268,7 +289,8 @@ impl UserRegistry {
         // Notify taker
         self.send_to_user(taker, UserEvent::UserFill {
             symbol: symbol.to_string(),
-            order_id: format!("{}-taker", order_id),
+            order_id: taker_order_id.to_string(),
+            cloid: taker_cloid.map(|s| s.to_string()),
             side: if side == "buy" { "sell" } else { "buy" }.to_string(),
             price,
             size,
@@ -299,6 +321,31 @@ impl UserRegistry {
         }).await;
     }
 
+    /// Send order closed event (for order history streaming)
+    pub async fn notify_order_closed(
+        &self,
+        address: &str,
+        order_id: &str,
+        symbol: &str,
+        side: &str,
+        price: i64,
+        size: i64,
+        filled: i64,
+        status: &str,  // "filled" or "cancelled"
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::OrderClosed {
+            order_id: order_id.to_string(),
+            symbol: symbol.to_string(),
+            side: side.to_string(),
+            price,
+            size,
+            filled,
+            status: status.to_string(),
+            timestamp,
+        }).await;
+    }
+
     /// Send position update to a user
     pub async fn notify_position_update(
         &self,
@@ -308,6 +355,9 @@ impl UserRegistry {
         entry_price: i64,
         mark_price: i64,
         unrealized_pnl: i64,
+        liquidation_price: i64,
+        margin: i64,
+        leverage: i64,
         timestamp: u64,
     ) {
         self.send_to_user(address, UserEvent::PositionUpdate {
@@ -316,6 +366,9 @@ impl UserRegistry {
             entry_price,
             mark_price,
             unrealized_pnl,
+            liquidation_price,
+            margin,
+            leverage,
             timestamp,
         }).await;
     }
@@ -394,6 +447,59 @@ impl UserRegistry {
             price,
             pnl,
             was_long,
+            timestamp,
+        }).await;
+    }
+
+    /// Send trigger order placed event
+    pub async fn notify_trigger_placed(
+        &self,
+        address: &str,
+        id: &str,
+        symbol: &str,
+        trigger_type: &str,
+        trigger_price: i64,
+        size: i64,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::TriggerOrderPlaced {
+            id: id.to_string(),
+            symbol: symbol.to_string(),
+            trigger_type: trigger_type.to_string(),
+            trigger_price,
+            size,
+            timestamp,
+        }).await;
+    }
+
+    /// Send trigger order triggered event
+    pub async fn notify_trigger_triggered(
+        &self,
+        address: &str,
+        id: &str,
+        symbol: &str,
+        order_id: &str,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::TriggerOrderTriggered {
+            id: id.to_string(),
+            symbol: symbol.to_string(),
+            order_id: order_id.to_string(),
+            timestamp,
+        }).await;
+    }
+
+    /// Send trigger order cancelled event
+    pub async fn notify_trigger_cancelled(
+        &self,
+        address: &str,
+        id: &str,
+        symbol: &str,
+        timestamp: u64,
+    ) {
+        self.send_to_user(address, UserEvent::TriggerOrderCancelled {
+            id: id.to_string(),
+            symbol: symbol.to_string(),
             timestamp,
         }).await;
     }

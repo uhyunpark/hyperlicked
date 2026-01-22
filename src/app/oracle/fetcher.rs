@@ -307,6 +307,6 @@ mod tests {
     #[tokio::test]
     async fn test_fetcher_creation() {
         let fetcher = OracleFetcher::new(FetcherConfig::default());
-        assert_eq!(fetcher.config.poll_interval_ms, 1000);
+        assert_eq!(fetcher.config.poll_interval_ms, 3000);
     }
 }

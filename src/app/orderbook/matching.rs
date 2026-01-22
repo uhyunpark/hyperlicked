@@ -260,10 +260,10 @@ mod tests {
             .unwrap();
         assert!(book.best_bid().is_some());
 
-        assert!(book.cancel("bid1"));
+        assert!(book.cancel("bid1").is_some());
         assert!(book.best_bid().is_none());
 
-        assert!(!book.cancel("nonexistent"));
+        assert!(book.cancel("nonexistent").is_none());
     }
 
     #[test]

@@ -137,11 +137,11 @@ impl OrderBook {
         format!("{}_{}", self.symbol, self.seq)
     }
 
-    /// Cancel an order
-    pub fn cancel(&mut self, order_id: &str) -> bool {
+    /// Cancel an order, returning the cancelled order if found
+    pub fn cancel(&mut self, order_id: &str) -> Option<Order> {
         let (side, price) = match self.order_index.remove(order_id) {
             Some(info) => info,
-            None => return false,
+            None => return None,
         };
 
         let orders = match side {
@@ -151,7 +151,7 @@ impl OrderBook {
 
         if let Some(level) = orders {
             if let Some(pos) = level.iter().position(|o| o.id == order_id) {
-                level.remove(pos);
+                let cancelled_order = level.remove(pos);
                 if level.is_empty() {
                     match side {
                         Side::Bid => {
@@ -164,11 +164,11 @@ impl OrderBook {
                         }
                     }
                 }
-                return true;
+                return Some(cancelled_order);
             }
         }
 
-        false
+        None
     }
 
     /// Get best bid price

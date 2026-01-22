@@ -33,7 +33,10 @@ pub struct OrderUpdateInfo {
     pub trader: String,
     pub order_id: String,
     pub symbol: String,
-    pub status: String, // "open", "partial", "filled"
+    pub side: String,       // "buy" or "sell"
+    pub price: i64,         // Order price (cents)
+    pub original_size: i64, // Original order size (satoshis)
+    pub status: String,     // "open", "partial", "filled", "cancelled"
     pub filled: i64,
     pub remaining: i64,
 }
@@ -260,6 +263,27 @@ impl AppState {
             .get(symbol)
             .map(|h| h.iter().rev().take(limit).collect())
             .unwrap_or_default()
+    }
+
+    /// Get user's fills across all symbols (where user is taker or maker)
+    pub fn get_user_fills(&self, address: &str, limit: usize) -> Vec<&Fill> {
+        let address_lower = address.to_lowercase();
+        let mut fills: Vec<&Fill> = Vec::new();
+
+        for trade_history in self.trade_history.values() {
+            for fill in trade_history.iter() {
+                if fill.taker.to_lowercase() == address_lower
+                    || fill.maker.to_lowercase() == address_lower
+                {
+                    fills.push(fill);
+                }
+            }
+        }
+
+        // Sort by timestamp descending (most recent first)
+        fills.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        fills.truncate(limit);
+        fills
     }
 
     /// Get candles for a symbol and interval
