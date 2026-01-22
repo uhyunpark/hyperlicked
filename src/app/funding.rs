@@ -96,6 +96,62 @@ pub fn sample_premium(book: &OrderBook, index_price: Price) -> i64 {
     premium_bps
 }
 
+/// Sample premium with oracle weighting for manipulation resistance
+///
+/// Blends oracle-derived premium with mid-price premium to reduce
+/// susceptibility to orderbook manipulation with thin liquidity.
+///
+/// Formula:
+/// ```text
+/// blended_premium = (oracle_weight * oracle_premium + (10000 - oracle_weight) * mid_premium) / 10000
+/// ```
+///
+/// Parameters:
+/// - `book`: The orderbook for mid-price calculation
+/// - `index_price`: External index/oracle price
+/// - `oracle_price`: Oracle spot price (can be same as index_price if no separate oracle)
+/// - `oracle_weight_bps`: Weight for oracle premium in basis points (5000 = 50%)
+///
+/// Returns premium in basis points (100 = 1%)
+pub fn sample_premium_with_oracle(
+    book: &OrderBook,
+    index_price: Price,
+    oracle_price: Price,
+    oracle_weight_bps: i64,
+) -> i64 {
+    if index_price == 0 || oracle_price == 0 {
+        return 0;
+    }
+
+    // Clamp oracle weight to [0, 10000]
+    let weight = oracle_weight_bps.clamp(0, 10000);
+
+    // Get mid-price premium
+    let mid_premium = sample_premium(book, index_price);
+
+    // Calculate oracle-derived premium
+    // This is the premium if we used oracle price as the reference
+    // oracle_premium = (mark - oracle) / oracle * 10000
+    // where mark is derived from the orderbook
+    let best_bid = book.best_bid();
+    let best_ask = book.best_ask();
+
+    let oracle_premium = if best_bid.is_some() && best_ask.is_some() {
+        let bid = best_bid.unwrap();
+        let ask = best_ask.unwrap();
+        let mid_price = (bid + ask) / 2;
+        ((mid_price - oracle_price) * 10000) / oracle_price
+    } else {
+        0
+    };
+
+    // Blend: weighted average
+    // blended = (weight * oracle_premium + (10000 - weight) * mid_premium) / 10000
+    let blended = (weight * oracle_premium + (10000 - weight) * mid_premium) / 10000;
+
+    blended
+}
+
 /// Calculate funding rate from average premium
 ///
 /// Formula: funding_rate = avg_premium + clamp(interest - avg_premium, -50, 50)
@@ -337,5 +393,62 @@ mod tests {
 
         let empty: Vec<i64> = vec![];
         assert_eq!(average_premium(&empty), 0);
+    }
+
+    #[test]
+    fn test_oracle_weighted_premium_equal_weights() {
+        // bid=51000, ask=52000 -> mid=51500 (3% above 50k)
+        let book = make_orderbook_with_spread(5_100_000, 5_200_000);
+
+        // Index at $50k, oracle at $50k
+        // Mid premium = (51500 - 50000) / 50000 * 10000 = 300 bps (3%)
+        let mid_premium = sample_premium(&book, 5_000_000);
+        assert_eq!(mid_premium, 300);
+
+        // With oracle weight = 5000 (50%), oracle = index = $50k
+        // Both give same premium, so blended should equal mid_premium
+        let blended = sample_premium_with_oracle(&book, 5_000_000, 5_000_000, 5000);
+        assert_eq!(blended, 300);
+    }
+
+    #[test]
+    fn test_oracle_weighted_premium_different_oracle() {
+        // bid=51000, ask=52000 -> mid=51500
+        let book = make_orderbook_with_spread(5_100_000, 5_200_000);
+
+        // Index at $50k (for mid_premium reference)
+        // Oracle at $51k (market already priced in some movement)
+        // Mid premium (vs index): (51500 - 50000) / 50000 * 10000 = 300 bps
+        // Oracle premium (vs oracle): (51500 - 51000) / 51000 * 10000 ≈ 98 bps
+
+        // With 50% oracle weight: (50% * 98 + 50% * 300) / 100 ≈ 199 bps
+        let blended = sample_premium_with_oracle(&book, 5_000_000, 5_100_000, 5000);
+        // Due to integer math, should be close to 199
+        assert!(blended > 150 && blended < 250, "Expected ~199, got {}", blended);
+    }
+
+    #[test]
+    fn test_oracle_weighted_premium_full_oracle() {
+        // bid=51000, ask=52000 -> mid=51500
+        let book = make_orderbook_with_spread(5_100_000, 5_200_000);
+
+        // 100% oracle weight - should only use oracle price
+        let blended = sample_premium_with_oracle(&book, 5_000_000, 5_100_000, 10000);
+
+        // Oracle premium = (51500 - 51000) / 51000 * 10000 ≈ 98 bps
+        assert!(blended > 80 && blended < 120, "Expected ~98, got {}", blended);
+    }
+
+    #[test]
+    fn test_oracle_weighted_premium_zero_oracle() {
+        // bid=51000, ask=52000 -> mid=51500
+        let book = make_orderbook_with_spread(5_100_000, 5_200_000);
+
+        // 0% oracle weight - should only use mid price
+        let blended = sample_premium_with_oracle(&book, 5_000_000, 5_100_000, 0);
+
+        // Should equal regular mid premium
+        let mid_premium = sample_premium(&book, 5_000_000);
+        assert_eq!(blended, mid_premium);
     }
 }
