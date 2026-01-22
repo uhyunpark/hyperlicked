@@ -57,6 +57,9 @@ interface WSPositionUpdate {
   entryPrice: number
   markPrice: number
   unrealizedPnl: number
+  liquidationPrice: number
+  margin: number
+  leverage: number
   timestamp: number
 }
 
@@ -84,6 +87,44 @@ interface WSLiquidated {
   price: number
   pnl: number
   wasLong: boolean
+  timestamp: number
+}
+
+// Trigger order events
+interface WSTriggerOrderPlaced {
+  type: 'triggerOrderPlaced'
+  id: string
+  symbol: string
+  triggerType: string  // "sl" or "tp"
+  triggerPrice: number
+  size: number
+  timestamp: number
+}
+
+interface WSTriggerOrderTriggered {
+  type: 'triggerOrderTriggered'
+  id: string
+  symbol: string
+  orderId: string
+  timestamp: number
+}
+
+interface WSTriggerOrderCancelled {
+  type: 'triggerOrderCancelled'
+  id: string
+  symbol: string
+  timestamp: number
+}
+
+interface WSOrderClosed {
+  type: 'orderClosed'
+  orderId: string
+  symbol: string
+  side: string
+  price: number
+  size: number
+  filled: number
+  status: string  // "filled" or "cancelled"
   timestamp: number
 }
 
@@ -123,7 +164,7 @@ export function useWebSocket() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
   const subscribedAddressRef = useRef<string | null>(null)
 
-  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions, triggerBalanceRefresh, updateMarkPrice, updateAssetCtx } = useTradingStore()
+  const { updateOrderbook, addTrade, setWsConnected, setOpenOrders, setPositions, addUserFill, clearUserFills, triggerBalanceRefresh, updateMarkPrice, updateAssetCtx, addTriggerOrder, removeTriggerOrder, clearTriggerOrders, setTriggerOrders } = useTradingStore()
   const { isConnected: walletConnected, address } = useWalletStore()
 
   // Fetch user data (orders and positions)
@@ -240,7 +281,19 @@ export function useWebSocket() {
             }
 
             case 'userFill': {
-              // User's order was filled - refetch data
+              // User's order was filled - add to store and refetch data
+              const fill = data as WSUserFill
+              addUserFill({
+                id: fill.orderId,
+                symbol: fill.symbol,
+                side: fill.side as 'buy' | 'sell',
+                price: convertPrice(fill.price),
+                size: convertSize(fill.size),
+                fee: convertPrice(fill.fee),
+                isMaker: fill.isMaker,
+                timestamp: fill.timestamp,
+              })
+              // Also refetch positions/orders to update state
               if (subscribedAddressRef.current) {
                 fetchUserData(subscribedAddressRef.current)
               }
@@ -256,10 +309,34 @@ export function useWebSocket() {
             }
 
             case 'positionUpdate': {
-              // Position changed - refetch positions
-              if (subscribedAddressRef.current) {
-                fetchUserData(subscribedAddressRef.current)
+              // Position changed - update directly from event
+              const pos = data as WSPositionUpdate
+              const updatedPosition = {
+                symbol: pos.symbol,
+                size: convertSize(pos.size),
+                entryPrice: convertPrice(pos.entryPrice),
+                markPrice: convertPrice(pos.markPrice),
+                liquidationPrice: convertPrice(pos.liquidationPrice),
+                unrealizedPnl: convertPrice(pos.unrealizedPnl),
+                margin: convertPrice(pos.margin),
+                leverage: pos.leverage,
               }
+              // Update or add position in store
+              useTradingStore.setState((state) => {
+                const existingIdx = state.positions.findIndex(p => p.symbol === pos.symbol)
+                if (updatedPosition.size === 0) {
+                  // Position closed - remove it
+                  return { positions: state.positions.filter(p => p.symbol !== pos.symbol) }
+                } else if (existingIdx >= 0) {
+                  // Update existing position
+                  const newPositions = [...state.positions]
+                  newPositions[existingIdx] = updatedPosition
+                  return { positions: newPositions }
+                } else {
+                  // Add new position
+                  return { positions: [...state.positions, updatedPosition] }
+                }
+              })
               break
             }
 
@@ -327,6 +404,49 @@ export function useWebSocket() {
                 dayNotionalVolume: convertPrice(ctx.dayNotionalVolume),
                 nextFundingTime: ctx.nextFundingTime,
               })
+              break
+            }
+
+            case 'triggerOrderPlaced': {
+              const trigger = data as WSTriggerOrderPlaced
+              console.log('[ws] Trigger order placed:', trigger.id, trigger.triggerType)
+              addTriggerOrder({
+                id: trigger.id,
+                symbol: trigger.symbol,
+                triggerType: trigger.triggerType as 'sl' | 'tp',
+                side: trigger.triggerType === 'sl' ? 'sell' : 'buy', // SL/TP always close position
+                triggerPrice: convertPrice(trigger.triggerPrice),
+                size: convertSize(trigger.size),
+                status: 'pending',
+                timestamp: trigger.timestamp,
+              })
+              break
+            }
+
+            case 'triggerOrderTriggered': {
+              const trigger = data as WSTriggerOrderTriggered
+              console.log('[ws] Trigger order triggered:', trigger.id, '-> order', trigger.orderId)
+              removeTriggerOrder(trigger.id)
+              toast.success('Trigger Activated', `${trigger.symbol} TP/SL triggered`)
+              // Refetch positions after trigger execution
+              if (subscribedAddressRef.current) {
+                fetchUserData(subscribedAddressRef.current)
+              }
+              break
+            }
+
+            case 'triggerOrderCancelled': {
+              const trigger = data as WSTriggerOrderCancelled
+              console.log('[ws] Trigger order cancelled:', trigger.id)
+              removeTriggerOrder(trigger.id)
+              break
+            }
+
+            case 'orderClosed': {
+              // Order fully filled or cancelled - log for debugging
+              const order = data as WSOrderClosed
+              console.log(`[ws] Order closed: ${order.orderId} - ${order.status}`)
+              // Position/order data will be updated via other events
               break
             }
 
@@ -398,6 +518,8 @@ export function useWebSocket() {
       subscribedAddressRef.current = null
       setOpenOrders([])
       setPositions([])
+      clearUserFills()
+      clearTriggerOrders()
     }
   }, [walletConnected, address, setOpenOrders, setPositions])
 

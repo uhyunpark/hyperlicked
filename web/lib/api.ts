@@ -293,6 +293,27 @@ export async function getTrades(symbol: string, limit: number = 100): Promise<Ap
 }
 
 // ==============================
+// User Fills API
+// ==============================
+
+export interface ApiFill {
+  id: string
+  symbol: string
+  side: string     // "buy" or "sell"
+  price: number    // cents
+  size: number     // satoshis
+  fee: number      // cents
+  isMaker: boolean
+  timestamp: number
+}
+
+export async function getUserFills(address: string, limit: number = 100): Promise<ApiFill[]> {
+  const res = await fetch(`${API_BASE}/accounts/${address}/fills?limit=${limit}`)
+  if (!res.ok) throw new Error(`Failed to fetch fills: ${res.statusText}`)
+  return res.json()
+}
+
+// ==============================
 // Candle (OHLCV) API
 // ==============================
 

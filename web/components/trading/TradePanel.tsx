@@ -18,8 +18,18 @@ interface AccountData {
 }
 
 export function TradePanel() {
-  const { selectedSymbol, currentPrice, balanceRefreshTrigger } = useTradingStore()
+  const { selectedSymbol, currentPrice, balanceRefreshTrigger, positions, markPrices } = useTradingStore()
   const wallet = useWallet()
+
+  // Calculate realtime unrealized PnL from positions and mark prices
+  const getRealtimeUnrealizedPnL = () => {
+    if (positions.length === 0) return 0
+    return positions.reduce((sum, pos) => {
+      const currentMarkPrice = markPrices[pos.symbol] ?? pos.markPrice
+      const pnl = (currentMarkPrice - pos.entryPrice) * pos.size
+      return sum + pnl
+    }, 0)
+  }
   const [side, setSide] = useState<Side>('buy')
   const [orderType, setOrderType] = useState<OrderType>('limit')
   const [tif, setTif] = useState<TimeInForce>('gtc')
@@ -620,7 +630,12 @@ export function TradePanel() {
               <span className="text-sm text-text-muted">Loading...</span>
             ) : (
               <span className="font-mono text-lg font-semibold text-text-primary">
-                ${account?.totalEquity.toLocaleString('en-US', { minimumFractionDigits: 2 }) ?? '--'}
+                {(() => {
+                  // Calculate realtime equity: balance + unrealized PnL
+                  const realtimePnL = positions.length > 0 ? getRealtimeUnrealizedPnL() : (account?.unrealizedPnL ?? 0)
+                  const realtimeEquity = (account?.balance ?? 0) + realtimePnL
+                  return `$${realtimeEquity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+                })()}
               </span>
             )}
           </div>
@@ -644,9 +659,15 @@ export function TradePanel() {
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-text-muted">Unrealized PnL</span>
-                  <span className={`font-mono ${account.unrealizedPnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
-                    {account.unrealizedPnL >= 0 ? '+' : ''}${account.unrealizedPnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </span>
+                  {(() => {
+                    // Use realtime PnL if positions exist, otherwise use API value
+                    const realtimePnL = positions.length > 0 ? getRealtimeUnrealizedPnL() : account.unrealizedPnL
+                    return (
+                      <span className={`font-mono ${realtimePnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
+                        {realtimePnL >= 0 ? '+' : ''}${realtimePnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      </span>
+                    )
+                  })()}
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-text-muted">Cross Margin Ratio</span>

@@ -39,6 +39,17 @@ export interface Trade {
   timestamp: number
 }
 
+export interface UserFill {
+  id: string
+  symbol: string
+  side: Side
+  price: number
+  size: number
+  fee: number
+  isMaker: boolean
+  timestamp: number
+}
+
 export interface Position {
   symbol: string
   size: number // positive = long, negative = short

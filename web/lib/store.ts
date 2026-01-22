@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { OrderbookData, Trade, Position, Order } from './types'
+import type { OrderbookData, Trade, Position, Order, UserFill, TriggerOrder } from './types'
 
 // =============================================================================
 // Wallet Store (shared across all components)
@@ -97,6 +97,8 @@ interface TradingState {
   // User data
   positions: Position[]
   openOrders: Order[]
+  userFills: UserFill[]
+  triggerOrders: TriggerOrder[]  // Trigger orders (TP/SL)
 
   // UI state
   selectedSymbol: string
@@ -108,11 +110,19 @@ interface TradingState {
   addTrade: (trade: Trade) => void
   setPositions: (positions: Position[]) => void
   setOpenOrders: (orders: Order[]) => void
+  setUserFills: (fills: UserFill[]) => void
+  addUserFill: (fill: UserFill) => void
+  clearUserFills: () => void
   setSelectedSymbol: (symbol: string) => void
   setWsConnected: (connected: boolean) => void
   triggerBalanceRefresh: () => void
   updateMarkPrice: (symbol: string, price: number) => void
   updateAssetCtx: (ctx: AssetCtx) => void
+  // Trigger order actions
+  setTriggerOrders: (orders: TriggerOrder[]) => void
+  addTriggerOrder: (order: TriggerOrder) => void
+  removeTriggerOrder: (id: string) => void
+  clearTriggerOrders: () => void
 }
 
 export const useTradingStore = create<TradingState>((set) => ({
@@ -129,6 +139,8 @@ export const useTradingStore = create<TradingState>((set) => ({
   assetCtx: null,
   positions: [],
   openOrders: [],
+  userFills: [],
+  triggerOrders: [],
   selectedSymbol: 'BTC-USDT',
   isConnected: false,
   balanceRefreshTrigger: 0,
@@ -147,11 +159,29 @@ export const useTradingStore = create<TradingState>((set) => ({
 
   setPositions: (positions) => set({ positions }),
   setOpenOrders: (orders) => set({ openOrders: orders }),
+  setUserFills: (fills) => set({ userFills: fills }),
+  addUserFill: (fill) => set((state) => {
+    // Deduplicate by ID and prepend new fill
+    if (state.userFills.some(f => f.id === fill.id)) return state
+    return { userFills: [fill, ...state.userFills].slice(0, 100) } // Keep last 100 fills
+  }),
+  clearUserFills: () => set({ userFills: [] }),
   setSelectedSymbol: (symbol) => set({ selectedSymbol: symbol }),
   setWsConnected: (connected) => set({ isConnected: connected }),
   triggerBalanceRefresh: () => set((state) => ({ balanceRefreshTrigger: state.balanceRefreshTrigger + 1 })),
   updateMarkPrice: (symbol, price) => set((state) => ({
     markPrices: { ...state.markPrices, [symbol]: price }
   })),
-  updateAssetCtx: (ctx) => set({ assetCtx: ctx })
+  updateAssetCtx: (ctx) => set({ assetCtx: ctx }),
+  // Trigger order actions
+  setTriggerOrders: (orders) => set({ triggerOrders: orders }),
+  addTriggerOrder: (order) => set((state) => {
+    // Avoid duplicates
+    if (state.triggerOrders.some(o => o.id === order.id)) return state
+    return { triggerOrders: [...state.triggerOrders, order] }
+  }),
+  removeTriggerOrder: (id) => set((state) => ({
+    triggerOrders: state.triggerOrders.filter(o => o.id !== id)
+  })),
+  clearTriggerOrders: () => set({ triggerOrders: [] })
 }))

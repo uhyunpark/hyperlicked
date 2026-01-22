@@ -160,11 +160,12 @@ export function Orderbook() {
   const maxAskSize = Math.max(...asksWithTotal.map(a => a.size), 1)
   const maxSize = Math.max(maxBidSize, maxAskSize)
 
-  // Get spread
-  const bestBid = bidsWithTotal[0]?.price || 0
-  const bestAsk = asksWithTotal[0]?.price || 0
-  const spread = bestAsk - bestBid
-  const spreadPercent = ((spread / bestAsk) * 100) || 0
+  // Get spread - safely handle empty orderbook
+  const bestBid = bidsWithTotal[0]?.price ?? null
+  const bestAsk = asksWithTotal[0]?.price ?? null
+  const hasSpread = bestBid !== null && bestAsk !== null && bestBid > 0 && bestAsk > 0
+  const spread = hasSpread ? bestAsk - bestBid : 0
+  const spreadPercent = hasSpread && bestAsk > 0 ? (spread / bestAsk) * 100 : 0
 
   const handlePriceClick = (price: number) => {
     console.log('Selected price:', price)
@@ -236,12 +237,18 @@ export function Orderbook() {
 
             {/* Spread indicator */}
             <div className="border-y border-border bg-bg-tertiary px-3 py-1.5 text-center">
-              <div className="text-xs font-mono text-text-primary">
-                {bestAsk.toLocaleString()} ↔ {bestBid.toLocaleString()}
-              </div>
-              <div className="text-xs text-text-muted">
-                Spread: {spread.toFixed(2)} ({spreadPercent.toFixed(3)}%)
-              </div>
+              {hasSpread ? (
+                <>
+                  <div className="text-xs font-mono text-text-primary">
+                    {bestAsk!.toLocaleString()} ↔ {bestBid!.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Spread: {spread.toFixed(2)} ({spreadPercent.toFixed(3)}%)
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-text-muted">No orders</div>
+              )}
             </div>
 
             {/* Bids */}

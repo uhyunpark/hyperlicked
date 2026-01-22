@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { createChart, ColorType, IChartApi, CandlestickData, Time, CandlestickSeries } from 'lightweight-charts'
 import { useTradingStore } from '@/lib/store'
 import { getCandles, convertPrice, convertSize } from '@/lib/api'
+import { CandlestickAggregator, Interval } from '@/lib/candlestickAggregator'
 import type { CandleInterval } from '@/lib/api'
 
 export function Chart() {
@@ -11,34 +12,20 @@ export function Chart() {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<any>(null)
+  const aggregatorRef = useRef<CandlestickAggregator | null>(null)
   const [interval, setInterval] = useState<CandleInterval>('1m')
   const [loading, setLoading] = useState(true)
-  const lastCandleTimeRef = useRef<number>(0)
-
-  // Get interval in milliseconds
-  const getIntervalMs = (int: CandleInterval): number => {
-    const intervals: Record<CandleInterval, number> = {
-      '1m': 60 * 1000,
-      '5m': 5 * 60 * 1000,
-      '15m': 15 * 60 * 1000,
-      '1h': 60 * 60 * 1000,
-      '4h': 4 * 60 * 60 * 1000,
-      '1d': 24 * 60 * 60 * 1000,
-    }
-    return intervals[int]
-  }
-
-  // Get bucket time for a timestamp
-  const getBucketTime = (timestamp: number, int: CandleInterval): number => {
-    const intervalMs = getIntervalMs(int)
-    return Math.floor(timestamp / intervalMs) * intervalMs
-  }
+  const lastProcessedTradeRef = useRef<string | null>(null)
 
   // Fetch candles from API
   const fetchCandles = useCallback(async () => {
     try {
       setLoading(true)
       const candles = await getCandles(selectedSymbol, interval, 500)
+
+      // Create new aggregator for this interval
+      aggregatorRef.current = new CandlestickAggregator(interval as Interval)
+      lastProcessedTradeRef.current = null
 
       if (candleSeriesRef.current && candles.length > 0) {
         // Convert API candles to chart format
@@ -51,11 +38,6 @@ export function Chart() {
         }))
 
         candleSeriesRef.current.setData(chartData)
-
-        // Track the latest candle time for real-time updates
-        if (chartData.length > 0) {
-          lastCandleTimeRef.current = (chartData[chartData.length - 1].time as number) * 1000
-        }
       }
     } catch (error) {
       console.error('[chart] Failed to fetch candles:', error)
@@ -133,25 +115,38 @@ export function Chart() {
     fetchCandles()
   }, [fetchCandles])
 
-  // Update current candle with real-time trades
+  // Update current candle with real-time trades using the aggregator
   useEffect(() => {
-    if (!candleSeriesRef.current || trades.length === 0) return
+    if (!candleSeriesRef.current || !aggregatorRef.current || trades.length === 0) return
 
     const lastTrade = trades[0] // Most recent trade (trades are prepended)
-    const tradeTime = lastTrade.timestamp
-    const bucketTime = getBucketTime(tradeTime, interval)
-    const timeInSeconds = Math.floor(bucketTime / 1000) as Time
-    const price = lastTrade.price // Already in dollars from store
 
-    // Update the current candle
-    candleSeriesRef.current.update({
-      time: timeInSeconds,
-      open: price,
-      high: price,
-      low: price,
-      close: price,
-    })
-  }, [trades, interval])
+    // Skip if we already processed this trade
+    if (lastProcessedTradeRef.current === lastTrade.id) return
+    lastProcessedTradeRef.current = lastTrade.id
+
+    // Convert back to API units (cents/satoshis) for the aggregator
+    const apiTrade = {
+      price: Math.round(lastTrade.price * 100), // dollars to cents
+      size: Math.round(lastTrade.size * 100_000_000), // BTC to satoshis
+      timestamp: lastTrade.timestamp,
+      side: lastTrade.side,
+    }
+
+    // Add trade to aggregator - it handles OHLC properly
+    const candle = aggregatorRef.current.addTrade(apiTrade)
+
+    if (candle) {
+      // Update the chart with the properly aggregated candle
+      candleSeriesRef.current.update({
+        time: candle.time,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      })
+    }
+  }, [trades])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">

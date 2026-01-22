@@ -3,9 +3,10 @@
 import { useEffect, useState } from 'react'
 import { useWallet } from '@/lib/useWallet'
 import { useTradingStore } from '@/lib/store'
-import { getTrades, ApiTrade, convertPrice, convertSize } from '@/lib/api'
+import { getUserFills, ApiFill, convertPrice, convertSize } from '@/lib/api'
+import type { UserFill } from '@/lib/types'
 
-interface Trade {
+interface DisplayTrade {
   id: string
   timestamp: number
   symbol: string
@@ -14,7 +15,7 @@ interface Trade {
   size: number
   tradeValue: number
   fee: number
-  closedPnL: number | null
+  isMaker: boolean
 }
 
 // Format timestamp like Hyperliquid: "2025. 9. 20( 23H 18M 46S"
@@ -31,49 +32,59 @@ function formatTimestamp(timestamp: number) {
 
 export function TradeHistory() {
   const wallet = useWallet()
-  const { selectedSymbol } = useTradingStore()
-  const [trades, setTrades] = useState<Trade[]>([])
+  const { selectedSymbol, userFills, setUserFills } = useTradingStore()
   const [isLoading, setIsLoading] = useState(false)
+  const [initialLoadDone, setInitialLoadDone] = useState(false)
 
+  // Fetch initial fills on mount/wallet connect
   useEffect(() => {
     if (!wallet.isConnected || !wallet.address) {
-      setTrades([])
+      setInitialLoadDone(false)
       return
     }
 
-    const fetchTrades = async () => {
+    const address = wallet.address
+
+    const fetchInitialFills = async () => {
       setIsLoading(true)
       try {
-        // Fetch recent market trades (user-specific trades API not yet available)
-        const data = await getTrades(selectedSymbol, 50)
-        const formatted: Trade[] = data.map((t: ApiTrade, i: number) => {
-          const price = convertPrice(t.price)
-          const size = convertSize(t.size)
-          return {
-            id: `${t.timestamp}-${i}`,
-            timestamp: t.timestamp,
-            symbol: selectedSymbol,
-            side: t.side as 'buy' | 'sell',
-            price,
-            size,
-            tradeValue: price * size,
-            fee: 0, // Fee info not in API
-            closedPnL: null, // PnL info not in API
-          }
-        })
-        setTrades(formatted)
+        const data = await getUserFills(address, 100)
+        const formatted: UserFill[] = data.map((f: ApiFill) => ({
+          id: f.id,
+          symbol: f.symbol,
+          side: f.side as 'buy' | 'sell',
+          price: convertPrice(f.price),
+          size: convertSize(f.size),
+          fee: convertPrice(f.fee),
+          isMaker: f.isMaker,
+          timestamp: f.timestamp,
+        }))
+        setUserFills(formatted)
+        setInitialLoadDone(true)
       } catch (error) {
         console.error('[trade-history] Failed to fetch:', error)
-        setTrades([])
       } finally {
         setIsLoading(false)
       }
     }
 
-    fetchTrades()
-    const interval = setInterval(fetchTrades, 5000) // Refresh every 5s
-    return () => clearInterval(interval)
-  }, [wallet.isConnected, wallet.address, selectedSymbol])
+    fetchInitialFills()
+  }, [wallet.isConnected, wallet.address, setUserFills])
+
+  // Filter fills by selected symbol and convert to display format
+  const displayTrades: DisplayTrade[] = userFills
+    .filter(f => f.symbol === selectedSymbol)
+    .map(f => ({
+      id: f.id,
+      timestamp: f.timestamp,
+      symbol: f.symbol,
+      side: f.side,
+      price: f.price,
+      size: f.size,
+      tradeValue: f.price * f.size,
+      fee: f.fee,
+      isMaker: f.isMaker,
+    }))
 
   if (!wallet.isConnected) {
     return (
@@ -83,7 +94,7 @@ export function TradeHistory() {
     )
   }
 
-  if (isLoading) {
+  if (isLoading && !initialLoadDone) {
     return (
       <div className="flex h-full items-center justify-center text-text-muted">
         Loading trade history...
@@ -91,10 +102,10 @@ export function TradeHistory() {
     )
   }
 
-  if (trades.length === 0) {
+  if (displayTrades.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-text-muted">
-        No trade history
+        No trade history for {selectedSymbol}
       </div>
     )
   }
@@ -111,14 +122,12 @@ export function TradeHistory() {
             <th className="px-4 py-2 text-right font-medium">Size</th>
             <th className="px-4 py-2 text-right font-medium">Trade Value</th>
             <th className="px-4 py-2 text-right font-medium">Fee</th>
-            <th className="px-4 py-2 text-right font-medium">Closed PNL</th>
+            <th className="px-4 py-2 text-right font-medium">Role</th>
           </tr>
         </thead>
         <tbody>
-          {trades.map((trade) => {
+          {displayTrades.map((trade) => {
             const isBuy = trade.side === 'buy'
-            const hasPnL = trade.closedPnL !== null
-            const isProfitable = hasPnL && trade.closedPnL! > 0
 
             return (
               <tr
@@ -142,16 +151,8 @@ export function TradeHistory() {
                 <td className="px-4 py-2 text-right font-mono text-text-secondary">
                   {trade.fee.toFixed(2)} USDC
                 </td>
-                <td className={`px-4 py-2 text-right font-mono ${
-                  hasPnL
-                    ? isProfitable
-                      ? 'text-green-buy'
-                      : 'text-red-sell'
-                    : 'text-text-muted'
-                }`}>
-                  {hasPnL
-                    ? `${isProfitable ? '+' : ''}${trade.closedPnL!.toFixed(2)} USDC`
-                    : '-'}
+                <td className="px-4 py-2 text-right font-mono text-text-muted">
+                  {trade.isMaker ? 'Maker' : 'Taker'}
                 </td>
               </tr>
             )

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
@@ -14,47 +14,79 @@ import {
   getNonce,
   type ApiTriggerOrder
 } from '@/lib/api'
+import type { TriggerOrder } from '@/lib/types'
 
 interface PositionTriggers {
-  tp?: ApiTriggerOrder
-  sl?: ApiTriggerOrder
+  tp?: TriggerOrder
+  sl?: TriggerOrder
 }
 
 export function Positions() {
-  const { positions } = useTradingStore()
+  const { positions, markPrices, triggerOrders, setTriggerOrders } = useTradingStore()
   const wallet = useWallet()
-  const [triggersBySymbol, setTriggersBySymbol] = useState<Record<string, PositionTriggers>>({})
 
-  // Fetch trigger orders for this user
+  // Derive trigger orders by symbol from store
+  const triggersBySymbol = useMemo(() => {
+    const bySymbol: Record<string, PositionTriggers> = {}
+    for (const trigger of triggerOrders) {
+      if (trigger.status !== 'pending') continue
+      if (!bySymbol[trigger.symbol]) {
+        bySymbol[trigger.symbol] = {}
+      }
+      if (trigger.triggerType === 'tp') {
+        bySymbol[trigger.symbol].tp = trigger
+      } else if (trigger.triggerType === 'sl') {
+        bySymbol[trigger.symbol].sl = trigger
+      }
+    }
+    return bySymbol
+  }, [triggerOrders])
+
+  // Calculate unrealized PnL using realtime mark prices
+  const getRealtimePnL = (position: typeof positions[0]) => {
+    // Use realtime mark price if available, otherwise fallback to position's stored mark price
+    const currentMarkPrice = markPrices[position.symbol] ?? position.markPrice
+    // PnL = (markPrice - entryPrice) * size
+    return (currentMarkPrice - position.entryPrice) * position.size
+  }
+
+  // Get realtime mark price for a position
+  const getRealtimeMarkPrice = (position: typeof positions[0]) => {
+    return markPrices[position.symbol] ?? position.markPrice
+  }
+
+  // Fetch trigger orders as backup (30s interval instead of 5s)
   const fetchTriggerOrders = useCallback(async () => {
     if (!wallet.address) return
 
     try {
       const triggers = await getTriggerOrders(wallet.address)
-      const bySymbol: Record<string, PositionTriggers> = {}
-
-      for (const trigger of triggers) {
-        if (trigger.status !== 'pending') continue
-        if (!bySymbol[trigger.symbol]) {
-          bySymbol[trigger.symbol] = {}
-        }
-        if (trigger.triggerType === 'tp') {
-          bySymbol[trigger.symbol].tp = trigger
-        } else if (trigger.triggerType === 'sl') {
-          bySymbol[trigger.symbol].sl = trigger
-        }
-      }
-
-      setTriggersBySymbol(bySymbol)
+      // Convert API trigger orders to store format
+      const storeTriggers: TriggerOrder[] = triggers
+        .filter(t => t.status === 'pending')
+        .map(t => ({
+          id: t.id,
+          cloid: t.cloid,
+          symbol: t.symbol,
+          triggerType: t.triggerType as 'sl' | 'tp',
+          side: t.side as 'buy' | 'sell',
+          triggerPrice: convertPrice(t.triggerPrice),
+          size: convertPrice(t.size),
+          limitPrice: t.limitPrice ? convertPrice(t.limitPrice) : undefined,
+          status: t.status as 'pending' | 'triggered' | 'cancelled' | 'failed',
+          timestamp: t.timestamp,
+        }))
+      setTriggerOrders(storeTriggers)
     } catch (err) {
       console.error('[positions] Failed to fetch trigger orders:', err)
     }
-  }, [wallet.address])
+  }, [wallet.address, setTriggerOrders])
 
+  // Fetch on mount and as backup every 30s (primary updates come via WebSocket)
   useEffect(() => {
     if (!wallet.address) return
     fetchTriggerOrders()
-    const interval = setInterval(fetchTriggerOrders, 5000)
+    const interval = setInterval(fetchTriggerOrders, 30000)  // 30s backup instead of 5s
     return () => clearInterval(interval)
   }, [wallet.address, fetchTriggerOrders])
 
@@ -127,7 +159,8 @@ export function Positions() {
     try {
       await cancelTriggerOrder(triggerOrderId, wallet.address)
       toast.success(`${type.toUpperCase()} Cancelled`, `Cancelled ${type === 'tp' ? 'Take Profit' : 'Stop Loss'} for ${symbol}`)
-      fetchTriggerOrders()
+      // WebSocket will handle the removal, but also update local state immediately
+      useTradingStore.getState().removeTriggerOrder(triggerOrderId)
     } catch (err: any) {
       toast.error('Cancel Failed', err.message)
     }
@@ -166,8 +199,10 @@ export function Positions() {
             <tbody>
               {positions.map((position) => {
                 const isLong = position.size > 0
-                const isProfitable = position.unrealizedPnl > 0
-                const pnlPercent = ((position.unrealizedPnl / position.margin) * 100)
+                const realtimePnL = getRealtimePnL(position)
+                const realtimeMarkPrice = getRealtimeMarkPrice(position)
+                const isProfitable = realtimePnL > 0
+                const pnlPercent = ((realtimePnL / position.margin) * 100)
                 const triggers = triggersBySymbol[position.symbol] || {}
 
                 return (
@@ -186,7 +221,7 @@ export function Positions() {
                       ${position.entryPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
-                      ${position.markPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      ${realtimeMarkPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-red-sell">
                       ${position.liquidationPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
@@ -196,7 +231,7 @@ export function Positions() {
                       {triggers.tp ? (
                         <div className="flex items-center justify-end gap-1">
                           <span className="font-mono text-green-buy">
-                            ${convertPrice(triggers.tp.triggerPrice).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                            ${triggers.tp.triggerPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                           </span>
                           <button
                             onClick={() => handleCancelTrigger(triggers.tp!.id, position.symbol, 'tp')}
@@ -215,7 +250,7 @@ export function Positions() {
                       {triggers.sl ? (
                         <div className="flex items-center justify-end gap-1">
                           <span className="font-mono text-red-sell">
-                            ${convertPrice(triggers.sl.triggerPrice).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                            ${triggers.sl.triggerPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                           </span>
                           <button
                             onClick={() => handleCancelTrigger(triggers.sl!.id, position.symbol, 'sl')}
@@ -230,14 +265,14 @@ export function Positions() {
                       )}
                     </td>
                     <td className={`px-4 py-2 text-right font-mono font-semibold ${isProfitable ? 'text-green-buy' : 'text-red-sell'}`}>
-                      {isProfitable ? '+' : ''}${position.unrealizedPnl.toFixed(2)}
+                      {isProfitable ? '+' : ''}${realtimePnL.toFixed(2)}
                       <div className="text-xs">
                         ({isProfitable ? '+' : ''}{pnlPercent.toFixed(2)}%)
                       </div>
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button
-                        onClick={() => handleClose(position.symbol, position.size, position.markPrice)}
+                        onClick={() => handleClose(position.symbol, position.size, realtimeMarkPrice)}
                         className="rounded border border-accent/30 bg-accent/10 px-2 py-1 text-accent transition-colors hover:bg-accent/20"
                       >
                         Close
@@ -252,18 +287,21 @@ export function Positions() {
       </div>
 
       {/* Summary */}
-      {positions.length > 0 && (
-        <div className="border-t border-border bg-bg-primary px-4 py-2">
-          <div className="flex justify-between text-xs">
-            <span className="text-text-muted">Total Unrealized PnL:</span>
-            <span className={`font-mono font-semibold ${
-              positions.reduce((sum, p) => sum + p.unrealizedPnl, 0) > 0 ? 'text-green-buy' : 'text-red-sell'
-            }`}>
-              ${positions.reduce((sum, p) => sum + p.unrealizedPnl, 0).toFixed(2)}
-            </span>
+      {positions.length > 0 && (() => {
+        const totalPnL = positions.reduce((sum, p) => sum + getRealtimePnL(p), 0)
+        return (
+          <div className="border-t border-border bg-bg-primary px-4 py-2">
+            <div className="flex justify-between text-xs">
+              <span className="text-text-muted">Total Unrealized PnL:</span>
+              <span className={`font-mono font-semibold ${
+                totalPnL > 0 ? 'text-green-buy' : 'text-red-sell'
+              }`}>
+                ${totalPnL.toFixed(2)}
+              </span>
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
