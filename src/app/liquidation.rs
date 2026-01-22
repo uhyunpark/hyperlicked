@@ -2,12 +2,18 @@
 //!
 //! Checks accounts after each block and liquidates underwater positions.
 //! Proceeds go to the insurance fund.
+//!
+//! ## Event-Driven Mode
+//!
+//! Use `check_and_liquidate_from_queue` with a `LiquidationQueue` for
+//! O(k) checks per block instead of O(n) where k << n.
 
 use std::collections::HashMap;
 
 use crate::types::Price;
 
 use super::accounts::AccountManager;
+use super::liquidation_queue::LiquidationQueue;
 use super::state::MAINTENANCE_MARGIN_BPS;
 use super::Symbol;
 
@@ -69,6 +75,56 @@ pub fn check_and_liquidate(
             count = results.len(),
             total_pnl,
             "Liquidations processed"
+        );
+    }
+
+    results
+}
+
+/// Event-driven liquidation: check only accounts from the queue
+///
+/// This is more efficient than `check_and_liquidate` because it only
+/// checks accounts that the queue has identified as potentially at risk.
+///
+/// Returns list of liquidations performed and updates the queue.
+pub fn check_and_liquidate_from_queue(
+    accounts: &mut AccountManager,
+    mark_prices: &HashMap<Symbol, Price>,
+    queue: &mut LiquidationQueue,
+) -> Vec<LiquidationResult> {
+    let mut results = Vec::new();
+
+    // Get accounts to check this block (ordered by risk)
+    let addresses_to_check = queue.get_accounts_to_check();
+
+    for address in addresses_to_check {
+        // Double-check if actually liquidatable (prices may have changed)
+        let is_liquidatable = accounts
+            .get(&address)
+            .map(|a| a.is_liquidatable(mark_prices, MAINTENANCE_MARGIN_BPS))
+            .unwrap_or(false);
+
+        if is_liquidatable {
+            let liquidations = liquidate_account(accounts, &address, mark_prices);
+
+            // Remove liquidated account from queue
+            if !liquidations.is_empty() {
+                queue.remove_account(&address);
+            }
+
+            results.extend(liquidations);
+        } else {
+            // Account is healthy now, re-add with updated health
+            queue.update_account(&address, accounts, mark_prices);
+        }
+    }
+
+    if !results.is_empty() {
+        let total_pnl: i64 = results.iter().map(|r| r.pnl).sum();
+        tracing::info!(
+            count = results.len(),
+            total_pnl,
+            "Liquidations processed (event-driven)"
         );
     }
 
