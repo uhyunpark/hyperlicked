@@ -1,9 +1,7 @@
-'use client'
-
 /**
- * WebSocket Hook - Real-time data integration for trading UI
+ * WebSocket Module - Real-time data integration
  *
- * This module is split into three focused parts:
+ * This module is split into focused parts:
  * - types.ts: TypeScript interfaces for all WebSocket messages
  * - handlers.ts: Message handlers for each event type
  * - useWebSocketConnection.ts: Connection lifecycle and reconnect logic
@@ -13,5 +11,5 @@
  * @see lib/websocket/useWebSocketConnection.ts
  */
 
-// Re-export the main hook from the websocket module
-export { useWebSocketConnection as useWebSocket } from './websocket'
+export { useWebSocketConnection } from './useWebSocketConnection'
+export * from './types'

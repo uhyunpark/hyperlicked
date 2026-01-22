@@ -6,6 +6,7 @@ import { Orderbook } from '@/components/trading/Orderbook'
 import { Chart } from '@/components/trading/Chart'
 import { TradePanel } from '@/components/trading/TradePanel'
 import { BottomTabs } from '@/components/trading/BottomTabs'
+import { ErrorBoundary, SectionErrorFallback } from '@/components/ui/ErrorBoundary'
 import { useWebSocket } from '@/lib/useWebSocket'
 import { useTradingStore } from '@/lib/store'
 
@@ -85,14 +86,18 @@ export default function TradingPage() {
       )}
 
       {/* Header */}
-      <Header />
+      <ErrorBoundary fallback={<SectionErrorFallback title="Header" />}>
+        <Header />
+      </ErrorBoundary>
 
       {/* Main trading area */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Chart + Bottom Tabs (dominant area) */}
         <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden">
           <div className="min-h-0 flex-1 border-b border-border">
-            <Chart />
+            <ErrorBoundary fallback={<SectionErrorFallback title="Chart" />}>
+              <Chart />
+            </ErrorBoundary>
           </div>
 
           {/* Resizable Bottom tabs */}
@@ -106,18 +111,24 @@ export default function TradingPage() {
             >
               <div className="h-0.5 w-12 rounded-full bg-text-muted/50" />
             </div>
-            <BottomTabs />
+            <ErrorBoundary fallback={<SectionErrorFallback title="Orders & Positions" />}>
+              <BottomTabs />
+            </ErrorBoundary>
           </div>
         </div>
 
         {/* Center-Right: Orderbook */}
         <div className="w-72 border-l border-border">
-          <Orderbook />
+          <ErrorBoundary fallback={<SectionErrorFallback title="Orderbook" />}>
+            <Orderbook />
+          </ErrorBoundary>
         </div>
 
         {/* Far Right: Trade Panel */}
         <div className="w-80 border-l border-border">
-          <TradePanel />
+          <ErrorBoundary fallback={<SectionErrorFallback title="Trade Panel" />}>
+            <TradePanel />
+          </ErrorBoundary>
         </div>
       </div>
     </div>

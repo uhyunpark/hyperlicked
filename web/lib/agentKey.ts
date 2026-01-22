@@ -3,6 +3,35 @@
  *
  * Allows users to sign once (delegation) and then trade without MetaMask popups.
  * Agent keys are ephemeral, stored in localStorage, and expire after 7 days.
+ *
+ * ## Security Considerations
+ *
+ * **WARNING: Agent keys are stored UNENCRYPTED in localStorage.**
+ *
+ * This is an intentional trade-off for UX simplicity with the following mitigations:
+ *
+ * ### Risk Assessment
+ * - XSS attacks could steal the agent key private key from localStorage
+ * - Stolen keys could be used to place unauthorized trades
+ *
+ * ### Mitigations
+ * 1. **Limited scope**: Agent keys can ONLY sign orders - they cannot:
+ *    - Withdraw funds
+ *    - Transfer assets
+ *    - Modify account settings
+ * 2. **Short lifespan**: Keys expire after 7 days (configurable)
+ * 3. **Revocable**: Users can revoke at any time via "Disable Trading"
+ * 4. **Backend verification**: All orders must have valid delegation on file
+ * 5. **Nonce protection**: Each order requires a fresh nonce (prevents replay)
+ *
+ * ### Production Recommendations
+ * For production deployments with higher security requirements, consider:
+ * - Encrypting the private key with a user-provided password
+ * - Using IndexedDB with encryption (e.g., Web Crypto API)
+ * - Implementing session-based storage (cleared on browser close)
+ * - Adding IP-based restrictions on the backend
+ *
+ * @see https://eips.ethereum.org/EIPS/eip-712 for EIP-712 signed delegation
  */
 
 import { Wallet, HDNodeWallet } from 'ethers'
