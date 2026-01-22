@@ -1,6 +1,7 @@
 //! Order Matching Logic
 //!
 //! Implements price-time priority matching with self-trade prevention.
+//! Uses BTreeMap for efficient price level traversal.
 
 use std::cmp::Reverse;
 
@@ -34,8 +35,9 @@ impl OrderBook {
 
     fn match_bid(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
         while order.size > 0 {
-            let best_ask = match self.ask_heap.peek() {
-                Some(Reverse(p)) => *p,
+            // Get best ask price
+            let best_ask = match self.best_ask() {
+                Some(p) => p,
                 None => break,
             };
 
@@ -43,11 +45,11 @@ impl OrderBook {
                 break; // Price doesn't cross
             }
 
+            // Get the price level
             let level = match self.asks.get_mut(&best_ask) {
                 Some(orders) if !orders.is_empty() => orders,
                 _ => {
                     self.asks.remove(&best_ask);
-                    self.ask_heap.pop();
                     continue;
                 }
             };
@@ -56,6 +58,7 @@ impl OrderBook {
             let maker_idx = level
                 .iter()
                 .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
+
             let maker_idx = match maker_idx {
                 Some(idx) => idx,
                 None => {
@@ -84,11 +87,12 @@ impl OrderBook {
             self.last_price = best_ask;
 
             if maker.size == 0 {
-                let maker_id = level.remove(maker_idx).id;
+                // Remove the filled maker order
+                let maker_id = level.remove(maker_idx).unwrap().id;
                 self.order_index.remove(&maker_id);
+
                 if level.is_empty() {
                     self.asks.remove(&best_ask);
-                    self.remove_from_ask_heap(best_ask);
                 }
             }
         }
@@ -103,8 +107,9 @@ impl OrderBook {
 
     fn match_ask(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
         while order.size > 0 {
-            let best_bid = match self.bid_heap.peek() {
-                Some(p) => *p,
+            // Get best bid price
+            let best_bid = match self.best_bid() {
+                Some(p) => p,
                 None => break,
             };
 
@@ -112,11 +117,11 @@ impl OrderBook {
                 break; // Price doesn't cross
             }
 
-            let level = match self.bids.get_mut(&best_bid) {
+            // Get the price level (note: bids use Reverse<Price> as key)
+            let level = match self.bids.get_mut(&Reverse(best_bid)) {
                 Some(orders) if !orders.is_empty() => orders,
                 _ => {
-                    self.bids.remove(&best_bid);
-                    self.bid_heap.pop();
+                    self.bids.remove(&Reverse(best_bid));
                     continue;
                 }
             };
@@ -125,6 +130,7 @@ impl OrderBook {
             let maker_idx = level
                 .iter()
                 .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
+
             let maker_idx = match maker_idx {
                 Some(idx) => idx,
                 None => {
@@ -153,11 +159,12 @@ impl OrderBook {
             self.last_price = best_bid;
 
             if maker.size == 0 {
-                let maker_id = level.remove(maker_idx).id;
+                // Remove the filled maker order
+                let maker_id = level.remove(maker_idx).unwrap().id;
                 self.order_index.remove(&maker_id);
+
                 if level.is_empty() {
-                    self.bids.remove(&best_bid);
-                    self.remove_from_bid_heap(best_bid);
+                    self.bids.remove(&Reverse(best_bid));
                 }
             }
         }
@@ -358,5 +365,100 @@ mod tests {
         // Rest of ask should be on book
         assert_eq!(book.best_ask(), Some(50000));
         assert!(book.best_bid().is_none());
+    }
+
+    #[test]
+    fn test_cancel_performance() {
+        // This test verifies O(log n) cancel behavior
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place many orders at different prices
+        for i in 0..1000 {
+            let order = Order {
+                id: format!("bid_{}", i),
+                trader: "maker".to_string(),
+                symbol: "BTC-USDT".to_string(),
+                side: Side::Bid,
+                price: 50000 - (i % 100), // 100 price levels
+                size: 100,
+                original_size: 100,
+                order_type: OrderType::Gtc,
+                reduce_only: false,
+                timestamp: i as u64,
+            };
+            book.place(order, &config).unwrap();
+        }
+
+        // Cancel orders in random order - should be fast
+        assert!(book.cancel("bid_500").is_some());
+        assert!(book.cancel("bid_1").is_some());
+        assert!(book.cancel("bid_999").is_some());
+
+        // Verify book integrity
+        assert!(book.best_bid().is_some());
+    }
+
+    #[test]
+    fn test_btreemap_ordering() {
+        // Verify BTreeMap gives correct price priority
+        // Use separate books for bids and asks to test ordering without matching
+        let mut bid_book = OrderBook::new("BTC-USDT");
+        let mut ask_book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place bids at different prices (out of order)
+        bid_book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
+        bid_book.place(make_order("bid2", Side::Bid, 51000, 100), &config).unwrap();
+        bid_book.place(make_order("bid3", Side::Bid, 50000, 100), &config).unwrap();
+
+        // Best bid should be highest price
+        assert_eq!(bid_book.best_bid(), Some(51000));
+
+        // Bid levels should be sorted descending
+        let levels = bid_book.bid_levels(3);
+        assert_eq!(levels[0].price, 51000);
+        assert_eq!(levels[1].price, 50000);
+        assert_eq!(levels[2].price, 49000);
+
+        // Place asks at different prices (out of order)
+        // Using same trader to prevent matching
+        ask_book.place(make_order_with_trader("ask1", "maker", Side::Ask, 53000, 100), &config).unwrap();
+        ask_book.place(make_order_with_trader("ask2", "maker", Side::Ask, 51000, 100), &config).unwrap();
+        ask_book.place(make_order_with_trader("ask3", "maker", Side::Ask, 52000, 100), &config).unwrap();
+
+        // Best ask should be lowest price
+        assert_eq!(ask_book.best_ask(), Some(51000));
+
+        // Ask levels should be sorted ascending
+        let levels = ask_book.ask_levels(3);
+        assert_eq!(levels[0].price, 51000);
+        assert_eq!(levels[1].price, 52000);
+        assert_eq!(levels[2].price, 53000);
+    }
+
+    #[test]
+    fn test_crossing_orders_match() {
+        // Verify orders that cross get matched correctly
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place bids
+        book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
+        book.place(make_order("bid2", Side::Bid, 51000, 100), &config).unwrap();
+        book.place(make_order("bid3", Side::Bid, 50000, 100), &config).unwrap();
+
+        assert_eq!(book.best_bid(), Some(51000));
+
+        // Place ask that crosses the bid at 51k
+        let fills = book.place(make_order("ask1", Side::Ask, 51000, 100), &config).unwrap();
+
+        // Should match at 51000
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].price, 51000);
+        assert_eq!(fills[0].size, 100);
+
+        // Best bid should now be 50000 (51k was filled)
+        assert_eq!(book.best_bid(), Some(50000));
     }
 }

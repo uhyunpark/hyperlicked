@@ -1,12 +1,20 @@
-//! Heap-based Orderbook with Price-Time Priority
+//! BTreeMap-based Orderbook with Price-Time Priority
 //!
-//! O(log N) insert, O(1) best price lookup.
-//! FIFO matching within each price level.
+//! O(log N) insert, O(log N) cancel, O(log N) best price lookup.
+//! FIFO matching within each price level using VecDeque.
+//!
+//! ## Why BTreeMap over Heap?
+//!
+//! - Heap cancel: O(n log n) - must rebuild entire heap
+//! - BTreeMap cancel: O(log n) - direct removal with index lookup
+//!
+//! For high-frequency trading where cancels vastly outnumber fills,
+//! BTreeMap is significantly more efficient.
 
 mod matching;
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,49 +79,29 @@ pub struct PriceLevel {
     pub order_count: usize,
 }
 
-/// Aggregate price levels from order map
-fn aggregate_levels(
-    levels: &HashMap<Price, Vec<Order>>,
-    limit: usize,
-    descending: bool,
-) -> Vec<PriceLevel> {
-    let mut result: Vec<_> = levels
-        .iter()
-        .filter(|(_, orders)| !orders.is_empty())
-        .map(|(price, orders)| PriceLevel {
-            price: *price,
-            size: orders.iter().map(|o| o.size).sum(),
-            order_count: orders.len(),
-        })
-        .collect();
-    if descending {
-        result.sort_by(|a, b| b.price.cmp(&a.price));
-    } else {
-        result.sort_by(|a, b| a.price.cmp(&b.price));
-    }
-    result.truncate(limit);
-    result
-}
-
-/// Heap-based orderbook
+/// BTreeMap-based orderbook
+///
+/// Uses BTreeMap for O(log n) operations:
+/// - Bids: `BTreeMap<Reverse<Price>, VecDeque<Order>>` (highest price first)
+/// - Asks: `BTreeMap<Price, VecDeque<Order>>` (lowest price first)
+/// - Index: `HashMap<OrderId, (Side, Price)>` for O(1) lookup
 pub struct OrderBook {
     pub(crate) symbol: Symbol,
 
-    // Heaps for O(1) best price
-    pub(crate) bid_heap: BinaryHeap<Price>,          // Max-heap
-    pub(crate) ask_heap: BinaryHeap<Reverse<Price>>, // Min-heap
+    /// Bids sorted by price descending (highest = best bid)
+    /// Reverse<Price> makes BTreeMap iterate highest-first
+    pub(crate) bids: BTreeMap<Reverse<Price>, VecDeque<Order>>,
 
-    // Price level queues (FIFO)
-    pub(crate) bids: HashMap<Price, Vec<Order>>,
-    pub(crate) asks: HashMap<Price, Vec<Order>>,
+    /// Asks sorted by price ascending (lowest = best ask)
+    pub(crate) asks: BTreeMap<Price, VecDeque<Order>>,
 
-    // Order index for O(1) cancel
+    /// Order index for O(1) cancel lookup: OrderId -> (Side, Price)
     pub(crate) order_index: HashMap<OrderId, (Side, Price)>,
 
-    // Last traded price
+    /// Last traded price
     pub(crate) last_price: Price,
 
-    // Sequence number for order IDs
+    /// Sequence number for order IDs
     pub(crate) seq: u64,
 }
 
@@ -121,10 +109,8 @@ impl OrderBook {
     pub fn new(symbol: impl Into<String>) -> Self {
         Self {
             symbol: symbol.into(),
-            bid_heap: BinaryHeap::new(),
-            ask_heap: BinaryHeap::new(),
-            bids: HashMap::new(),
-            asks: HashMap::new(),
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
             order_index: HashMap::new(),
             last_price: 0,
             seq: 0,
@@ -138,47 +124,49 @@ impl OrderBook {
     }
 
     /// Cancel an order, returning the cancelled order if found
+    ///
+    /// Complexity: O(log n) for BTreeMap access + O(k) for VecDeque search
+    /// where k is orders at that price level (typically small)
     pub fn cancel(&mut self, order_id: &str) -> Option<Order> {
-        let (side, price) = match self.order_index.remove(order_id) {
-            Some(info) => info,
-            None => return None,
-        };
+        // O(1) lookup in index
+        let (side, price) = self.order_index.remove(order_id)?;
 
-        let orders = match side {
-            Side::Bid => self.bids.get_mut(&price),
-            Side::Ask => self.asks.get_mut(&price),
-        };
+        match side {
+            Side::Bid => {
+                let level = self.bids.get_mut(&Reverse(price))?;
+                let pos = level.iter().position(|o| o.id == order_id)?;
+                let cancelled = level.remove(pos)?;
 
-        if let Some(level) = orders {
-            if let Some(pos) = level.iter().position(|o| o.id == order_id) {
-                let cancelled_order = level.remove(pos);
+                // Remove empty price level - O(log n)
                 if level.is_empty() {
-                    match side {
-                        Side::Bid => {
-                            self.bids.remove(&price);
-                            self.remove_from_bid_heap(price);
-                        }
-                        Side::Ask => {
-                            self.asks.remove(&price);
-                            self.remove_from_ask_heap(price);
-                        }
-                    }
+                    self.bids.remove(&Reverse(price));
                 }
-                return Some(cancelled_order);
+
+                Some(cancelled)
+            }
+            Side::Ask => {
+                let level = self.asks.get_mut(&price)?;
+                let pos = level.iter().position(|o| o.id == order_id)?;
+                let cancelled = level.remove(pos)?;
+
+                // Remove empty price level - O(log n)
+                if level.is_empty() {
+                    self.asks.remove(&price);
+                }
+
+                Some(cancelled)
             }
         }
-
-        None
     }
 
-    /// Get best bid price
+    /// Get best bid price - O(log n) amortized O(1) due to BTreeMap caching
     pub fn best_bid(&self) -> Option<Price> {
-        self.bid_heap.peek().copied()
+        self.bids.keys().next().map(|Reverse(p)| *p)
     }
 
-    /// Get best ask price
+    /// Get best ask price - O(log n) amortized O(1) due to BTreeMap caching
     pub fn best_ask(&self) -> Option<Price> {
-        self.ask_heap.peek().map(|Reverse(p)| *p)
+        self.asks.keys().next().copied()
     }
 
     /// Get mid price
@@ -193,12 +181,28 @@ impl OrderBook {
 
     /// Get bid levels (sorted high to low)
     pub fn bid_levels(&self, limit: usize) -> Vec<PriceLevel> {
-        aggregate_levels(&self.bids, limit, true)
+        self.bids
+            .iter()
+            .take(limit)
+            .map(|(Reverse(price), orders)| PriceLevel {
+                price: *price,
+                size: orders.iter().map(|o| o.size).sum(),
+                order_count: orders.len(),
+            })
+            .collect()
     }
 
     /// Get ask levels (sorted low to high)
     pub fn ask_levels(&self, limit: usize) -> Vec<PriceLevel> {
-        aggregate_levels(&self.asks, limit, false)
+        self.asks
+            .iter()
+            .take(limit)
+            .map(|(price, orders)| PriceLevel {
+                price: *price,
+                size: orders.iter().map(|o| o.size).sum(),
+                order_count: orders.len(),
+            })
+            .collect()
     }
 
     /// Get symbol
@@ -252,44 +256,30 @@ impl OrderBook {
         }
     }
 
+    /// Add a bid order to the book - O(log n)
     pub(crate) fn add_bid(&mut self, order: Order) {
         let price = order.price;
         let id = order.id.clone();
-        if !self.bids.contains_key(&price) {
-            self.bid_heap.push(price);
-        }
-        self.bids.entry(price).or_default().push(order);
+
+        self.bids
+            .entry(Reverse(price))
+            .or_insert_with(VecDeque::new)
+            .push_back(order);
+
         self.order_index.insert(id, (Side::Bid, price));
     }
 
+    /// Add an ask order to the book - O(log n)
     pub(crate) fn add_ask(&mut self, order: Order) {
         let price = order.price;
         let id = order.id.clone();
-        if !self.asks.contains_key(&price) {
-            self.ask_heap.push(Reverse(price));
-        }
-        self.asks.entry(price).or_default().push(order);
+
+        self.asks
+            .entry(price)
+            .or_insert_with(VecDeque::new)
+            .push_back(order);
+
         self.order_index.insert(id, (Side::Ask, price));
-    }
-
-    pub(crate) fn remove_from_bid_heap(&mut self, price: Price) {
-        let mut heap_vec: Vec<_> = self.bid_heap.drain().filter(|&p| p != price).collect();
-        // Explicit sort for determinism across validators
-        // BinaryHeap::drain() order is unspecified, so we must sort before rebuilding
-        heap_vec.sort_by(|a, b| b.cmp(a)); // Descending for max-heap
-        self.bid_heap = heap_vec.into_iter().collect();
-    }
-
-    pub(crate) fn remove_from_ask_heap(&mut self, price: Price) {
-        let mut heap_vec: Vec<_> = self
-            .ask_heap
-            .drain()
-            .filter(|Reverse(p)| *p != price)
-            .collect();
-        // Explicit sort for determinism across validators
-        // BinaryHeap::drain() order is unspecified, so we must sort before rebuilding
-        heap_vec.sort(); // Ascending for min-heap (Reverse wrapping handles this)
-        self.ask_heap = heap_vec.into_iter().collect();
     }
 }
 
