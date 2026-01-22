@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use crate::crypto::bls::{BlsPublicKey, BlsSecretKey, BlsSignature};
 use crate::types::{Certificate, NodeId, View, ViewChange, ViewChangeCertificate};
 
 /// Collects ViewChange messages and forms ViewChangeCertificates
@@ -22,6 +23,9 @@ pub struct ViewChangeCollector {
 
     /// Quorum size needed (2f+1)
     quorum: usize,
+
+    /// Validator public keys for signature verification (None = skip verification)
+    validator_pubkeys: Option<HashMap<NodeId, BlsPublicKey>>,
 }
 
 impl ViewChangeCollector {
@@ -30,6 +34,16 @@ impl ViewChangeCollector {
         Self {
             view_changes: HashMap::new(),
             quorum,
+            validator_pubkeys: None,
+        }
+    }
+
+    /// Create a new collector with signature verification enabled
+    pub fn with_validators(quorum: usize, validator_pubkeys: HashMap<NodeId, BlsPublicKey>) -> Self {
+        Self {
+            view_changes: HashMap::new(),
+            quorum,
+            validator_pubkeys: Some(validator_pubkeys),
         }
     }
 
@@ -40,8 +54,14 @@ impl ViewChangeCollector {
         let target_view = vc.to_view;
         let sender = vc.sender;
 
-        // Validate the view change
-        if let Err(e) = validate_view_change(&vc) {
+        // Validate the view change (with or without signature verification)
+        let validation_result = if let Some(ref pubkeys) = self.validator_pubkeys {
+            validate_view_change_with_sig(&vc, pubkeys)
+        } else {
+            validate_view_change(&vc)
+        };
+
+        if let Err(e) = validation_result {
             tracing::warn!(error = %e, "Invalid ViewChange received");
             return None;
         }
@@ -92,7 +112,7 @@ impl ViewChangeCollector {
     }
 }
 
-/// Validates a ViewChange message
+/// Validates a ViewChange message (basic structure only)
 pub fn validate_view_change(vc: &ViewChange) -> Result<(), ViewChangeError> {
     // Must be advancing to a higher view
     if vc.to_view <= vc.from_view {
@@ -111,9 +131,64 @@ pub fn validate_view_change(vc: &ViewChange) -> Result<(), ViewChangeError> {
         });
     }
 
-    // TODO: Verify signature when BLS is implemented
+    Ok(())
+}
+
+/// Validates a ViewChange message with BLS signature verification
+///
+/// Parameters:
+/// - `vc`: The ViewChange message to validate
+/// - `validator_pubkeys`: Map of NodeId -> BLS public key for signature verification
+pub fn validate_view_change_with_sig(
+    vc: &ViewChange,
+    validator_pubkeys: &HashMap<NodeId, BlsPublicKey>,
+) -> Result<(), ViewChangeError> {
+    // First do basic validation
+    validate_view_change(vc)?;
+
+    // Verify sender is a known validator
+    let pubkey = validator_pubkeys
+        .get(&vc.sender)
+        .ok_or(ViewChangeError::UnknownValidator(vc.sender))?;
+
+    // Verify BLS signature
+    if vc.signature.len() != 96 {
+        return Err(ViewChangeError::InvalidSignature);
+    }
+
+    let sig = BlsSignature::from_slice(&vc.signature)
+        .map_err(|_| ViewChangeError::InvalidSignature)?;
+
+    let signing_data = vc.signing_data();
+    if !pubkey.verify(&signing_data, &sig) {
+        return Err(ViewChangeError::InvalidSignature);
+    }
 
     Ok(())
+}
+
+/// Create a signed ViewChange message
+pub fn create_signed_view_change(
+    from_view: View,
+    to_view: View,
+    high_qc: Option<Certificate>,
+    sender: NodeId,
+    bls_sk: &BlsSecretKey,
+) -> ViewChange {
+    let mut vc = ViewChange {
+        from_view,
+        to_view,
+        high_qc,
+        sender,
+        signature: vec![0u8; 96], // Placeholder
+    };
+
+    // Sign the view change
+    let signing_data = vc.signing_data();
+    let sig = bls_sk.sign(&signing_data);
+    vc.signature = sig.to_bytes().to_vec();
+
+    vc
 }
 
 /// Errors that can occur during view change validation
@@ -130,6 +205,9 @@ pub enum ViewChangeError {
 
     #[error("sender mismatch")]
     SenderMismatch,
+
+    #[error("unknown validator: {0:?}")]
+    UnknownValidator(NodeId),
 }
 
 #[cfg(test)]
@@ -250,5 +328,98 @@ mod tests {
         assert_eq!(collector.count(6), 0);
         assert_eq!(collector.count(11), 0);
         assert_eq!(collector.count(16), 1);
+    }
+
+    #[test]
+    fn test_signed_view_change() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        // Generate validator key
+        let bls_sk = BlsSecretKey::from_seed(&[1u8; 32]);
+        let bls_pk = bls_sk.public_key();
+        let sender: NodeId = [1u8; 32];
+
+        // Create signed ViewChange
+        let vc = create_signed_view_change(5, 6, None, sender, &bls_sk);
+
+        // Build validator pubkeys map
+        let mut pubkeys = HashMap::new();
+        pubkeys.insert(sender, bls_pk);
+
+        // Should validate successfully
+        assert!(validate_view_change_with_sig(&vc, &pubkeys).is_ok());
+
+        // Tampered view change should fail - change to_view (still valid range but different)
+        let mut tampered = vc.clone();
+        tampered.to_view = 7; // Change to_view (still passes basic validation: 5 < 7 < 105)
+        assert!(matches!(
+            validate_view_change_with_sig(&tampered, &pubkeys),
+            Err(ViewChangeError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_unknown_validator_rejected() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        let bls_sk = BlsSecretKey::from_seed(&[1u8; 32]);
+        let sender: NodeId = [1u8; 32];
+        let vc = create_signed_view_change(5, 6, None, sender, &bls_sk);
+
+        // Empty validator pubkeys map - sender not known
+        let pubkeys: HashMap<NodeId, BlsPublicKey> = HashMap::new();
+
+        assert!(matches!(
+            validate_view_change_with_sig(&vc, &pubkeys),
+            Err(ViewChangeError::UnknownValidator(_))
+        ));
+    }
+
+    #[test]
+    fn test_collector_with_sig_verification() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        let bls_sk1 = BlsSecretKey::from_seed(&[1u8; 32]);
+        let bls_sk2 = BlsSecretKey::from_seed(&[2u8; 32]);
+        let sender1: NodeId = [1u8; 32];
+        let sender2: NodeId = [2u8; 32];
+
+        let mut pubkeys = HashMap::new();
+        pubkeys.insert(sender1, bls_sk1.public_key());
+        pubkeys.insert(sender2, bls_sk2.public_key());
+
+        let mut collector = ViewChangeCollector::with_validators(2, pubkeys);
+
+        // First signed ViewChange
+        let vc1 = create_signed_view_change(5, 6, None, sender1, &bls_sk1);
+        assert!(collector.add(vc1).is_none());
+        assert_eq!(collector.count(6), 1);
+
+        // Second signed ViewChange - reaches quorum
+        let vc2 = create_signed_view_change(5, 6, None, sender2, &bls_sk2);
+        let cert = collector.add(vc2);
+        assert!(cert.is_some());
+        assert_eq!(cert.unwrap().view_changes.len(), 2);
+    }
+
+    #[test]
+    fn test_collector_rejects_bad_signature() {
+        use crate::crypto::bls::BlsSecretKey;
+
+        let bls_sk = BlsSecretKey::from_seed(&[1u8; 32]);
+        let sender: NodeId = [1u8; 32];
+
+        let mut pubkeys = HashMap::new();
+        pubkeys.insert(sender, bls_sk.public_key());
+
+        let mut collector = ViewChangeCollector::with_validators(1, pubkeys);
+
+        // ViewChange with invalid signature (not matching sender)
+        let mut bad_vc = create_signed_view_change(5, 6, None, sender, &bls_sk);
+        bad_vc.signature = vec![0u8; 96]; // Invalid signature
+
+        // Should be rejected
+        assert!(collector.add(bad_vc).is_none());
+        assert_eq!(collector.count(6), 0);
     }
 }

@@ -10,6 +10,29 @@
 //! 2. Block doesn't extend from highest known QC
 //! 3. Block is invalid (bad structure, signature, etc.)
 //! 4. AppHash doesn't match local execution
+//!
+//! ## Persistence Requirements (CRITICAL)
+//!
+//! The `voted_views` set MUST be persisted to prevent double-voting after crash.
+//! Use `voted_views()` to export for persistence, and `with_state()` to recover.
+//!
+//! ```ignore
+//! // Before shutdown or after each vote
+//! let state = ConsensusState {
+//!     voted_views: safety.voted_views(),
+//!     high_qc: safety.high_qc().cloned(),
+//!     // ...
+//! };
+//! store.save_consensus_state(&state)?;
+//!
+//! // On recovery
+//! let state = store.load_consensus_state()?;
+//! let safety = Safety::with_state(
+//!     state.high_qc,
+//!     state.locked_qc,
+//!     &state.voted_views,
+//! );
+//! ```
 
 use std::collections::HashSet;
 
@@ -144,6 +167,14 @@ impl Safety {
     pub fn prune_votes_below(&mut self, view: View) {
         self.voted_views.retain(|&v| v >= view);
     }
+
+    /// Export voted_views for persistence
+    ///
+    /// Returns a Vec of views we've voted in. This MUST be persisted
+    /// to prevent double-voting after crash recovery.
+    pub fn voted_views(&self) -> Vec<View> {
+        self.voted_views.iter().copied().collect()
+    }
 }
 
 impl Default for Safety {
@@ -211,5 +242,57 @@ mod tests {
             safety.safe_to_vote(&block, wrong_hash),
             Err(SafetyError::AppHashMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn test_voted_views_persistence() {
+        // Simulate voting in several views
+        let mut safety = Safety::new();
+        safety.record_vote(5);
+        safety.record_vote(7);
+        safety.record_vote(10);
+
+        // Export for persistence
+        let voted_views = safety.voted_views();
+        assert_eq!(voted_views.len(), 3);
+
+        // Simulate recovery from persisted state
+        let recovered_safety = Safety::with_state(None, None, &voted_views);
+
+        // Verify we can't double-vote after recovery
+        let block5 = Block {
+            view: 5,
+            height: 1,
+            parent: [0u8; 32],
+            payload: vec![],
+            proposer: [0u8; 32],
+            app_hash: [0u8; 32],
+            timestamp: 0,
+        };
+
+        assert!(matches!(
+            recovered_safety.safe_to_vote(&block5, [0u8; 32]),
+            Err(SafetyError::AlreadyVoted(5))
+        ));
+    }
+
+    #[test]
+    fn test_voted_views_prune_and_persist() {
+        let mut safety = Safety::new();
+        safety.record_vote(1);
+        safety.record_vote(5);
+        safety.record_vote(10);
+        safety.record_vote(15);
+
+        // Prune old views
+        safety.prune_votes_below(8);
+
+        // Only views >= 8 should remain
+        let voted_views = safety.voted_views();
+        assert_eq!(voted_views.len(), 2);
+        assert!(voted_views.contains(&10));
+        assert!(voted_views.contains(&15));
+        assert!(!voted_views.contains(&1));
+        assert!(!voted_views.contains(&5));
     }
 }
