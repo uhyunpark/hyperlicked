@@ -78,12 +78,22 @@ hyperlicked/
 │   │   ├── orderbook/     # Heap-based matching engine
 │   │   │   ├── mod.rs     # OrderBook struct
 │   │   │   └── matching.rs # Matching logic
+│   │   ├── oracle/        # External price feeds for funding
+│   │   │   ├── mod.rs     # OracleState, aggregation
+│   │   │   └── fetcher.rs # CEX price fetcher (Binance, etc.)
+│   │   ├── market_maker/  # Artificial market maker (dev mode)
+│   │   │   ├── mod.rs     # MarketMakerState
+│   │   │   ├── strategy.rs # Trading strategies
+│   │   │   ├── config.rs  # Intensity presets
+│   │   │   └── account.rs # Deterministic address generation
 │   │   ├── accounts.rs    # Account & AccountManager
 │   │   ├── positions.rs   # Position struct
 │   │   ├── mempool.rs     # 3-bucket ordering
 │   │   ├── candles.rs     # OHLCV aggregation
 │   │   ├── funding.rs     # Funding rate payments
 │   │   ├── liquidation.rs # Liquidation engine
+│   │   ├── adl.rs         # Auto-deleverage when insurance fund empty
+│   │   ├── trigger.rs     # Trigger orders (TP/SL)
 │   │   └── staking/       # Validator staking system
 │   ├── crypto/            # EIP-712, agent keys, BLS12-381
 │   ├── storage/           # RocksDB persistence, snapshots, recovery
@@ -133,6 +143,10 @@ cargo build --release
 | `SNAPSHOT_INTERVAL` | 1000 | Snapshot app state every N blocks (0 = disabled) |
 | `SKIP_SIG_VERIFY` | false | Skip signature verification (dev mode only, unsafe!) |
 | `ORACLE_ENABLED` | false | Enable oracle system at startup (dev mode) |
+| `MM_ENABLED` | false | Enable artificial market maker (dev mode) |
+| `MM_INTERVAL_MS` | 100 | Market maker tick interval |
+| `MM_INTENSITY` | medium | Intensity preset: low/medium/high |
+| `MM_SEED` | 12345 | RNG seed for deterministic MM addresses |
 
 ## Golden Rules
 

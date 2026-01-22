@@ -22,6 +22,11 @@
 
 ### Recently Completed
 
+- **Real-time Streaming** ✅ - Trigger order events, enhanced position updates, order history streaming
+- **Market Maker** ✅ - Dev mode artificial liquidity with multiple strategies
+- **Oracle Fetcher** ✅ - Background CEX price fetching (Binance, etc.)
+- **Trigger Orders (TP/SL)** ✅ - Stop-loss and take-profit with real-time events
+- **ADL System** ✅ - Auto-deleverage when insurance fund insufficient
 - **Market Stats (activeAssetCtx)** ✅ - Real-time market statistics WebSocket channel
 - **Candles API** ✅ - Backend OHLCV aggregation (1m, 5m, 15m, 1h, 4h, 1d intervals)
 - **Self-trade Prevention** ✅ - Orderbook skips matching against same trader
@@ -98,13 +103,45 @@ Multi-source price feeds:
 - ✅ Staleness detection (3s default)
 - ✅ Validator authorization for submissions
 - ✅ Bootstrap mode (falls back to mark price when disabled)
-- External fetcher service (out of scope - future work)
+- ✅ External fetcher service (background task, 5s polling)
 
-#### Insurance Fund ✅
+#### Insurance Fund & ADL ✅
 Socialized loss mechanism:
 - ✅ Collect liquidation fees (from liquidation engine)
 - ✅ Cover underwater positions
 - ✅ ADL (auto-deleverage) when insurance fund insufficient
+- ✅ Counter-party selection by profit ranking
+- ✅ WebSocket ADL event notifications
+
+#### Trigger Orders (TP/SL) ✅
+Stop-loss and take-profit orders:
+- ✅ Trigger order placement and storage
+- ✅ Mark price trigger checking
+- ✅ Conversion to market orders on trigger
+- ✅ Cancel trigger order support
+- ✅ WebSocket real-time trigger events
+
+#### Oracle Price Fetcher ✅
+External price fetching service:
+- ✅ Background task fetching from CEXs (Binance, etc.)
+- ✅ Weighted median aggregation
+- ✅ Automatic price updates every 5 seconds
+- ✅ Integration with funding rate calculation
+
+#### Market Maker (Dev Mode) ✅
+Artificial liquidity for development:
+- ✅ Configurable intensity presets (low/medium/high)
+- ✅ Multiple trading strategies (market making, trend following, mean reversion)
+- ✅ Deterministic account generation from seed
+- ✅ Oracle price reference for realistic spreads
+
+#### Real-time WebSocket Streaming ✅
+Enhanced event streaming:
+- ✅ Trigger order events (placed/triggered/cancelled)
+- ✅ Enhanced position updates (with liquidation price, margin, leverage)
+- ✅ Order closed events for history streaming
+- ✅ cloid support in user fills for order correlation
+- ✅ Frontend uses WebSocket-first with REST backup (30s)
 
 ### P3: Advanced Features
 
