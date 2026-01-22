@@ -2,6 +2,8 @@
 //!
 //! Submit and cancel orders.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use axum::{extract::State, http::StatusCode, Json};
 
 use crate::api::types::{ApiState, SignedTransaction, SubmitOrderResponse};
@@ -42,7 +44,13 @@ async fn submit_order_tx(
     };
 
     // Verify signature and extract verified data
-    let verified = verify_order(&req, &state.eip712_signer, &state.agent_signer, delegation.as_ref())
+    // Note: Using current time for API-level validation. Consensus-level
+    // validation will use block timestamp for determinism.
+    let current_timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let verified = verify_order(&req, &state.eip712_signer, &state.agent_signer, delegation.as_ref(), current_timestamp_ms)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Validate and consume nonce

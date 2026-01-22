@@ -57,11 +57,15 @@ pub enum VerifyError {
 }
 
 /// Verify an order signature and extract verified data
+///
+/// Parameters:
+/// - `block_timestamp_ms`: Block timestamp in milliseconds for agent delegation expiration check
 pub fn verify_order(
     tx: &SignedTransaction,
     eip712: &EIP712Signer,
     agent_signer: &AgentSigner,
     delegation: Option<&StoredDelegation>,
+    block_timestamp_ms: u64,
 ) -> Result<VerifiedOrder, VerifyError> {
     let order = tx.order.as_ref().ok_or(VerifyError::MissingOrder)?;
 
@@ -77,7 +81,7 @@ pub fn verify_order(
 
     // Verify based on mode (direct or agent)
     if tx.agent_mode.unwrap_or(false) {
-        verify_agent_order_sig(&order_eip712, &signature, delegation, eip712, agent_signer)?;
+        verify_agent_order_sig(&order_eip712, &signature, delegation, eip712, agent_signer, block_timestamp_ms)?;
     } else {
         // Skip verification in dev mode if configured
         if !Config::global().skip_signature_verification {
@@ -170,6 +174,7 @@ fn verify_agent_order_sig(
     delegation: Option<&StoredDelegation>,
     eip712: &EIP712Signer,
     agent_signer: &AgentSigner,
+    block_timestamp_ms: u64,
 ) -> Result<(), VerifyError> {
     let stored = delegation.ok_or(VerifyError::DelegationNotFound)?;
 
@@ -180,6 +185,7 @@ fn verify_agent_order_sig(
         &stored.signature,
         eip712,
         agent_signer,
+        block_timestamp_ms,
     )
     .map_err(|e| VerifyError::AgentError(e.to_string()))?;
 

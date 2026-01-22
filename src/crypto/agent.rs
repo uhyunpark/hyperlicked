@@ -26,13 +26,28 @@ pub struct AgentDelegation {
 }
 
 impl AgentDelegation {
-    /// Check if delegation has expired
+    /// Check if delegation has expired using wall clock time
+    ///
+    /// WARNING: This method uses SystemTime::now() which can cause
+    /// non-determinism across validators due to clock skew.
+    /// Use `is_expired_at()` with block timestamp for consensus-critical code.
+    #[allow(dead_code)]
     pub fn is_expired(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
         self.expiration < now
+    }
+
+    /// Check if delegation has expired at a given timestamp
+    ///
+    /// This is the preferred method for consensus-critical code.
+    /// Use the block timestamp to ensure determinism across validators.
+    pub fn is_expired_at(&self, block_timestamp_ms: u64) -> bool {
+        // Convert block timestamp from milliseconds to seconds
+        let timestamp_secs = block_timestamp_ms / 1000;
+        self.expiration < timestamp_secs
     }
 
     /// Compute the struct hash for this delegation
@@ -137,9 +152,12 @@ impl AgentSigner {
 ///
 /// Checks:
 /// 1. Agent signature is valid
-/// 2. Delegation exists and is not expired
+/// 2. Delegation exists and is not expired (using block timestamp)
 /// 3. Delegation signature is valid
 /// 4. Order owner matches delegation wallet
+///
+/// Parameters:
+/// - `block_timestamp_ms`: Block timestamp in milliseconds for deterministic expiration check
 pub fn verify_agent_order(
     order: &OrderEIP712,
     agent_signature: &[u8],
@@ -147,6 +165,7 @@ pub fn verify_agent_order(
     delegation_signature: &[u8],
     eip712_signer: &EIP712Signer,
     agent_signer: &AgentSigner,
+    block_timestamp_ms: u64,
 ) -> Result<bool, AgentError> {
     // Step 1: Verify agent signed the order
     let order_hash = eip712_signer.hash_order(order);
@@ -160,8 +179,8 @@ pub fn verify_agent_order(
         });
     }
 
-    // Step 2: Verify delegation is not expired
-    if delegation.is_expired() {
+    // Step 2: Verify delegation is not expired (using block timestamp for determinism)
+    if delegation.is_expired_at(block_timestamp_ms) {
         return Err(AgentError::DelegationExpired(delegation.expiration));
     }
 
@@ -217,11 +236,11 @@ mod tests {
         let agent = Signer::generate();
 
         // Step 3: Create delegation (expires in 1 hour)
-        let expiration = SystemTime::now()
+        let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs()
-            + 3600;
+            .as_secs();
+        let expiration = now_secs + 3600;
 
         let delegation = AgentDelegation {
             wallet: wallet.address(),
@@ -254,7 +273,8 @@ mod tests {
         let eip712_signer = EIP712Signer::default_domain();
         let order_sig = eip712_signer.sign_order(&agent, &order); // Agent signs!
 
-        // Step 7: Verify agent order
+        // Step 7: Verify agent order (using block timestamp in milliseconds)
+        let block_timestamp_ms = now_secs * 1000; // Current time as block timestamp
         let valid = verify_agent_order(
             &order,
             &order_sig,
@@ -262,6 +282,7 @@ mod tests {
             &delegation_sig,
             &eip712_signer,
             &agent_signer,
+            block_timestamp_ms,
         )
         .unwrap();
 
@@ -273,15 +294,17 @@ mod tests {
         let wallet = Signer::generate();
         let agent = Signer::generate();
 
-        // Expired delegation
+        // Expired delegation (expired at timestamp 100 seconds)
         let delegation = AgentDelegation {
             wallet: wallet.address(),
             agent: agent.address(),
-            expiration: 0, // Expired
+            expiration: 100, // Expires at 100 seconds
             nonce: U256::from(1),
         };
 
-        assert!(delegation.is_expired());
+        // Test is_expired_at with block timestamp
+        assert!(delegation.is_expired_at(200_000)); // 200 seconds in ms > 100s expiration
+        assert!(!delegation.is_expired_at(50_000));  // 50 seconds in ms < 100s expiration
 
         let agent_signer = AgentSigner::default_domain();
         let delegation_sig = agent_signer.sign_delegation(&wallet, &delegation);
@@ -301,6 +324,7 @@ mod tests {
         let eip712_signer = EIP712Signer::default_domain();
         let order_sig = eip712_signer.sign_order(&agent, &order);
 
+        // Verify fails with block timestamp after expiration
         let result = verify_agent_order(
             &order,
             &order_sig,
@@ -308,8 +332,22 @@ mod tests {
             &delegation_sig,
             &eip712_signer,
             &agent_signer,
+            200_000, // Block timestamp: 200 seconds (after expiration)
         );
 
         assert!(matches!(result, Err(AgentError::DelegationExpired(_))));
+
+        // Verify succeeds with block timestamp before expiration
+        let result = verify_agent_order(
+            &order,
+            &order_sig,
+            &delegation,
+            &delegation_sig,
+            &eip712_signer,
+            &agent_signer,
+            50_000, // Block timestamp: 50 seconds (before expiration)
+        );
+
+        assert!(result.is_ok());
     }
 }
