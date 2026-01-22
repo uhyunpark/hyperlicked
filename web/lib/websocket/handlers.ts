@@ -144,8 +144,15 @@ export function handleMarkPrice(data: WSMarkPriceUpdate) {
 }
 
 export function handleAssetCtx(data: WSAssetCtx) {
-  useTradingStore.getState().updateAssetCtx({
-    markPrice: convertPrice(data.markPrice),
+  const store = useTradingStore.getState()
+  const markPrice = convertPrice(data.markPrice)
+
+  // Update markPrices for real-time PnL calculation
+  store.updateMarkPrice(data.symbol, markPrice)
+
+  // Update full asset context
+  store.updateAssetCtx({
+    markPrice,
     oraclePrice: data.oraclePrice ? convertPrice(data.oraclePrice) : null,
     midPrice: convertPrice(data.midPrice),
     fundingRate: data.fundingRate / 1_000_000,

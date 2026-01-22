@@ -42,17 +42,47 @@ export function Positions() {
     return bySymbol
   }, [triggerOrders])
 
+  // Safe display helper - returns '--' for non-finite values
+  const displayValue = (value: number, decimals: number = 2, prefix: string = ''): string => {
+    if (!Number.isFinite(value)) return '--'
+    return prefix + value.toFixed(decimals)
+  }
+
+  // Format currency with locale string, safe for NaN
+  const displayCurrency = (value: number): string => {
+    if (!Number.isFinite(value)) return '--'
+    return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2 })
+  }
+
   // Calculate unrealized PnL using realtime mark prices
   const getRealtimePnL = (position: typeof positions[0]) => {
-    // Use realtime mark price if available, otherwise fallback to position's stored mark price
-    const currentMarkPrice = markPrices[position.symbol] ?? position.markPrice
+    // Use getRealtimeMarkPrice which handles 0/undefined properly
+    const currentMarkPrice = getRealtimeMarkPrice(position)
+    const entryPrice = position.entryPrice ?? 0
+    const size = position.size ?? 0
+    // Guard against NaN from invalid inputs
+    if (!Number.isFinite(currentMarkPrice) || !Number.isFinite(entryPrice) || !Number.isFinite(size)) {
+      return 0
+    }
     // PnL = (markPrice - entryPrice) * size
-    return (currentMarkPrice - position.entryPrice) * position.size
+    return (currentMarkPrice - entryPrice) * size
   }
 
   // Get realtime mark price for a position
   const getRealtimeMarkPrice = (position: typeof positions[0]) => {
-    return markPrices[position.symbol] ?? position.markPrice
+    // Prefer realtime markPrices from assetCtx updates
+    // Fall back to position.markPrice only if it's non-zero
+    // If both are 0/undefined, use entry price to avoid $0 flicker
+    const realtimePrice = markPrices[position.symbol]
+    if (realtimePrice && Number.isFinite(realtimePrice) && realtimePrice > 0) {
+      return realtimePrice
+    }
+    const posMarkPrice = position.markPrice
+    if (posMarkPrice && Number.isFinite(posMarkPrice) && posMarkPrice > 0) {
+      return posMarkPrice
+    }
+    // Last resort: use entry price (better than showing $0)
+    return position.entryPrice ?? 0
   }
 
   // Fetch trigger orders as backup (30s interval instead of 5s)
@@ -216,16 +246,16 @@ export function Positions() {
                       {isLong ? 'LONG' : 'SHORT'}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
-                      {Math.abs(position.size).toFixed(4)}
+                      {displayValue(Math.abs(position.size ?? 0), 4)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
-                      ${position.entryPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      {displayCurrency(position.entryPrice ?? 0)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
-                      ${realtimeMarkPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      {displayCurrency(realtimeMarkPrice)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-red-sell">
-                      ${position.liquidationPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      {displayCurrency(position.liquidationPrice ?? 0)}
                     </td>
                     {/* Take Profit */}
                     <td className="px-4 py-2 text-right">
@@ -266,10 +296,16 @@ export function Positions() {
                       )}
                     </td>
                     <td className={`px-4 py-2 text-right font-mono font-semibold ${isProfitable ? 'text-green-buy' : 'text-red-sell'}`}>
-                      {isProfitable ? '+' : ''}${realtimePnL.toFixed(2)}
-                      <div className="text-xs">
-                        ({isProfitable ? '+' : ''}{pnlPercent.toFixed(2)}%)
-                      </div>
+                      {Number.isFinite(realtimePnL) ? (
+                        <>
+                          {isProfitable ? '+' : ''}${realtimePnL.toFixed(2)}
+                          <div className="text-xs">
+                            ({isProfitable ? '+' : ''}{Number.isFinite(pnlPercent) ? pnlPercent.toFixed(2) : '0.00'}%)
+                          </div>
+                        </>
+                      ) : (
+                        <span className="text-text-muted">--</span>
+                      )}
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button
@@ -290,14 +326,15 @@ export function Positions() {
       {/* Summary */}
       {positions.length > 0 && (() => {
         const totalPnL = positions.reduce((sum, p) => sum + getRealtimePnL(p), 0)
+        const safeTotalPnL = Number.isFinite(totalPnL) ? totalPnL : 0
         return (
           <div className="border-t border-border bg-bg-primary px-4 py-2">
             <div className="flex justify-between text-xs">
               <span className="text-text-muted">Total Unrealized PnL:</span>
               <span className={`font-mono font-semibold ${
-                totalPnL > 0 ? 'text-green-buy' : 'text-red-sell'
+                safeTotalPnL > 0 ? 'text-green-buy' : 'text-red-sell'
               }`}>
-                ${totalPnL.toFixed(2)}
+                ${safeTotalPnL.toFixed(2)}
               </span>
             </div>
           </div>

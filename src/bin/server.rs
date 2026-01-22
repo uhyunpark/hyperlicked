@@ -373,7 +373,8 @@ async fn run_consensus_loop(
 
                 // Send position and balance updates to both maker and taker
                 let app = state.app.read().await;
-                let mark_price = app.mark_price(&fill.symbol).unwrap_or(0);
+                // Use fill price as fallback if no mark price set yet (avoids sending 0)
+                let mark_price = app.mark_price(&fill.symbol).unwrap_or(fill.price);
 
                 // Maker position/balance update
                 if let Some(account) = app.account(&fill.maker) {
@@ -518,7 +519,8 @@ async fn run_consensus_loop(
                 let app = state.app.read().await;
                 if let Some(account) = app.account(&adl_event.address) {
                     let pos = account.position(&adl_event.symbol);
-                    let mark_price = app.mark_price(&adl_event.symbol).unwrap_or(0);
+                    // Use close price as fallback if no mark price set (avoids sending 0)
+                    let mark_price = app.mark_price(&adl_event.symbol).unwrap_or(adl_event.close_price);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
                     let available_margin = account.balance + account.locked;
                     let liquidation_price = pos.liquidation_price(available_margin, 500);
@@ -593,7 +595,8 @@ async fn run_consensus_loop(
                 let app = state.app.read().await;
                 if let Some(account) = app.account(&liq.address) {
                     let pos = account.position(&liq.symbol);
-                    let mark_price = app.mark_price(&liq.symbol).unwrap_or(0);
+                    // Use liquidation price as fallback if no mark price set (avoids sending 0)
+                    let mark_price = app.mark_price(&liq.symbol).unwrap_or(liq.price);
                     let unrealized_pnl = pos.unrealized_pnl(mark_price);
                     // After liquidation, position is typically closed so these are 0
                     let available_margin = account.balance + account.locked;
