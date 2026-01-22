@@ -39,6 +39,8 @@ pub struct ADLCandidate {
     pub entry_price: i64,
     /// Unrealized PnL (positive = profitable)
     pub unrealized_pnl: i64,
+    /// Profit percentage in basis points (100 = 1%)
+    pub profit_pct_bps: i64,
 }
 
 /// Result of a single ADL operation against one counterparty
@@ -115,18 +117,33 @@ pub fn find_adl_candidates(
 
             // Only include profitable positions
             if pnl > 0 {
+                // Calculate notional value (in cents)
+                // notional = size * entry_price / 100_000_000
+                let notional = abs_size * position.entry_price / 100_000_000;
+
+                // Calculate profit percentage in basis points (10000 bps = 100%)
+                // profit_pct = pnl / notional * 10000
+                let profit_pct_bps = if notional > 0 {
+                    pnl * 10000 / notional
+                } else {
+                    0
+                };
+
                 candidates.push(ADLCandidate {
                     address: account.address.clone(),
                     size: abs_size,
                     entry_price: position.entry_price,
                     unrealized_pnl: pnl,
+                    profit_pct_bps,
                 });
             }
         }
     }
 
-    // Sort by unrealized PnL descending (most profitable first)
-    candidates.sort_by(|a, b| b.unrealized_pnl.cmp(&a.unrealized_pnl));
+    // Sort by profit percentage descending (highest return % first)
+    // This is fairer than absolute PnL: someone with 10% return on small position
+    // should be hit before someone with 0.1% return on large position
+    candidates.sort_by(|a, b| b.profit_pct_bps.cmp(&a.profit_pct_bps));
 
     candidates
 }
@@ -361,8 +378,47 @@ mod tests {
         // Both shorts have positive unrealized PnL
         assert!(candidates[0].unrealized_pnl > 0);
         assert!(candidates[1].unrealized_pnl > 0);
-        // Sorted by PnL (most profitable first)
-        assert!(candidates[0].unrealized_pnl >= candidates[1].unrealized_pnl);
+        // Sorted by profit percentage (both same % since same entry price)
+        assert!(candidates[0].profit_pct_bps >= candidates[1].profit_pct_bps);
+    }
+
+    #[test]
+    fn test_percentage_based_ranking() {
+        // Create accounts with different profit scenarios
+        let mut accounts = AccountManager::new();
+
+        // Position A: Small position with high profit percentage
+        // 0.1 BTC at $40k entry, price now $50k = 25% profit
+        let small_high_pct = accounts.get_or_create("small_high_pct");
+        small_high_pct.balance = 100_000;
+        small_high_pct.apply_fill("BTC-USDT", true, 10_000_000, 4_000_000); // Long 0.1 BTC at $40k
+
+        // Position B: Large position with low profit percentage
+        // 10 BTC at $49k entry, price now $50k = 2% profit
+        let large_low_pct = accounts.get_or_create("large_low_pct");
+        large_low_pct.balance = 10_000_000;
+        large_low_pct.apply_fill("BTC-USDT", true, 1_000_000_000, 4_900_000); // Long 10 BTC at $49k
+
+        // Price is now $50k - both are profitable
+        let candidates = find_adl_candidates(
+            &accounts,
+            "BTC-USDT",
+            5_000_000, // mark price $50k
+            false,      // target longs
+            "liquidator", // exclude
+        );
+
+        assert_eq!(candidates.len(), 2);
+
+        // Small position with higher profit % should be ranked first
+        assert_eq!(candidates[0].address, "small_high_pct");
+        assert!(candidates[0].profit_pct_bps > candidates[1].profit_pct_bps);
+
+        // Verify the percentage calculation
+        // small_high_pct: (50k - 40k) * 0.1 BTC / (40k * 0.1 BTC) = 25%
+        // large_low_pct: (50k - 49k) * 10 BTC / (49k * 10 BTC) ≈ 2%
+        assert!(candidates[0].profit_pct_bps > 2000); // > 20%
+        assert!(candidates[1].profit_pct_bps < 500);  // < 5%
     }
 
     #[test]
@@ -389,12 +445,14 @@ mod tests {
                 size: 200_000_000,
                 entry_price: 5_000_000,
                 unrealized_pnl: 1_000_000,
+                profit_pct_bps: 1000, // 10%
             },
             ADLCandidate {
                 address: "short2".to_string(),
                 size: 100_000_000,
                 entry_price: 5_000_000,
                 unrealized_pnl: 500_000,
+                profit_pct_bps: 1000, // 10%
             },
         ];
 
@@ -434,6 +492,10 @@ mod tests {
     fn test_adl_triggered_when_insurance_insufficient() {
         let mut accounts = setup_accounts();
 
+        // Record original sizes
+        let short1_original = accounts.get("short1").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+        let short2_original = accounts.get("short2").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+
         // Large loss that exceeds insurance
         let result = process_adl_if_needed(
             &mut accounts,
@@ -451,10 +513,15 @@ mod tests {
         assert!(!summary.events.is_empty());
         assert!(summary.total_absorbed > 0);
 
-        // Verify positions were reduced
-        let short1 = accounts.get("short1").unwrap();
-        let pos1 = short1.positions.get("BTC-USDT").unwrap();
-        // Position should be reduced (was -200_000_000)
-        assert!(pos1.size.abs() < 200_000_000);
+        // Verify at least one position was reduced
+        // With percentage-based ranking, both shorts have same %, so either could be hit first
+        let short1_now = accounts.get("short1").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+        let short2_now = accounts.get("short2").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+
+        let total_original = short1_original + short2_original;
+        let total_now = short1_now + short2_now;
+
+        // Total position size should be reduced
+        assert!(total_now < total_original, "Total position size should be reduced");
     }
 }
