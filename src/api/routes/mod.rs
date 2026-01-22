@@ -9,7 +9,10 @@ mod market;
 mod oracle;
 mod order;
 mod staking;
+pub mod sync;
 mod trigger;
+
+use std::sync::Arc;
 
 use axum::{
     routing::{get, post},
@@ -19,9 +22,20 @@ use axum::{
 use super::handlers::{deposit, register_delegation, submit_order_legacy, withdraw};
 use super::state::SharedState;
 use super::types::ApiState;
+use crate::storage::PersistentStore;
 
 pub fn create_router(state: SharedState) -> Router {
-    let api_state = ApiState::new(state);
+    create_router_with_store(state, None)
+}
+
+pub fn create_router_with_store(
+    state: SharedState,
+    store: Option<Arc<dyn PersistentStore + Send + Sync>>,
+) -> Router {
+    let api_state = match store {
+        Some(s) => ApiState::with_store(state, s),
+        None => ApiState::new(state),
+    };
 
     let api_v1 = Router::new()
         // Market endpoints
@@ -73,7 +87,13 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/deposit", post(deposit))
         .route("/withdraw", post(withdraw))
         // ADL history
-        .route("/adl/history", get(adl::get_adl_history));
+        .route("/adl/history", get(adl::get_adl_history))
+        // Sync endpoints (block export, snapshots)
+        .route("/sync/status", get(sync::get_sync_status))
+        .route("/sync/blocks", get(sync::get_blocks))
+        .route("/sync/block/:height", get(sync::get_block_by_height))
+        .route("/sync/snapshot/latest", get(sync::get_latest_snapshot))
+        .route("/sync/snapshot/:height", get(sync::get_snapshot));
 
     Router::new()
         // Health check

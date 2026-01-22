@@ -96,12 +96,70 @@ pub struct NewView {
     pub view_change_cert: ViewChangeCertificate,
 }
 
+// =============================================================================
+// Sync Protocol Messages
+// =============================================================================
+
+/// Request blocks for catchup from a peer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncRequest {
+    /// Starting height (inclusive)
+    pub from_height: u64,
+    /// Ending height (optional, defaults to peer's latest)
+    pub to_height: Option<u64>,
+    /// Maximum blocks to return
+    pub max_blocks: u64,
+    /// Request ID for correlation
+    pub request_id: u64,
+}
+
+/// Response with blocks for catchup
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncResponse {
+    /// Request ID for correlation
+    pub request_id: u64,
+    /// Blocks in ascending height order
+    pub blocks: Vec<Block>,
+    /// Peer's current height (for progress tracking)
+    pub peer_height: u64,
+    /// True if there are more blocks after this batch
+    pub has_more: bool,
+}
+
+/// Request a snapshot for fast sync
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    /// Specific height (None = latest)
+    pub height: Option<u64>,
+    /// Request ID for correlation
+    pub request_id: u64,
+}
+
+/// Response with snapshot data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    /// Request ID for correlation
+    pub request_id: u64,
+    /// Snapshot height (None if not found)
+    pub height: Option<u64>,
+    /// Snapshot data (compressed, None if not found)
+    pub data: Option<Vec<u8>>,
+    /// Whether data is compressed
+    pub compressed: bool,
+}
+
 /// All network message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
+    // Consensus messages
     Propose(Propose),
     Vote(super::Vote),
     Prepare(Prepare),
     ViewChange(ViewChange),
     NewView(NewView),
+    // Sync messages
+    SyncRequest(SyncRequest),
+    SyncResponse(SyncResponse),
+    SnapshotRequest(SnapshotRequest),
+    SnapshotResponse(SnapshotResponse),
 }

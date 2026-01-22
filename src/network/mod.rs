@@ -25,9 +25,11 @@
 //! ```
 
 mod mock;
+pub mod sync;
 mod transport;
 
 pub use mock::MockNetwork;
+pub use sync::{SyncClient, SyncHandler};
 pub use transport::TcpNetwork;
 
 use async_trait::async_trait;

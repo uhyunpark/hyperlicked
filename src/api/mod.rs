@@ -22,7 +22,7 @@ pub mod types;
 mod verify;
 mod websocket;
 
-pub use routes::create_router;
+pub use routes::{create_router, create_router_with_store};
 pub use state::SharedState;
 pub use types::ApiState;
 pub use websocket::{AssetCtxData, WebSocketHandler};

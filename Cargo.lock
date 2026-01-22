@@ -1365,6 +1365,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "bincode",
  "blst",
  "dotenvy",

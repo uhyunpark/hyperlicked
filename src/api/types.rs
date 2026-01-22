@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::state::{PriceLevel, SharedState};
 use crate::crypto::{AgentDelegation, AgentSigner, EIP712Signer};
+use crate::storage::PersistentStore;
 
 /// Stored delegation with signature
 #[derive(Clone)]
@@ -25,6 +26,8 @@ pub struct ApiState {
     pub delegations: Arc<RwLock<HashMap<String, StoredDelegation>>>,
     pub eip712_signer: Arc<EIP712Signer>,
     pub agent_signer: Arc<AgentSigner>,
+    /// Optional persistent store for sync endpoints
+    pub store: Option<Arc<dyn PersistentStore + Send + Sync>>,
 }
 
 impl ApiState {
@@ -34,6 +37,17 @@ impl ApiState {
             delegations: Arc::new(RwLock::new(HashMap::new())),
             eip712_signer: Arc::new(EIP712Signer::default_domain()),
             agent_signer: Arc::new(AgentSigner::default_domain()),
+            store: None,
+        }
+    }
+
+    pub fn with_store(shared: SharedState, store: Arc<dyn PersistentStore + Send + Sync>) -> Self {
+        Self {
+            shared,
+            delegations: Arc::new(RwLock::new(HashMap::new())),
+            eip712_signer: Arc::new(EIP712Signer::default_domain()),
+            agent_signer: Arc::new(AgentSigner::default_domain()),
+            store: Some(store),
         }
     }
 }
@@ -377,4 +391,84 @@ pub struct FillInfo {
     #[serde(rename = "isMaker")]
     pub is_maker: bool,
     pub timestamp: u64,
+}
+
+// =============================================================================
+// Sync Types
+// =============================================================================
+
+/// Node sync status
+#[derive(Debug, Serialize)]
+pub struct SyncStatus {
+    pub height: u64,
+    pub view: u64,
+    #[serde(rename = "committedHash")]
+    pub committed_hash: String,
+    #[serde(rename = "stateHash")]
+    pub state_hash: String,
+    pub timestamp: u64,
+    #[serde(rename = "latestSnapshotHeight")]
+    pub latest_snapshot_height: Option<u64>,
+    #[serde(rename = "isPersistent")]
+    pub is_persistent: bool,
+}
+
+/// Block export for sync
+#[derive(Debug, Serialize)]
+pub struct BlockExport {
+    pub height: u64,
+    pub view: u64,
+    pub hash: String,
+    #[serde(rename = "parentHash")]
+    pub parent_hash: String,
+    #[serde(rename = "appHash")]
+    pub app_hash: String,
+    pub proposer: String,
+    pub timestamp: u64,
+    #[serde(rename = "payloadSize")]
+    pub payload_size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+}
+
+/// Block range query parameters
+#[derive(Debug, Deserialize)]
+pub struct BlockRangeQuery {
+    pub from: u64,
+    pub to: Option<u64>,
+    pub limit: Option<u64>,
+    #[serde(rename = "includePayload", default)]
+    pub include_payload: bool,
+}
+
+/// Block range response with pagination
+#[derive(Debug, Serialize)]
+pub struct BlockRangeResponse {
+    pub blocks: Vec<BlockExport>,
+    #[serde(rename = "nextHeight")]
+    pub next_height: Option<u64>,
+    #[serde(rename = "totalAvailable")]
+    pub total_available: u64,
+}
+
+/// Snapshot metadata
+#[derive(Debug, Serialize)]
+pub struct SnapshotMetadata {
+    pub height: u64,
+    pub timestamp: u64,
+    #[serde(rename = "stateHash")]
+    pub state_hash: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    #[serde(rename = "accountCount")]
+    pub account_count: usize,
+    #[serde(rename = "marketCount")]
+    pub market_count: usize,
+}
+
+/// Full snapshot export
+#[derive(Debug, Serialize)]
+pub struct SnapshotExport {
+    pub metadata: SnapshotMetadata,
+    pub data: String, // base64 encoded
 }

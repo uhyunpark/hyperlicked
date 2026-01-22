@@ -23,7 +23,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use hyperlicked::api::{create_router, AssetCtxData, SharedState, WebSocketHandler};
+use hyperlicked::api::{create_router_with_store, AssetCtxData, SharedState, WebSocketHandler};
 use hyperlicked::api::state::PriceLevel;
 use hyperlicked::app::market_maker::{MarketMakerConfig, MarketMakerState};
 use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
@@ -159,7 +159,11 @@ async fn main() -> Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = create_router(shared_state.clone())
+    // Cast store to dyn PersistentStore for the router
+    let store_dyn: Option<Arc<dyn PersistentStore + Send + Sync>> =
+        store.clone().map(|s| s as Arc<dyn PersistentStore + Send + Sync>);
+
+    let app = create_router_with_store(shared_state.clone(), store_dyn)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 

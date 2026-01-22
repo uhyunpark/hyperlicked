@@ -59,6 +59,7 @@ reqwest = { version = "0.12", features = ["json"] }
 # blst = "0.3"                # BLS signatures
 # libp2p = "0.54"             # P2P networking
 rocksdb = "0.22"              # Storage
+base64 = "0.22.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

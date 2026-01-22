@@ -12,10 +12,15 @@
 pub mod recovery;
 pub mod rocks;
 pub mod snapshot;
+pub mod verify;
 
 pub use recovery::{recover_from_storage, RecoveryResult};
 pub use rocks::RocksDbStore;
 pub use snapshot::AppSnapshot;
+pub use verify::{
+    compute_snapshot_hash, verify_block_chain, verify_block_chain_internal, verify_snapshot,
+    verify_snapshot_height, ChainVerifyResult,
+};
 
 use serde::{Deserialize, Serialize};
 

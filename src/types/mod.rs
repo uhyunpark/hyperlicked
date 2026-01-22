@@ -13,7 +13,10 @@ mod messages;
 pub use block::Block;
 pub use certificate::{Certificate, Vote};
 pub use config::ConsensusConfig;
-pub use messages::{Message, NewView, Prepare, Propose, ViewChange, ViewChangeCertificate};
+pub use messages::{
+    Message, NewView, Prepare, Propose, SnapshotRequest, SnapshotResponse, SyncRequest,
+    SyncResponse, ViewChange, ViewChangeCertificate,
+};
 
 use sha2::{Digest, Sha256};
 
