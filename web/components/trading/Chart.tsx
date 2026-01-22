@@ -92,7 +92,7 @@ export function Chart() {
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
 
-    // Handle resize
+    // Handle resize using ResizeObserver for container size changes
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
         chartRef.current.applyOptions({
@@ -102,10 +102,11 @@ export function Chart() {
       }
     }
 
-    window.addEventListener('resize', handleResize)
+    const resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(chartContainerRef.current)
 
     return () => {
-      window.removeEventListener('resize', handleResize)
+      resizeObserver.disconnect()
       chart.remove()
     }
   }, [])
@@ -149,7 +150,7 @@ export function Chart() {
   }, [trades])
 
   return (
-    <div className="flex h-full flex-col bg-bg-secondary">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-bg-secondary">
       {/* Chart header */}
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <div className="flex items-center gap-4">
@@ -176,7 +177,7 @@ export function Chart() {
       </div>
 
       {/* Chart */}
-      <div ref={chartContainerRef} className="flex-1" />
+      <div ref={chartContainerRef} className="min-h-0 flex-1" />
 
       {/* Chart footer - funding rate */}
       <div className="border-t border-border bg-bg-primary px-4 py-2">

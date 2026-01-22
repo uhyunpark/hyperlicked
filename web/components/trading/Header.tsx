@@ -25,11 +25,11 @@ function NavTab({ label, active, disabled }: NavTabProps) {
       aria-selected={active}
       aria-disabled={disabled}
       disabled={disabled}
-      className={`relative px-4 py-2 text-sm font-medium transition-colors ${
+      className={`relative px-3 py-1.5 text-sm font-medium transition-colors ${
         disabled
           ? 'cursor-not-allowed text-text-muted/40'
           : active
-            ? 'text-text-primary'
+            ? 'text-accent'
             : 'text-text-muted hover:text-text-secondary'
       }`}
       title={disabled ? 'Coming Soon' : undefined}
@@ -131,7 +131,7 @@ export function Header() {
     <header className="border-b border-border bg-bg-secondary">
       {/* Error/Warning Banner */}
       {(wallet.error || isWrongNetwork) && (
-        <div className="flex items-center justify-between bg-red-sell/20 px-6 py-2">
+        <div className="flex items-center justify-between bg-red-sell/20 px-4 py-1.5">
           <div className="flex items-center gap-2">
             <span className="text-red-sell">⚠️</span>
             <span className="text-sm text-red-sell">
@@ -172,9 +172,9 @@ export function Header() {
       )}
 
       {/* Top Row: Logo + Navigation + Wallet */}
-      <div className="flex items-center justify-between border-b border-border px-6 py-2">
-        {/* Left: Logo + Online indicator */}
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between border-b border-border px-4 py-1.5">
+        {/* Left: Logo + Navigation (inline) */}
+        <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div
               className="h-2 w-2 rounded-full bg-green-500"
@@ -184,20 +184,22 @@ export function Header() {
             />
             <div className="text-lg font-bold text-text-primary">HyperLicked</div>
             {isDevelopment && (
-              <span className="rounded bg-yellow-500/20 px-2 py-0.5 text-xs font-medium text-yellow-500">
+              <span className="rounded bg-yellow-500/20 px-1.5 py-0.5 text-xs font-medium text-yellow-500">
                 DEV
               </span>
             )}
           </div>
-        </div>
 
-        {/* Center: Navigation */}
-        <nav className="flex items-center" role="tablist" aria-label="Main navigation">
-          <NavTab label="Trade" active />
-          <NavTab label="Vaults" disabled />
-          <NavTab label="Portfolio" disabled />
-          <NavTab label="Staking" disabled />
-        </nav>
+          {/* Navigation - inline with logo */}
+          <nav className="flex items-center" role="tablist" aria-label="Main navigation">
+            <NavTab label="Trade" active />
+            <NavTab label="Portfolio" disabled />
+            <NavTab label="Vaults" disabled />
+            <NavTab label="Staking" disabled />
+            <NavTab label="Leaderboard" disabled />
+            <NavTab label="Referrals" disabled />
+          </nav>
+        </div>
 
         {/* Right: Wallet Address Dropdown */}
         <div className="relative">
@@ -260,7 +262,7 @@ export function Header() {
       </div>
 
       {/* Second Row: Market Info + Wallet Actions */}
-      <div className="flex items-center justify-between px-6 py-2">
+      <div className="flex items-center justify-between px-4 py-1.5">
         {/* Left: Market Info */}
         <div className="flex items-center gap-6">
           {/* Market selector */}

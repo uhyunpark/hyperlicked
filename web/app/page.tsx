@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Header } from '@/components/trading/Header'
 import { Orderbook } from '@/components/trading/Orderbook'
 import { Chart } from '@/components/trading/Chart'
@@ -9,9 +9,45 @@ import { BottomTabs } from '@/components/trading/BottomTabs'
 import { useWebSocket } from '@/lib/useWebSocket'
 import { useTradingStore } from '@/lib/store'
 
+const MIN_BOTTOM_HEIGHT = 120
+const MAX_BOTTOM_HEIGHT = 500
+const DEFAULT_BOTTOM_HEIGHT = 256
+
 export default function TradingPage() {
   const [isConnected, setIsConnected] = useState(false)
+  const [bottomHeight, setBottomHeight] = useState(DEFAULT_BOTTOM_HEIGHT)
+  const [isResizing, setIsResizing] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   const orderbook = useTradingStore((state) => state.orderbook)
+
+  // Handle resize drag
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }, [])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!containerRef.current) return
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newHeight = containerRect.bottom - e.clientY
+      setBottomHeight(Math.min(MAX_BOTTOM_HEIGHT, Math.max(MIN_BOTTOM_HEIGHT, newHeight)))
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing])
 
   // Connect to WebSocket for real-time updates (also handles user data)
   const ws = useWebSocket()
@@ -53,25 +89,34 @@ export default function TradingPage() {
 
       {/* Main trading area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: Orderbook */}
-        <div className="w-80 border-r border-border">
-          <Orderbook />
-        </div>
-
-        {/* Center: Chart */}
-        <div className="flex flex-1 flex-col">
-          <div className="flex-1 border-b border-border">
+        {/* Left: Chart + Bottom Tabs (dominant area) */}
+        <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1 border-b border-border">
             <Chart />
           </div>
 
-          {/* Bottom tabs */}
-          <div className="h-64">
+          {/* Resizable Bottom tabs */}
+          <div className="relative flex flex-col" style={{ height: bottomHeight }}>
+            {/* Resize handle */}
+            <div
+              onMouseDown={handleMouseDown}
+              className={`absolute -top-1 left-0 right-0 z-10 flex h-2 cursor-ns-resize items-center justify-center ${
+                isResizing ? 'bg-accent/20' : 'hover:bg-accent/10'
+              }`}
+            >
+              <div className="h-0.5 w-12 rounded-full bg-text-muted/50" />
+            </div>
             <BottomTabs />
           </div>
         </div>
 
-        {/* Right: Trade Panel */}
-        <div className="w-96 border-l border-border">
+        {/* Center-Right: Orderbook */}
+        <div className="w-72 border-l border-border">
+          <Orderbook />
+        </div>
+
+        {/* Far Right: Trade Panel */}
+        <div className="w-80 border-l border-border">
           <TradePanel />
         </div>
       </div>

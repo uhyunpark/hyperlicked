@@ -20,13 +20,13 @@ export function BottomTabs() {
   const [activeTab, setActiveTab] = useState<Tab>('positions')
 
   const tabs: TabConfig[] = [
-    { id: 'balances', label: 'Balances' },
     { id: 'positions', label: 'Positions' },
     { id: 'orders', label: 'Open Orders' },
     { id: 'twap', label: 'TWAP', disabled: true },
     { id: 'trade-history', label: 'Trade History' },
     { id: 'funding-history', label: 'Funding History' },
-    { id: 'order-history', label: 'Order History' }
+    { id: 'order-history', label: 'Order History' },
+    { id: 'balances', label: 'Balances' }
   ]
 
   return (
