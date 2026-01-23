@@ -24,10 +24,12 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
+pub mod handshake;
 mod mock;
 pub mod sync;
 mod transport;
 
+pub use handshake::{HandshakeConfig, HandshakeResult};
 pub use mock::MockNetwork;
 pub use sync::{SyncClient, SyncHandler};
 pub use transport::TcpNetwork;
@@ -55,6 +57,12 @@ pub trait Network: Send + Sync {
 
     /// Broadcast a new view message to all validators (sent by new leader)
     async fn broadcast_new_view(&self, nv: NewView) -> anyhow::Result<()>;
+
+    /// Broadcast any message to all validators (generic)
+    async fn broadcast(&self, msg: &Message) -> anyhow::Result<()>;
+
+    /// Send a message to a specific peer
+    async fn send_to(&self, to: NodeId, msg: &Message) -> anyhow::Result<()>;
 
     /// Receive the next incoming message (blocking)
     async fn recv(&self) -> anyhow::Result<(NodeId, Message)>;

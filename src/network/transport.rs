@@ -3,6 +3,14 @@
 //! Simple TCP-based networking for consensus messages.
 //! Uses length-prefixed bincode for efficient message framing.
 //!
+//! ## Security
+//!
+//! **IMPORTANT**: This module currently uses unauthenticated handshakes (NodeId only).
+//! For production use, integrate the authenticated handshake protocol from
+//! `network::handshake` which uses BLS signatures to prevent impersonation.
+//!
+//! See `HandshakeConfig::authenticated()` for setup.
+//!
 //! ## Serialization
 //!
 //! Consensus messages use bincode for performance (2-5x faster, 30-50% smaller
@@ -116,8 +124,8 @@ impl TcpNetwork {
         Ok(())
     }
 
-    /// Send a message to a specific peer
-    async fn send_to(&self, to: NodeId, msg: &Message) -> Result<()> {
+    /// Send a message to a specific peer (internal impl)
+    async fn send_to_internal(&self, to: NodeId, msg: &Message) -> Result<()> {
         let data = serialize_message(msg)?;
 
         let peers = self.peers.read().await;
@@ -134,8 +142,8 @@ impl TcpNetwork {
         }
     }
 
-    /// Broadcast a message to all connected peers
-    async fn broadcast(&self, msg: &Message) -> Result<()> {
+    /// Broadcast a message to all connected peers (internal impl)
+    async fn broadcast_internal(&self, msg: &Message) -> Result<()> {
         let data = serialize_message(msg)?;
         let peers = self.peers.read().await;
 
@@ -157,7 +165,7 @@ impl Network for TcpNetwork {
             height = propose.block.height,
             "Broadcasting propose"
         );
-        self.broadcast(&Message::Propose(propose)).await
+        self.broadcast_internal(&Message::Propose(propose)).await
     }
 
     async fn send_vote(&self, to: NodeId, vote: Vote) -> Result<()> {
@@ -166,12 +174,12 @@ impl Network for TcpNetwork {
             to = %hash_short(&to),
             "Sending vote"
         );
-        self.send_to(to, &Message::Vote(vote)).await
+        self.send_to_internal(to, &Message::Vote(vote)).await
     }
 
     async fn broadcast_prepare(&self, prepare: Prepare) -> Result<()> {
         debug!(view = prepare.view, "Broadcasting prepare");
-        self.broadcast(&Message::Prepare(prepare)).await
+        self.broadcast_internal(&Message::Prepare(prepare)).await
     }
 
     async fn broadcast_view_change(&self, vc: ViewChange) -> Result<()> {
@@ -180,12 +188,20 @@ impl Network for TcpNetwork {
             to_view = vc.to_view,
             "Broadcasting view change"
         );
-        self.broadcast(&Message::ViewChange(vc)).await
+        self.broadcast_internal(&Message::ViewChange(vc)).await
     }
 
     async fn broadcast_new_view(&self, nv: NewView) -> Result<()> {
         debug!(view = nv.view, "Broadcasting new view");
-        self.broadcast(&Message::NewView(nv)).await
+        self.broadcast_internal(&Message::NewView(nv)).await
+    }
+
+    async fn broadcast(&self, msg: &Message) -> Result<()> {
+        self.broadcast_internal(msg).await
+    }
+
+    async fn send_to(&self, to: NodeId, msg: &Message) -> Result<()> {
+        self.send_to_internal(to, msg).await
     }
 
     async fn recv(&self) -> Result<(NodeId, Message)> {
