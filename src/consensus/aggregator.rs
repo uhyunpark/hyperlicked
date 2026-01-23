@@ -14,9 +14,12 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::crypto::bls::{aggregate_signatures, BlsSignature};
 use crate::types::{Certificate, Hash, NodeId, View, Vote};
+
+use super::metrics::ConsensusMetrics;
 
 /// Collects votes and aggregates signatures
 pub struct VoteAggregator {
@@ -31,6 +34,9 @@ pub struct VoteAggregator {
 
     /// Skip signature verification (dev mode only!)
     skip_verification: bool,
+
+    /// Optional metrics for tracking Byzantine events
+    metrics: Option<Arc<ConsensusMetrics>>,
 }
 
 impl VoteAggregator {
@@ -41,6 +47,7 @@ impl VoteAggregator {
             quorum,
             use_bls,
             skip_verification: false,
+            metrics: None,
         }
     }
 
@@ -51,7 +58,14 @@ impl VoteAggregator {
             quorum,
             use_bls,
             skip_verification,
+            metrics: None,
         }
+    }
+
+    /// Set metrics tracker for Byzantine event monitoring
+    pub fn with_metrics(mut self, metrics: Arc<ConsensusMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Add a vote. Returns Certificate if quorum reached.
@@ -73,8 +87,14 @@ impl VoteAggregator {
                 tracing::warn!(
                     view = vote.view,
                     voter = %crate::types::hash_short(&voter),
-                    "Rejecting vote with invalid BLS signature"
+                    "Rejecting vote with invalid BLS signature - POTENTIAL BYZANTINE FAULT"
                 );
+
+                // Record metric for monitoring
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_invalid_vote_signature(&voter);
+                }
+
                 return None;
             }
         }
@@ -108,6 +128,9 @@ impl VoteAggregator {
             Err(_) => {
                 // Fallback to legacy if BLS parsing fails
                 tracing::warn!("BLS signature parsing failed, using legacy certificate");
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_signature_parse_failure();
+                }
                 return Some(Certificate::new(view, block_hash, votes));
             }
         };
@@ -118,6 +141,9 @@ impl VoteAggregator {
             Err(_) => {
                 // Fallback to legacy if aggregation fails
                 tracing::warn!("BLS aggregation failed, using legacy certificate");
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_aggregation_failure();
+                }
                 return Some(Certificate::new(view, block_hash, votes));
             }
         };

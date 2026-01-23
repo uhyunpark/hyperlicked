@@ -19,7 +19,9 @@
 
 mod aggregator;
 mod engine;
+pub mod equivocation;
 mod message_handler;
+pub mod metrics;
 mod pacemaker;
 pub mod runner;
 mod safety;
@@ -28,6 +30,8 @@ pub mod view_change;
 
 pub use aggregator::VoteAggregator;
 pub use engine::Engine;
+pub use equivocation::{EquivocationDetector, EquivocationProof, EquivocationStats, VoteCheckResult};
+pub use metrics::{ConsensusMetrics, MetricsSummary};
 pub use pacemaker::Pacemaker;
 pub use runner::ConsensusRunner;
 pub use safety::Safety;

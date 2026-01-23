@@ -16,9 +16,12 @@
 //! 4. TC proves to all validators that view change is legitimate
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::crypto::bls::{aggregate_signatures, BlsPublicKey, BlsSecretKey, BlsSignature};
 use crate::types::{NodeId, Timeout, TimeoutCertificate, View};
+
+use super::metrics::ConsensusMetrics;
 
 /// Errors that can occur during timeout collection
 #[derive(Debug, Clone, thiserror::Error)]
@@ -46,6 +49,9 @@ pub struct TimeoutCollector {
 
     /// Validator public keys for signature verification
     validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
+
+    /// Optional metrics for tracking Byzantine events
+    metrics: Option<Arc<ConsensusMetrics>>,
 }
 
 impl TimeoutCollector {
@@ -55,6 +61,7 @@ impl TimeoutCollector {
             timeouts: HashMap::new(),
             quorum,
             validator_pubkeys,
+            metrics: None,
         }
     }
 
@@ -65,7 +72,14 @@ impl TimeoutCollector {
             timeouts: HashMap::new(),
             quorum,
             validator_pubkeys: HashMap::new(),
+            metrics: None,
         }
+    }
+
+    /// Set metrics tracker for Byzantine event monitoring
+    pub fn with_metrics(mut self, metrics: Arc<ConsensusMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Add a Timeout message.
@@ -99,20 +113,40 @@ impl TimeoutCollector {
 
     /// Verify a timeout message signature
     fn verify_timeout(&self, timeout: &Timeout) -> Result<(), TimeoutError> {
-        let pubkey = self
-            .validator_pubkeys
-            .get(&timeout.sender)
-            .ok_or(TimeoutError::UnknownValidator(timeout.sender))?;
+        let pubkey = self.validator_pubkeys.get(&timeout.sender).ok_or_else(|| {
+            // Record metric for unknown validator
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_unknown_validator(&timeout.sender);
+            }
+            TimeoutError::UnknownValidator(timeout.sender)
+        })?;
 
         if timeout.signature.len() != 96 {
+            // Record metric for parse failure
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_signature_parse_failure();
+            }
             return Err(TimeoutError::InvalidSignature);
         }
 
-        let sig =
-            BlsSignature::from_slice(&timeout.signature).map_err(|_| TimeoutError::InvalidSignature)?;
+        let sig = BlsSignature::from_slice(&timeout.signature).map_err(|_| {
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_signature_parse_failure();
+            }
+            TimeoutError::InvalidSignature
+        })?;
 
         let signing_data = timeout.signing_data();
         if !pubkey.verify(&signing_data, &sig) {
+            // Record metric for invalid signature - POTENTIAL BYZANTINE FAULT
+            tracing::warn!(
+                view = timeout.view,
+                sender = %hex::encode(&timeout.sender[..4]),
+                "Rejecting timeout with invalid BLS signature - POTENTIAL BYZANTINE FAULT"
+            );
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_invalid_timeout_signature(&timeout.sender);
+            }
             return Err(TimeoutError::InvalidSignature);
         }
 
