@@ -16,6 +16,7 @@ fn create_block(view: u64, height: u64, timestamp: u64) -> Block {
         proposer: [1u8; 32],
         app_hash: [0u8; 32],
         timestamp,
+        justify: None,
     }
 }
 

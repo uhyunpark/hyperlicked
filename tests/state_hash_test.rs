@@ -273,6 +273,7 @@ fn test_block_execution_deterministic_hash() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
 
     // Execute on both states
@@ -300,6 +301,7 @@ fn test_empty_block_minimal_hash_change() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
     state.execute(&empty_block);
 

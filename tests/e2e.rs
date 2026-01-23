@@ -162,6 +162,7 @@ fn test_order_matching() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
 
     use hyperlicked::consensus::AppHook;
@@ -231,6 +232,7 @@ fn test_position_updates() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
 
     use hyperlicked::consensus::AppHook;

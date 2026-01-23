@@ -61,6 +61,7 @@ fn test_block_execution_applies_transactions() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
 
     // Execute the block
@@ -91,6 +92,7 @@ fn test_state_recovery_via_block_replay() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
     original_state.execute(&block1);
 
@@ -115,6 +117,7 @@ fn test_state_recovery_via_block_replay() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 2000,
+        justify: None,
     };
     original_state.execute(&block2);
 
@@ -172,6 +175,7 @@ fn test_mempool_two_phase_commit() {
         proposer: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
+        justify: None,
     };
 
     // Execute block (this commits the transactions)

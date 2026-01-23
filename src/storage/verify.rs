@@ -219,6 +219,7 @@ mod tests {
                 proposer: [1u8; 32],
                 app_hash: [0u8; 32],
                 timestamp: 1000 + i as u64,
+                justify: None,
             };
             parent = block.hash();
             blocks.push(block);

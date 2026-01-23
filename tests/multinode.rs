@@ -82,6 +82,7 @@ impl TestNode {
             proposer: self.config.node_id,
             app_hash: [0u8; 32],
             timestamp: now.as_millis() as u64,
+            justify: None,
         };
         block.app_hash = self.app.execute(&block);
 

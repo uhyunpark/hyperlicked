@@ -278,6 +278,7 @@ async fn run_consensus_loop(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64,
+                justify: None,
             };
 
             // Execute block (processes mempool transactions)

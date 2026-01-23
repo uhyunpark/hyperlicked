@@ -117,6 +117,7 @@ impl TestContext {
             proposer: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp,
+            justify: None,
         };
 
         self.state.execute(&block);
