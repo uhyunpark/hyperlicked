@@ -38,6 +38,7 @@ pub mod crypto;
 pub mod network;
 pub mod storage;
 pub mod types;
+pub mod visor;
 
 // Re-exports for convenience
 pub use api::{SharedState, create_router};

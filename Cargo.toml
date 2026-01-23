@@ -16,6 +16,10 @@ path = "src/bin/multinode.rs"
 name = "hl-server"
 path = "src/bin/server.rs"
 
+[[bin]]
+name = "hl-visor"
+path = "src/bin/visor.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -60,6 +64,15 @@ reqwest = { version = "0.12", features = ["json"] }
 # libp2p = "0.54"             # P2P networking
 rocksdb = "0.22"              # Storage
 base64 = "0.22.1"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Visor dependencies
+notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
+dirs = "5.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
