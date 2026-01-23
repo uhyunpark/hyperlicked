@@ -103,7 +103,7 @@ where
         // 2. Prepare payload from app
         let payload = self.app.prepare_payload(&parent);
 
-        // 3. Create block
+        // 3. Create block (justify is the QC that certifies our parent)
         let mut block = Block {
             view,
             height: parent.height + 1,
@@ -115,6 +115,7 @@ where
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
+            justify: self.safety.high_qc().cloned(),
         };
 
         // 4. Execute to get app_hash
@@ -216,6 +217,13 @@ where
         let certified_block = self.pending.get(&qc.block_hash)
             .cloned()
             .or_else(|| self.store.get(&qc.block_hash))?;
+
+        // HotStuff-2 Locking Rule: QC on B means B.justify.block is locked.
+        // When we see QC for block B, we lock on B's justify (the QC that B extends from).
+        // This prevents voting for conflicting blocks in earlier views.
+        if let Some(justify) = &certified_block.justify {
+            self.safety.update_locked_qc(justify.clone());
+        }
 
         // Don't commit genesis parent (height 0 has parent = [0u8; 32])
         if certified_block.height == 0 {

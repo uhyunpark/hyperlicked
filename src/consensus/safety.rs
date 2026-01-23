@@ -268,6 +268,7 @@ mod tests {
             proposer: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: 0,
+            justify: None,
         };
 
         assert!(matches!(

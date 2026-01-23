@@ -112,8 +112,8 @@ impl MockNetwork {
             .collect()
     }
 
-    /// Send a message to a specific node
-    async fn send_to(&self, to: NodeId, msg: Message) -> anyhow::Result<()> {
+    /// Send a message to a specific node (internal impl)
+    async fn send_to_internal(&self, to: NodeId, msg: Message) -> anyhow::Result<()> {
         if let Some(tx) = self.peers.get(&to) {
             tx.send((self.node_id, msg))
                 .await
@@ -122,8 +122,8 @@ impl MockNetwork {
         Ok(())
     }
 
-    /// Broadcast a message to all nodes except self
-    async fn broadcast(&self, msg: Message) -> anyhow::Result<()> {
+    /// Broadcast a message to all nodes except self (internal impl)
+    async fn broadcast_internal(&self, msg: Message) -> anyhow::Result<()> {
         for (&peer_id, tx) in &self.peers {
             if peer_id != self.node_id {
                 // Ignore send errors (peer might be dropped)
@@ -142,23 +142,31 @@ impl MockNetwork {
 #[async_trait]
 impl Network for MockNetwork {
     async fn broadcast_propose(&self, propose: Propose) -> anyhow::Result<()> {
-        self.broadcast(Message::Propose(propose)).await
+        self.broadcast_internal(Message::Propose(propose)).await
     }
 
     async fn send_vote(&self, to: NodeId, vote: Vote) -> anyhow::Result<()> {
-        self.send_to(to, Message::Vote(vote)).await
+        self.send_to_internal(to, Message::Vote(vote)).await
     }
 
     async fn broadcast_prepare(&self, prepare: Prepare) -> anyhow::Result<()> {
-        self.broadcast(Message::Prepare(prepare)).await
+        self.broadcast_internal(Message::Prepare(prepare)).await
     }
 
     async fn broadcast_view_change(&self, vc: ViewChange) -> anyhow::Result<()> {
-        self.broadcast(Message::ViewChange(vc)).await
+        self.broadcast_internal(Message::ViewChange(vc)).await
     }
 
     async fn broadcast_new_view(&self, nv: NewView) -> anyhow::Result<()> {
-        self.broadcast(Message::NewView(nv)).await
+        self.broadcast_internal(Message::NewView(nv)).await
+    }
+
+    async fn broadcast(&self, msg: &Message) -> anyhow::Result<()> {
+        self.broadcast_internal(msg.clone()).await
+    }
+
+    async fn send_to(&self, to: NodeId, msg: &Message) -> anyhow::Result<()> {
+        self.send_to_internal(to, msg.clone()).await
     }
 
     async fn recv(&self) -> anyhow::Result<(NodeId, Message)> {

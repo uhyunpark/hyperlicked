@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Hash, Height, NodeId, View};
+use super::{Certificate, Hash, Height, NodeId, View};
 
 /// A block in the chain.
 ///
@@ -14,6 +14,10 @@ use super::{Hash, Height, NodeId, View};
 /// - `height`: Position in committed chain (0 = genesis)
 /// - `payload`: Serialized transactions
 /// - `app_hash`: State root after executing this block
+/// - `justify`: QC that justifies this block (proves parent was certified)
+///
+/// The `justify` field is NOT included in the block hash (it's metadata
+/// about how we received the block, not part of the block identity).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub view: View,
@@ -23,6 +27,10 @@ pub struct Block {
     pub proposer: NodeId,
     pub app_hash: Hash,
     pub timestamp: u64,
+    /// QC that justifies this block (proves parent was certified).
+    /// Not included in block hash - it's consensus metadata.
+    #[serde(default)]
+    pub justify: Option<Certificate>,
 }
 
 impl Block {
@@ -49,6 +57,7 @@ impl Block {
             proposer: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: 0,
+            justify: None,
         }
     }
 }

@@ -84,6 +84,15 @@ impl Pacemaker {
         }
     }
 
+    /// Set view directly (for crash recovery).
+    ///
+    /// Unlike `advance_to`, this can set any view including lower ones.
+    /// Use only during initialization from persisted state.
+    pub fn set_view(&mut self, view: View) {
+        self.current_view = view;
+        self.view_start = Instant::now();
+    }
+
     /// Record a timeout (for exponential backoff)
     pub fn record_timeout(&mut self) {
         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
