@@ -186,6 +186,29 @@ impl Transaction {
         }
     }
 
+    /// Get the symbol for symbol-scoped transactions (for parallel execution)
+    /// Returns None for global transactions (deposits, withdrawals, staking, etc.)
+    pub fn symbol(&self) -> Option<&Symbol> {
+        match self {
+            Transaction::PlaceOrder { symbol, .. } => Some(symbol),
+            Transaction::PlaceTriggerOrder { symbol, .. } => Some(symbol),
+            Transaction::CancelTriggerOrderByCloid { symbol, .. } => Some(symbol),
+            Transaction::OraclePriceUpdate { symbol, .. } => Some(symbol),
+            // Global transactions - affect shared state
+            Transaction::Deposit { .. }
+            | Transaction::Withdraw { .. }
+            | Transaction::CancelOrder { .. } // Order ID not symbol-scoped
+            | Transaction::CancelTriggerOrder { .. } // Trigger ID not symbol-scoped
+            | Transaction::RegisterValidator { .. }
+            | Transaction::Delegate { .. }
+            | Transaction::Undelegate { .. }
+            | Transaction::ClaimUnstaked { .. }
+            | Transaction::ClaimRewards { .. }
+            | Transaction::Unjail { .. }
+            | Transaction::SubmitEvidence { .. } => None,
+        }
+    }
+
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()

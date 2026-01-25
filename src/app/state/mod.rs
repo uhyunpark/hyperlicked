@@ -6,6 +6,7 @@
 mod consensus;
 mod execution;
 pub mod incremental_hash;
+mod parallel;
 mod trigger;
 
 use std::collections::{HashMap, VecDeque};
@@ -21,6 +22,9 @@ use crate::app::{
     Address, MarketConfig, Symbol, Transaction,
 };
 use crate::types::{Hash, Price, Size, View};
+
+#[cfg(feature = "incremental_hash")]
+use incremental_hash::IncrementalHasher;
 
 /// Maximum trades stored per symbol
 pub const MAX_TRADES_PER_SYMBOL: usize = 1000;
@@ -120,6 +124,9 @@ pub struct AppState {
     pub(crate) day_volume: HashMap<Symbol, Size>,
     /// Cumulative daily notional volume per symbol (cents)
     pub(crate) day_notional_volume: HashMap<Symbol, i64>,
+    /// Incremental state hasher (when feature enabled)
+    #[cfg(feature = "incremental_hash")]
+    pub(crate) incremental_hasher: IncrementalHasher,
 }
 
 impl AppState {
@@ -158,6 +165,8 @@ impl AppState {
             day_start: 0,
             day_volume: HashMap::new(),
             day_notional_volume: HashMap::new(),
+            #[cfg(feature = "incremental_hash")]
+            incremental_hasher: IncrementalHasher::new(),
         };
 
         // Add default BTC-USDT market
