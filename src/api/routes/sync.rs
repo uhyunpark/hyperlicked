@@ -46,7 +46,8 @@ pub async fn get_sync_status(
         .as_millis() as u64;
 
     // Get committed hash from state hash computation
-    let state_hash = app.compute_state_hash();
+    // Use the full hash computation (read-only) for API since we only have read lock
+    let state_hash = app.compute_state_hash_full();
 
     // Check if we have persistent storage
     let (latest_snapshot_height, is_persistent) = match &state.store {

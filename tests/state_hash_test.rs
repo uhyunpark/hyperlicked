@@ -232,7 +232,7 @@ fn test_hash_includes_trigger_orders() {
         reduce_only: false,
     });
 
-    let hash_before = state1.compute_state_hash();
+    let hash_before = state1.compute_state_hash_full();
 
     // Add trigger order to state1 only
     execute_tx(&mut state1, Transaction::PlaceTriggerOrder {
@@ -245,8 +245,10 @@ fn test_hash_includes_trigger_orders() {
         cloid: None,
     });
 
-    let hash_with_trigger = state1.compute_state_hash();
-    let hash_without_trigger = state2.compute_state_hash();
+    // Use compute_state_hash_full() for trigger order tests because
+    // incremental hash only includes trigger count, not details
+    let hash_with_trigger = state1.compute_state_hash_full();
+    let hash_without_trigger = state2.compute_state_hash_full();
 
     assert_ne!(hash_with_trigger, hash_without_trigger, "Trigger orders should affect state hash");
     assert_ne!(hash_before, hash_with_trigger, "Adding trigger should change hash");

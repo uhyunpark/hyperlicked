@@ -107,6 +107,7 @@ impl AppState {
 
     fn execute_deposit(&mut self, trader: String, amount: i64) -> Result<Vec<Fill>, AppError> {
         self.accounts.deposit(&trader, amount)?;
+        self.mark_dirty_account(&trader);
         self.pending_deposits.push(DepositInfo {
             trader: trader.clone(),
             amount,
@@ -116,6 +117,7 @@ impl AppState {
 
     fn execute_withdraw(&mut self, trader: String, amount: i64) -> Result<Vec<Fill>, AppError> {
         self.accounts.withdraw(&trader, amount)?;
+        self.mark_dirty_account(&trader);
         Ok(vec![])
     }
 
@@ -246,7 +248,7 @@ impl AppState {
         Ok(fills)
     }
 
-    fn process_fills(&mut self, fills: &[Fill], symbol: &Symbol, config: &MarketConfig) {
+    pub(super) fn process_fills(&mut self, fills: &[Fill], symbol: &Symbol, config: &MarketConfig) {
         for fill in fills {
             let is_buy = fill.side == Side::Bid;
             self.accounts.apply_fill(
@@ -260,8 +262,13 @@ impl AppState {
                 config.taker_fee,
             );
 
+            // Mark both accounts as dirty for incremental hashing
+            self.mark_dirty_account(&fill.maker);
+            self.mark_dirty_account(&fill.taker);
+
             // Update mark price to last trade
             self.mark_prices.insert(symbol.clone(), fill.price);
+            self.mark_globals_dirty();
 
             // Store fill in trade history
             let history = self.trade_history.entry(fill.symbol.clone()).or_default();
@@ -288,6 +295,7 @@ impl AppState {
     ) -> Result<Vec<Fill>, AppError> {
         // Deduct self-stake from account
         self.accounts.withdraw(&operator, self_stake)?;
+        self.mark_dirty_account(&operator);
         self.staking.register_validator(
             operator.clone(),
             node_id,
@@ -295,6 +303,7 @@ impl AppState {
             self_stake,
             commission_bps,
         )?;
+        self.mark_globals_dirty(); // Staking state changed
         self.pending_staking_events.push(
             staking::StakingTxResult::ValidatorRegistered { operator, node_id },
         );
@@ -313,8 +322,10 @@ impl AppState {
         }
         // Deduct delegation amount from account
         self.accounts.withdraw(&delegator, amount)?;
+        self.mark_dirty_account(&delegator);
         self.staking
             .delegate(delegator.clone(), validator.clone(), amount)?;
+        self.mark_globals_dirty(); // Staking state changed
         self.pending_staking_events
             .push(staking::StakingTxResult::Delegated {
                 delegator,
@@ -336,6 +347,7 @@ impl AppState {
             amount,
             self.timestamp,
         )?;
+        self.mark_globals_dirty(); // Staking state changed
         let completion_time = self.timestamp + staking::UNSTAKE_DELAY_MS;
         self.pending_staking_events
             .push(staking::StakingTxResult::Undelegated {
@@ -354,8 +366,12 @@ impl AppState {
             if d == delegator {
                 // Return funds to account
                 self.accounts.deposit(&d, amount)?;
+                self.mark_dirty_account(&d);
                 total_amount += amount;
             }
+        }
+        if total_amount > 0 {
+            self.mark_globals_dirty(); // Staking state changed
         }
         self.pending_staking_events
             .push(staking::StakingTxResult::UnstakeClaimed {
@@ -383,6 +399,8 @@ impl AppState {
         // Add rewards to account balance
         if amount > 0 {
             self.accounts.deposit(&claimant, amount)?;
+            self.mark_dirty_account(&claimant);
+            self.mark_globals_dirty(); // Staking state changed
         }
         self.pending_staking_events
             .push(staking::StakingTxResult::RewardsClaimed { claimant, amount });
@@ -391,6 +409,7 @@ impl AppState {
 
     fn execute_unjail(&mut self, operator: String) -> Result<Vec<Fill>, AppError> {
         self.staking.unjail(&operator, self.timestamp)?;
+        self.mark_globals_dirty(); // Staking state changed
         self.pending_staking_events
             .push(staking::StakingTxResult::Unjailed { operator });
         Ok(vec![])
@@ -408,6 +427,7 @@ impl AppState {
             .filter(|r| r.offender == offender)
             .map(|r| r.total_slashed)
             .sum();
+        self.mark_globals_dirty(); // Staking state changed
         self.pending_staking_events
             .push(staking::StakingTxResult::EvidenceProcessed {
                 offender,
