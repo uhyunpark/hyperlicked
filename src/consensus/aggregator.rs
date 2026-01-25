@@ -116,6 +116,9 @@ impl VoteAggregator {
     }
 
     /// Aggregate BLS signatures into a certificate
+    ///
+    /// When `bls_batch_verify` feature is enabled, performs additional
+    /// verification before aggregation to detect Byzantine signatures.
     fn aggregate_bls(&self, view: View, block_hash: Hash, votes: Vec<Vote>) -> Option<Certificate> {
         // Extract BLS signatures
         let signatures: Result<Vec<BlsSignature>, _> = votes
@@ -135,6 +138,86 @@ impl VoteAggregator {
             }
         };
 
+        // When bls_batch_verify is enabled, verify each signature before aggregation
+        // This catches Byzantine votes that would otherwise corrupt the aggregate
+        #[cfg(feature = "bls_batch_verify")]
+        {
+            use crate::crypto::bls::BlsPublicKey;
+
+            // Batch verify by checking each signature individually but in parallel
+            // (Different from true batch verify which requires same message)
+            let mut valid_votes = Vec::with_capacity(votes.len());
+            let mut valid_sigs = Vec::with_capacity(votes.len());
+
+            for (vote, sig) in votes.iter().zip(signatures.iter()) {
+                // Parse public key
+                let pk = vote.bls_pubkey.as_ref()
+                    .and_then(|bytes| {
+                        if bytes.len() == 48 {
+                            let mut arr = [0u8; 48];
+                            arr.copy_from_slice(bytes);
+                            BlsPublicKey::from_bytes(&arr).ok()
+                        } else {
+                            None
+                        }
+                    });
+
+                let pk = match pk {
+                    Some(pk) => pk,
+                    None => {
+                        tracing::warn!(
+                            view = view,
+                            voter = %crate::types::hash_short(&vote.voter),
+                            "Invalid BLS public key"
+                        );
+                        continue;
+                    }
+                };
+
+                // Verify signature
+                let signing_data = vote.signing_data();
+                if pk.verify(&signing_data, sig) {
+                    valid_votes.push(vote.clone());
+                    valid_sigs.push(sig.clone());
+                } else {
+                    tracing::warn!(
+                        view = view,
+                        voter = %crate::types::hash_short(&vote.voter),
+                        "Invalid BLS signature - BYZANTINE FAULT"
+                    );
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_invalid_vote_signature(&vote.voter);
+                    }
+                }
+            }
+
+            // Check if we still have quorum after filtering
+            if valid_votes.len() < self.quorum {
+                tracing::error!(
+                    view = view,
+                    valid = valid_votes.len(),
+                    quorum = self.quorum,
+                    "Insufficient valid signatures after filtering Byzantine votes"
+                );
+                return None;
+            }
+
+            // Use filtered votes and signatures
+            return self.aggregate_valid_signatures(view, block_hash, valid_votes, valid_sigs);
+        }
+
+        #[cfg(not(feature = "bls_batch_verify"))]
+        self.aggregate_valid_signatures(view, block_hash, votes, signatures)
+    }
+
+    /// Aggregate already-validated signatures into a certificate
+    fn aggregate_valid_signatures(
+        &self,
+        view: View,
+        block_hash: Hash,
+        votes: Vec<Vote>,
+        signatures: Vec<BlsSignature>,
+    ) -> Option<Certificate> {
         // Aggregate signatures
         let agg_sig = match aggregate_signatures(&signatures) {
             Ok(sig) => sig.to_bytes().to_vec(),

@@ -168,6 +168,83 @@ pub fn verify_aggregate(
     }
 }
 
+/// Batch verify multiple BLS signatures over the SAME message
+///
+/// This is more efficient than verifying each signature individually
+/// because it uses BLS's ability to aggregate and verify in one operation.
+///
+/// If batch verification fails, caller should fall back to individual
+/// verification to identify which signature(s) are invalid (Byzantine detection).
+///
+/// Returns true if ALL signatures are valid, false otherwise.
+#[cfg(feature = "bls_batch_verify")]
+pub fn verify_batch(
+    message: &[u8],
+    signatures: &[&BlsSignature],
+    public_keys: &[&BlsPublicKey],
+) -> bool {
+    if signatures.len() != public_keys.len() || signatures.is_empty() {
+        return false;
+    }
+
+    // Use blst's multi-verification capability
+    // For same-message batch verification, we can aggregate and verify
+    let sigs: Vec<&Signature> = signatures.iter().map(|s| &s.inner).collect();
+    let pks: Vec<&PublicKey> = public_keys.iter().map(|p| &p.inner).collect();
+
+    // Try to aggregate signatures
+    let agg_sig = match AggregateSignature::aggregate(&sigs, true) {
+        Ok(agg) => agg.to_signature(),
+        Err(_) => return false,
+    };
+
+    // Try to aggregate public keys
+    let agg_pk = match AggregatePublicKey::aggregate(&pks, true) {
+        Ok(agg) => agg.to_public_key(),
+        Err(_) => return false,
+    };
+
+    // Verify aggregated signature against aggregated public key
+    agg_sig.verify(true, message, DST, &[], &agg_pk, true) == BLST_ERROR::BLST_SUCCESS
+}
+
+/// Batch verify multiple BLS signatures (no-op when feature disabled)
+#[cfg(not(feature = "bls_batch_verify"))]
+pub fn verify_batch(
+    message: &[u8],
+    signatures: &[&BlsSignature],
+    public_keys: &[&BlsPublicKey],
+) -> bool {
+    // Fall back to individual verification
+    if signatures.len() != public_keys.len() || signatures.is_empty() {
+        return false;
+    }
+    signatures
+        .iter()
+        .zip(public_keys.iter())
+        .all(|(sig, pk)| pk.verify(message, sig))
+}
+
+/// Verify signatures individually and return indices of valid ones
+///
+/// Used as fallback after batch verification fails to identify
+/// which signatures are invalid (Byzantine detection).
+pub fn verify_individually(
+    message: &[u8],
+    signatures: &[&BlsSignature],
+    public_keys: &[&BlsPublicKey],
+) -> Vec<usize> {
+    if signatures.len() != public_keys.len() {
+        return vec![];
+    }
+    signatures
+        .iter()
+        .zip(public_keys.iter())
+        .enumerate()
+        .filter_map(|(i, (sig, pk))| if pk.verify(message, *sig) { Some(i) } else { None })
+        .collect()
+}
+
 /// Errors that can occur during BLS operations
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BlsError {
@@ -181,6 +258,8 @@ pub enum BlsError {
     NoPublicKeys,
     #[error("aggregation failed")]
     AggregationFailed,
+    #[error("batch verification failed")]
+    BatchVerificationFailed,
 }
 
 #[cfg(test)]
@@ -305,5 +384,103 @@ mod tests {
         // Compare to ECDSA: sig ~65 bytes, pubkey 33/65 bytes
         // BLS aggregation of N signatures = 96 bytes (constant)
         // ECDSA concatenation of N signatures = 65*N bytes
+    }
+
+    #[test]
+    fn test_batch_verify_all_valid() {
+        let message = b"batch verify test";
+
+        // Generate multiple key pairs
+        let keys: Vec<BlsSecretKey> = (0..5)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+
+        let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+        let signatures: Vec<BlsSignature> = keys.iter().map(|k| k.sign(message)).collect();
+
+        // Create references
+        let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
+        let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();
+
+        // Batch verify - should succeed
+        assert!(verify_batch(message, &sig_refs, &pk_refs), "All valid signatures should pass batch verify");
+    }
+
+    #[test]
+    fn test_batch_verify_one_invalid() {
+        let message = b"batch verify test";
+
+        // Generate key pairs
+        let keys: Vec<BlsSecretKey> = (0..5)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+
+        let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+        let mut signatures: Vec<BlsSignature> = keys.iter().map(|k| k.sign(message)).collect();
+
+        // Replace one signature with invalid one (sign different message)
+        signatures[2] = keys[2].sign(b"different message");
+
+        // Create references
+        let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
+        let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();
+
+        // Batch verify - should fail
+        assert!(!verify_batch(message, &sig_refs, &pk_refs), "Should fail with one invalid signature");
+
+        // Individual verification should identify the bad one
+        let valid_indices = verify_individually(message, &sig_refs, &pk_refs);
+        assert_eq!(valid_indices.len(), 4, "Should have 4 valid signatures");
+        assert!(!valid_indices.contains(&2), "Index 2 should not be valid");
+    }
+
+    #[test]
+    fn test_verify_individually() {
+        let message = b"individual test";
+
+        let keys: Vec<BlsSecretKey> = (0..3)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+
+        let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+
+        // Create valid signatures, but one for wrong message
+        let mut signatures: Vec<BlsSignature> = vec![];
+        signatures.push(keys[0].sign(message));      // Valid
+        signatures.push(keys[1].sign(b"wrong msg")); // Invalid
+        signatures.push(keys[2].sign(message));      // Valid
+
+        let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
+        let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();
+
+        let valid = verify_individually(message, &sig_refs, &pk_refs);
+        assert_eq!(valid, vec![0, 2], "Only indices 0 and 2 should be valid");
+    }
+
+    #[test]
+    fn test_batch_verify_empty() {
+        assert!(!verify_batch(b"test", &[], &[]), "Empty should fail");
+    }
+
+    #[test]
+    fn test_batch_verify_mismatched_lengths() {
+        let sk = BlsSecretKey::generate();
+        let pk = sk.public_key();
+        let sig = sk.sign(b"test");
+
+        // More signatures than keys
+        assert!(!verify_batch(b"test", &[&sig, &sig], &[&pk]), "Mismatched lengths should fail");
     }
 }

@@ -77,6 +77,7 @@ impl Vote {
         data
     }
 
+
     /// Check if this vote uses BLS signature
     pub fn is_bls(&self) -> bool {
         self.signature.len() == 96 && self.bls_pubkey.is_some()
