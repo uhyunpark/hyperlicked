@@ -18,6 +18,7 @@
 //! 5. Repeat
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +38,124 @@ const DEFAULT_SNAPSHOT_THRESHOLD: u64 = 1000;
 
 /// Maximum blocks to request per HTTP call
 const MAX_BLOCKS_PER_REQUEST: u64 = 100;
+
+/// Default consecutive failures before blacklisting a peer
+const DEFAULT_BLACKLIST_THRESHOLD: u32 = 5;
+
+/// Default blacklist duration in milliseconds (60 seconds)
+const DEFAULT_BLACKLIST_DURATION_MS: u64 = 60_000;
+
+/// Peer reputation tracking for blacklisting unreliable peers
+#[derive(Debug, Clone, Default)]
+pub struct PeerReputation {
+    /// Total successful interactions
+    pub success_count: u64,
+    /// Total failed interactions
+    pub failure_count: u64,
+    /// Consecutive failures (resets on success)
+    pub consecutive_failures: u32,
+    /// Blacklisted until this timestamp (ms since epoch), None if not blacklisted
+    pub blacklisted_until: Option<u64>,
+}
+
+impl PeerReputation {
+    /// Check if peer is currently blacklisted
+    pub fn is_blacklisted(&self, current_time_ms: u64) -> bool {
+        self.blacklisted_until
+            .map(|until| current_time_ms < until)
+            .unwrap_or(false)
+    }
+}
+
+/// Manages peer reputations and blacklisting
+#[derive(Debug)]
+pub struct PeerReputationManager {
+    /// Peer URL -> reputation
+    peers: HashMap<String, PeerReputation>,
+    /// Consecutive failures before blacklisting
+    blacklist_threshold: u32,
+    /// Duration to blacklist in milliseconds
+    blacklist_duration_ms: u64,
+}
+
+impl PeerReputationManager {
+    /// Create a new reputation manager with default settings
+    pub fn new() -> Self {
+        Self {
+            peers: HashMap::new(),
+            blacklist_threshold: DEFAULT_BLACKLIST_THRESHOLD,
+            blacklist_duration_ms: DEFAULT_BLACKLIST_DURATION_MS,
+        }
+    }
+
+    /// Create with custom threshold and duration
+    pub fn with_config(blacklist_threshold: u32, blacklist_duration_ms: u64) -> Self {
+        Self {
+            peers: HashMap::new(),
+            blacklist_threshold,
+            blacklist_duration_ms,
+        }
+    }
+
+    /// Record a successful interaction with a peer
+    pub fn record_success(&mut self, peer: &str) {
+        let rep = self.peers.entry(peer.to_string()).or_default();
+        rep.success_count = rep.success_count.saturating_add(1);
+        rep.consecutive_failures = 0;
+        // Clear blacklist on success (peer is working again)
+        rep.blacklisted_until = None;
+    }
+
+    /// Record a failed interaction with a peer
+    pub fn record_failure(&mut self, peer: &str, current_time_ms: u64) {
+        let rep = self.peers.entry(peer.to_string()).or_default();
+        rep.failure_count = rep.failure_count.saturating_add(1);
+        rep.consecutive_failures = rep.consecutive_failures.saturating_add(1);
+
+        // Blacklist if threshold exceeded
+        if rep.consecutive_failures >= self.blacklist_threshold {
+            let until = current_time_ms.saturating_add(self.blacklist_duration_ms);
+            rep.blacklisted_until = Some(until);
+            tracing::warn!(
+                peer,
+                consecutive_failures = rep.consecutive_failures,
+                blacklisted_until_ms = until,
+                "Peer blacklisted due to consecutive failures"
+            );
+        }
+    }
+
+    /// Check if a peer is currently blacklisted
+    pub fn is_blacklisted(&self, peer: &str, current_time_ms: u64) -> bool {
+        self.peers
+            .get(peer)
+            .map(|rep| rep.is_blacklisted(current_time_ms))
+            .unwrap_or(false)
+    }
+
+    /// Get reputation for a peer (for monitoring)
+    pub fn get_reputation(&self, peer: &str) -> Option<&PeerReputation> {
+        self.peers.get(peer)
+    }
+
+    /// Get all non-blacklisted peers from a list
+    pub fn filter_available<'a>(
+        &self,
+        peers: &'a [String],
+        current_time_ms: u64,
+    ) -> Vec<&'a String> {
+        peers
+            .iter()
+            .filter(|p| !self.is_blacklisted(p, current_time_ms))
+            .collect()
+    }
+}
+
+impl Default for PeerReputationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Sync status response from peer
 #[derive(Debug, Deserialize)]
@@ -131,6 +250,10 @@ pub struct ActiveSyncConfig {
     pub poll_interval: Duration,
     /// Download snapshot if behind by more than this
     pub snapshot_threshold: u64,
+    /// Consecutive failures before blacklisting a peer
+    pub blacklist_threshold: u32,
+    /// Duration to blacklist in milliseconds
+    pub blacklist_duration_ms: u64,
 }
 
 impl Default for ActiveSyncConfig {
@@ -139,6 +262,8 @@ impl Default for ActiveSyncConfig {
             peers: Vec::new(),
             poll_interval: Duration::from_secs(1),
             snapshot_threshold: DEFAULT_SNAPSHOT_THRESHOLD,
+            blacklist_threshold: DEFAULT_BLACKLIST_THRESHOLD,
+            blacklist_duration_ms: DEFAULT_BLACKLIST_DURATION_MS,
         }
     }
 }
@@ -149,16 +274,22 @@ impl Default for ActiveSyncConfig {
 pub struct ActiveSyncClient {
     config: ActiveSyncConfig,
     http_client: reqwest::Client,
+    reputation: PeerReputationManager,
 }
 
 impl ActiveSyncClient {
     pub fn new(config: ActiveSyncConfig) -> Self {
+        let reputation = PeerReputationManager::with_config(
+            config.blacklist_threshold,
+            config.blacklist_duration_ms,
+        );
         Self {
             config,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
+            reputation,
         }
     }
 
@@ -166,7 +297,7 @@ impl ActiveSyncClient {
     ///
     /// This function runs forever, polling peers and syncing when behind.
     pub async fn run(
-        &self,
+        &mut self,
         app: Arc<RwLock<AppState>>,
         store: Option<Arc<dyn PersistentStore + Send + Sync>>,
     ) {
@@ -235,24 +366,41 @@ impl ActiveSyncClient {
         }
     }
 
-    /// Get the highest height from any peer
-    async fn get_network_height(&self) -> Result<(String, u64), String> {
+    /// Get current time in milliseconds
+    fn current_time_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// Get the highest height from any non-blacklisted peer
+    async fn get_network_height(&mut self) -> Result<(String, u64), String> {
+        let current_time = Self::current_time_ms();
+        let available_peers = self.reputation.filter_available(&self.config.peers, current_time);
+
+        if available_peers.is_empty() {
+            return Err("No peers available (all blacklisted)".to_string());
+        }
+
         let mut best: Option<(String, u64)> = None;
 
-        for peer in &self.config.peers {
+        for peer in available_peers {
             match self.get_peer_status(peer).await {
                 Ok(status) => {
+                    self.reputation.record_success(peer);
                     if best.as_ref().map(|(_, h)| *h).unwrap_or(0) < status.height {
                         best = Some((peer.clone(), status.height));
                     }
                 }
                 Err(e) => {
+                    self.reputation.record_failure(peer, current_time);
                     debug!(peer, error = %e, "Failed to get peer status");
                 }
             }
         }
 
-        best.ok_or_else(|| "No peers available".to_string())
+        best.ok_or_else(|| "No peers responded".to_string())
     }
 
     /// Get sync status from a peer
@@ -608,6 +756,8 @@ impl ActiveSyncClient {
                     current_view: block.view,
                     committed_height: block.height,
                     committed_hash: app_hash,
+                    consecutive_timeouts: 0,
+                    vc_sent_for_view: None,
                 };
 
                 if let Err(e) = store.commit_block(block, &consensus_state) {
@@ -680,7 +830,7 @@ impl ActiveSyncClient {
 
     /// Sync once (non-blocking version for testing)
     pub async fn sync_once(
-        &self,
+        &mut self,
         app: &Arc<RwLock<AppState>>,
         store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
     ) -> SyncResult {
@@ -716,6 +866,8 @@ mod tests {
         let config = ActiveSyncConfig::default();
         assert!(config.peers.is_empty());
         assert_eq!(config.snapshot_threshold, DEFAULT_SNAPSHOT_THRESHOLD);
+        assert_eq!(config.blacklist_threshold, DEFAULT_BLACKLIST_THRESHOLD);
+        assert_eq!(config.blacklist_duration_ms, DEFAULT_BLACKLIST_DURATION_MS);
     }
 
     #[test]
@@ -724,7 +876,85 @@ mod tests {
             peers: vec!["http://localhost:8080".to_string()],
             poll_interval: Duration::from_secs(1),
             snapshot_threshold: 500,
+            blacklist_threshold: 3,
+            blacklist_duration_ms: 30_000,
         };
         let _client = ActiveSyncClient::new(config);
+    }
+
+    #[test]
+    fn test_peer_reputation_success() {
+        let mut manager = PeerReputationManager::new();
+        let peer = "http://localhost:8080";
+
+        manager.record_success(peer);
+        let rep = manager.get_reputation(peer).unwrap();
+        assert_eq!(rep.success_count, 1);
+        assert_eq!(rep.failure_count, 0);
+        assert_eq!(rep.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_peer_reputation_failure_blacklist() {
+        let mut manager = PeerReputationManager::with_config(3, 60_000);
+        let peer = "http://localhost:8080";
+        let current_time = 1000000;
+
+        // 2 failures - not yet blacklisted
+        manager.record_failure(peer, current_time);
+        manager.record_failure(peer, current_time);
+        assert!(!manager.is_blacklisted(peer, current_time));
+
+        // 3rd failure - now blacklisted
+        manager.record_failure(peer, current_time);
+        assert!(manager.is_blacklisted(peer, current_time));
+
+        // Still blacklisted after 30 seconds
+        assert!(manager.is_blacklisted(peer, current_time + 30_000));
+
+        // Not blacklisted after 60 seconds
+        assert!(!manager.is_blacklisted(peer, current_time + 60_001));
+    }
+
+    #[test]
+    fn test_peer_reputation_success_clears_blacklist() {
+        let mut manager = PeerReputationManager::with_config(2, 60_000);
+        let peer = "http://localhost:8080";
+        let current_time = 1000000;
+
+        // Blacklist the peer
+        manager.record_failure(peer, current_time);
+        manager.record_failure(peer, current_time);
+        assert!(manager.is_blacklisted(peer, current_time));
+
+        // Success clears blacklist
+        manager.record_success(peer);
+        assert!(!manager.is_blacklisted(peer, current_time));
+
+        let rep = manager.get_reputation(peer).unwrap();
+        assert_eq!(rep.consecutive_failures, 0);
+        assert_eq!(rep.failure_count, 2); // Total failures still tracked
+    }
+
+    #[test]
+    fn test_filter_available_peers() {
+        let mut manager = PeerReputationManager::with_config(2, 60_000);
+        let current_time = 1000000;
+
+        let peers = vec![
+            "http://peer1:8080".to_string(),
+            "http://peer2:8080".to_string(),
+            "http://peer3:8080".to_string(),
+        ];
+
+        // Blacklist peer2
+        manager.record_failure(&peers[1], current_time);
+        manager.record_failure(&peers[1], current_time);
+
+        let available = manager.filter_available(&peers, current_time);
+        assert_eq!(available.len(), 2);
+        assert!(available.contains(&&peers[0]));
+        assert!(!available.contains(&&peers[1]));
+        assert!(available.contains(&&peers[2]));
     }
 }

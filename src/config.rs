@@ -139,6 +139,15 @@ pub struct Config {
     /// Skip QC signature verification (dev mode only, dangerous!)
     /// Used for testing RPC sync without full BLS verification
     pub skip_qc_verify: bool,
+
+    /// Consecutive failures before blacklisting a peer
+    pub peer_blacklist_threshold: u32,
+
+    /// Duration to blacklist a peer in milliseconds
+    pub peer_blacklist_duration_ms: u64,
+
+    /// Maximum liquidations per block (circuit breaker)
+    pub max_liquidations_per_block: usize,
 }
 
 impl Config {
@@ -209,6 +218,18 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1000), // Default: poll every 1 second
             skip_qc_verify,
+            peer_blacklist_threshold: std::env::var("PEER_BLACKLIST_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5), // Default: 5 consecutive failures
+            peer_blacklist_duration_ms: std::env::var("PEER_BLACKLIST_DURATION_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60_000), // Default: 60 seconds
+            max_liquidations_per_block: std::env::var("MAX_LIQUIDATIONS_PER_BLOCK")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100), // Default: 100 liquidations per block
         }
     }
 
