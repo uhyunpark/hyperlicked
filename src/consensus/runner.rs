@@ -171,6 +171,8 @@ impl ConsensusRunner {
             let mut pacemaker = Pacemaker::new(Duration::from_secs(3));
             // Advance pacemaker to recovered view
             pacemaker.set_view(state.current_view);
+            // Restore timeout state for exponential backoff and ViewChange tracking
+            pacemaker.set_timeout_state(state.consecutive_timeouts, state.vc_sent_for_view);
 
             (safety, pacemaker, state.committed_height, state.committed_hash)
         } else {
@@ -811,6 +813,7 @@ impl ConsensusRunner {
     /// after crash recovery. The voted_views set must survive crashes.
     fn persist_consensus_state(&self) -> Result<()> {
         if let Some(ref store) = self.persistent_store {
+            let (consecutive_timeouts, vc_sent_for_view) = self.pacemaker.timeout_state();
             let state = ConsensusState {
                 high_qc: self.safety.high_qc().cloned(),
                 locked_qc: self.safety.locked_qc().cloned(),
@@ -818,6 +821,8 @@ impl ConsensusRunner {
                 current_view: self.pacemaker.current_view(),
                 committed_height: self.committed_height,
                 committed_hash: self.committed_hash,
+                consecutive_timeouts,
+                vc_sent_for_view,
             };
             store.save_consensus_state(&state)?;
         }

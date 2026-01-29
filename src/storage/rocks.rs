@@ -259,6 +259,8 @@ mod tests {
             current_view: 5,
             committed_height: 10,
             committed_hash: [1u8; 32],
+            consecutive_timeouts: 2,
+            vc_sent_for_view: Some(4),
         };
 
         store.save_consensus_state(&state).unwrap();

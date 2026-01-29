@@ -561,6 +561,8 @@ async fn test_voted_views_persistence_prevents_double_vote() {
         current_view: 8,
         committed_height: 0,
         committed_hash: [0u8; 32],
+        consecutive_timeouts: 0,
+        vc_sent_for_view: None,
     };
     store.save_consensus_state(&state).unwrap();
 
@@ -646,6 +648,8 @@ async fn test_full_consensus_state_recovery() {
         current_view: 11,
         committed_height: 5,
         committed_hash: [3u8; 32],
+        consecutive_timeouts: 3,
+        vc_sent_for_view: Some(10),
     };
     store.save_consensus_state(&state).unwrap();
 

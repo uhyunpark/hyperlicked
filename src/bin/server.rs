@@ -191,6 +191,8 @@ async fn main() -> Result<()> {
             peers: config.peers.clone(),
             poll_interval: Duration::from_millis(config.sync_poll_interval_ms),
             snapshot_threshold: 1000,
+            blacklist_threshold: config.peer_blacklist_threshold,
+            blacklist_duration_ms: config.peer_blacklist_duration_ms,
         };
         tokio::spawn(async move {
             run_rpc_sync_loop(sync_state, sync_store, sync_config).await;
@@ -338,6 +340,8 @@ async fn run_consensus_loop(
                     current_view: view,
                     committed_height: height,
                     committed_hash: app_hash,
+                    consecutive_timeouts: 0,
+                    vc_sent_for_view: None,
                 };
 
                 if let Err(e) = store.commit_block(&block, &consensus_state) {
@@ -1001,6 +1005,6 @@ async fn run_rpc_sync_loop(
         "Starting RPC sync client"
     );
 
-    let sync_client = ActiveSyncClient::new(sync_config);
+    let mut sync_client = ActiveSyncClient::new(sync_config);
     sync_client.run(state.app.clone(), store).await;
 }

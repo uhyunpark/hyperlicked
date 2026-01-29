@@ -93,6 +93,21 @@ impl Pacemaker {
         self.view_start = Instant::now();
     }
 
+    /// Set timeout state from persisted values (for crash recovery).
+    ///
+    /// Restores exponential backoff state and ViewChange tracking.
+    pub fn set_timeout_state(&mut self, consecutive_timeouts: u32, vc_sent_for_view: Option<View>) {
+        self.consecutive_timeouts = consecutive_timeouts;
+        self.vc_sent_for_view = vc_sent_for_view;
+    }
+
+    /// Get current timeout state for persistence.
+    ///
+    /// Returns (consecutive_timeouts, vc_sent_for_view) for crash recovery.
+    pub fn timeout_state(&self) -> (u32, Option<View>) {
+        (self.consecutive_timeouts, self.vc_sent_for_view)
+    }
+
     /// Record a timeout (for exponential backoff)
     pub fn record_timeout(&mut self) {
         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
@@ -164,7 +179,23 @@ impl Pacemaker {
     /// Process received ViewChange message.
     ///
     /// Returns ViewChangeCertificate if quorum reached for the target view.
+    /// Rejects ViewChanges that are too far ahead of current view to prevent
+    /// memory exhaustion attacks.
     pub fn on_view_change(&mut self, vc: ViewChange) -> Option<ViewChangeCertificate> {
+        use super::view_change::{validate_view_change_bounds, MAX_FUTURE_VIEWS};
+
+        // Check if ViewChange is within acceptable range
+        if let Err(e) = validate_view_change_bounds(&vc, self.current_view) {
+            tracing::warn!(
+                to_view = vc.to_view,
+                current_view = self.current_view,
+                max_future = MAX_FUTURE_VIEWS,
+                error = %e,
+                "Rejecting ViewChange: too far ahead"
+            );
+            return None;
+        }
+
         self.vc_collector.as_mut()?.add(vc)
     }
 

@@ -42,6 +42,12 @@ pub struct ConsensusState {
     pub committed_height: u64,
     /// Last committed block hash
     pub committed_hash: Hash,
+    /// Consecutive timeout count (for exponential backoff persistence)
+    #[serde(default)]
+    pub consecutive_timeouts: u32,
+    /// View for which we've sent a ViewChange (prevent double-send after crash)
+    #[serde(default)]
+    pub vc_sent_for_view: Option<View>,
 }
 
 impl ConsensusState {
@@ -54,6 +60,8 @@ impl ConsensusState {
             current_view: 0,
             committed_height: 0,
             committed_hash: [0u8; 32],
+            consecutive_timeouts: 0,
+            vc_sent_for_view: None,
         }
     }
 }
