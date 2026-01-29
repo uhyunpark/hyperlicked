@@ -13,6 +13,10 @@
 
 use std::collections::HashMap;
 
+/// Maximum views ahead of current view to accept ViewChanges.
+/// Prevents memory exhaustion attacks from far-future ViewChanges.
+pub const MAX_FUTURE_VIEWS: u64 = 10;
+
 use crate::crypto::bls::{BlsPublicKey, BlsSecretKey, BlsSignature};
 use crate::types::{Certificate, NodeId, View, ViewChange, ViewChangeCertificate};
 
@@ -200,6 +204,13 @@ pub enum ViewChangeError {
     #[error("view jump too large: from {from} to {to} (max 100)")]
     ViewJumpTooLarge { from: View, to: View },
 
+    #[error("view too far ahead: vc_view {vc_view} > current_view {current_view} + {max_future}")]
+    ViewTooFarAhead {
+        vc_view: View,
+        current_view: View,
+        max_future: u64,
+    },
+
     #[error("invalid signature")]
     InvalidSignature,
 
@@ -208,6 +219,24 @@ pub enum ViewChangeError {
 
     #[error("unknown validator: {0:?}")]
     UnknownValidator(NodeId),
+}
+
+/// Validate ViewChange bounds against current view.
+///
+/// Rejects ViewChanges that are too far in the future to prevent
+/// memory exhaustion attacks from accumulating far-future ViewChanges.
+pub fn validate_view_change_bounds(
+    vc: &ViewChange,
+    current_view: View,
+) -> Result<(), ViewChangeError> {
+    if vc.to_view > current_view.saturating_add(MAX_FUTURE_VIEWS) {
+        return Err(ViewChangeError::ViewTooFarAhead {
+            vc_view: vc.to_view,
+            current_view,
+            max_future: MAX_FUTURE_VIEWS,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -421,5 +450,32 @@ mod tests {
         // Should be rejected
         assert!(collector.add(bad_vc).is_none());
         assert_eq!(collector.count(6), 0);
+    }
+
+    #[test]
+    fn test_validate_view_change_bounds() {
+        let current_view = 100;
+
+        // Within bounds (current + 5)
+        let valid_vc = make_view_change(104, 105, 1);
+        assert!(validate_view_change_bounds(&valid_vc, current_view).is_ok());
+
+        // At the limit (current + MAX_FUTURE_VIEWS)
+        let limit_vc = make_view_change(109, 110, 1);
+        assert!(validate_view_change_bounds(&limit_vc, current_view).is_ok());
+
+        // Beyond limit (current + MAX_FUTURE_VIEWS + 1)
+        let beyond_vc = make_view_change(110, 111, 1);
+        assert!(matches!(
+            validate_view_change_bounds(&beyond_vc, current_view),
+            Err(ViewChangeError::ViewTooFarAhead { .. })
+        ));
+
+        // Way beyond limit
+        let far_vc = make_view_change(200, 201, 1);
+        assert!(matches!(
+            validate_view_change_bounds(&far_vc, current_view),
+            Err(ViewChangeError::ViewTooFarAhead { .. })
+        ));
     }
 }

@@ -2,6 +2,7 @@
 
 use tracing::{debug, warn};
 
+use super::view_change::{validate_view_change_bounds, MAX_FUTURE_VIEWS};
 use super::{EquivocationDetector, EquivocationProof, Pacemaker, Safety, VoteCheckResult};
 use crate::types::{hash_short, Hash, Message, NewView, NodeId, ViewChangeCertificate, Vote};
 
@@ -56,6 +57,19 @@ pub fn handle_view_message(
 ) -> Option<ViewChangeCertificate> {
     match msg {
         Message::ViewChange(vc) => {
+            let current_view = pacemaker.current_view();
+            // Pre-check bounds before passing to pacemaker
+            if let Err(e) = validate_view_change_bounds(vc, current_view) {
+                warn!(
+                    from = %hash_short(from),
+                    to_view = vc.to_view,
+                    current_view,
+                    max_future = MAX_FUTURE_VIEWS,
+                    error = %e,
+                    "Rejecting ViewChange: too far ahead"
+                );
+                return None;
+            }
             debug!(from = %hash_short(from), to_view = vc.to_view, "Received ViewChange");
             pacemaker.on_view_change(vc.clone())
         }
