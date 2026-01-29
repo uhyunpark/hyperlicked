@@ -443,8 +443,10 @@ impl AppHook for AppState {
 
         // Commit the proposal (two-phase: finalize removal from mempool)
         // This replaces the old drain_block() approach
+        // Use unchecked commit since in execute() we're committing the block,
+        // view checking happens in the consensus layer
         if !tx_hashes.is_empty() {
-            self.mempool.commit_proposal(&tx_hashes);
+            self.mempool.commit_proposal_unchecked(&tx_hashes);
         }
 
         // Check and execute liquidations after all transactions
@@ -455,14 +457,25 @@ impl AppHook for AppState {
 
         // Process liquidation results with ADL check
         for liq in &liquidations {
-            if liq.pnl < 0 {
+            // Calculate total loss for ADL consideration:
+            // - Position PnL (negative = loss)
+            // - Negative insurance_fund_delta means account went underwater
+            // Both should be considered for ADL since they represent losses to cover
+            let underwater_loss = if liq.insurance_fund_delta < 0 {
+                liq.insurance_fund_delta
+            } else {
+                0
+            };
+            let total_loss = liq.pnl.saturating_add(underwater_loss);
+
+            if total_loss < 0 {
                 // Loss - check if ADL is needed
                 let mark_price = self.mark_prices.get(&liq.symbol).copied().unwrap_or(0);
 
                 if let Some(adl_summary) = crate::app::adl::process_adl_if_needed(
                     &mut self.accounts,
                     &liq.symbol,
-                    liq.pnl,
+                    total_loss, // Include underwater amount in ADL calculation
                     self.insurance_fund,
                     mark_price,
                     liq.was_long,
@@ -471,16 +484,29 @@ impl AppHook for AppState {
                 ) {
                     // ADL absorbed (part of) the loss
                     // Insurance fund takes remaining loss after ADL
-                    let remaining_loss = liq.pnl + adl_summary.total_absorbed;
-                    self.insurance_fund += remaining_loss;
+                    let remaining_loss = total_loss.saturating_add(adl_summary.total_absorbed);
+                    self.insurance_fund = self.insurance_fund.saturating_add(remaining_loss);
                     self.pending_adl_events.extend(adl_summary.events);
                 } else {
-                    // No ADL needed - insurance fund takes the loss
-                    self.insurance_fund += liq.pnl;
+                    // No ADL needed - insurance fund takes the total loss
+                    self.insurance_fund = self.insurance_fund.saturating_add(total_loss);
+                }
+
+                // Positive remaining balance still goes to insurance fund
+                if liq.insurance_fund_delta > 0 {
+                    self.insurance_fund = self.insurance_fund.saturating_add(liq.insurance_fund_delta);
                 }
             } else {
-                // Profit - goes to insurance fund
-                self.insurance_fund += liq.pnl;
+                // No position loss - handle insurance_fund_delta
+                // Positive = remaining balance goes to insurance fund
+                // Negative = should not happen in profit case, but handle defensively
+                if liq.insurance_fund_delta != 0 {
+                    self.insurance_fund = self.insurance_fund.saturating_add(liq.insurance_fund_delta);
+                }
+                // Profit from position also goes to insurance fund
+                if liq.pnl > 0 {
+                    self.insurance_fund = self.insurance_fund.saturating_add(liq.pnl);
+                }
             }
         }
         self.pending_liquidations = liquidations;

@@ -39,10 +39,14 @@ pub struct LiquidationResult {
     pub size: i64,
     /// Price at which position was closed
     pub price: i64,
-    /// PnL from liquidation (positive = profit to insurance fund)
+    /// PnL from closing this position (positive = profit, negative = loss)
     pub pnl: i64,
     /// Whether the position was long or short
     pub was_long: bool,
+    /// Remaining account balance transferred to insurance fund (only on last position)
+    /// Positive = contribution to insurance fund, negative = insurance fund loss
+    #[allow(dead_code)]
+    pub insurance_fund_delta: i64,
 }
 
 /// Check all accounts and liquidate underwater positions
@@ -167,12 +171,14 @@ fn liquidate_account(
         // Calculate PnL: close at mark price
         // Long: (mark - entry) * size
         // Short: (entry - mark) * size
+        // Use i128 to prevent overflow with large positions
         let price_diff = if was_long {
             mark_price - entry_price
         } else {
             entry_price - mark_price
         };
-        let pnl = (abs_size * price_diff) / 100_000_000;
+        let pnl_i128 = (abs_size as i128 * price_diff as i128) / 100_000_000;
+        let pnl = pnl_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
         // Close the position by applying opposite fill
         let account = accounts.get_or_create(address);
@@ -197,24 +203,28 @@ fn liquidate_account(
             price: mark_price,
             pnl,
             was_long,
+            insurance_fund_delta: 0, // Will be set on last position
         });
     }
 
     // After liquidation, transfer remaining balance to insurance fund
     // and zero out the account
     let account = accounts.get_or_create(address);
-    let remaining = account.balance + account.locked;
+    let remaining = account.balance.saturating_add(account.locked);
 
-    // Remaining balance goes to insurance fund (returned via results)
-    // We adjust the last liquidation's PnL to include remaining balance
-    if !results.is_empty() && remaining != 0 {
-        // Add remaining balance to the insurance fund via the PnL
+    // Remaining balance goes to insurance fund
+    // Track it separately from position PnL for proper accounting
+    if !results.is_empty() {
+        // Record insurance fund delta on the last liquidation result
         if let Some(last) = results.last_mut() {
-            last.pnl += remaining;
+            last.insurance_fund_delta = remaining;
         }
+
         // Zero out the account
-        account.balance = 0;
-        account.locked = 0;
+        if remaining != 0 {
+            account.balance = 0;
+            account.locked = 0;
+        }
     }
 
     results
