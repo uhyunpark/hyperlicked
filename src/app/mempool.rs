@@ -186,7 +186,39 @@ impl Mempool {
     /// Commit a proposal by removing transactions by hash (two-phase: step 2)
     ///
     /// Called after a block is committed to finalize removal.
-    pub fn commit_proposal(&mut self, tx_hashes: &[Hash]) {
+    ///
+    /// **View Safety**: The `view` parameter must match the view that was used in `peek_block`.
+    /// If the view doesn't match (e.g., a view change occurred), the commit is rejected
+    /// to prevent removing transactions that belong to a different proposal.
+    ///
+    /// Returns `true` if commit succeeded, `false` if view mismatch (stale commit).
+    pub fn commit_proposal(&mut self, tx_hashes: &[Hash], view: View) -> bool {
+        // View safety check: reject commits from stale views
+        if view != self.proposal_view {
+            tracing::warn!(
+                expected_view = self.proposal_view,
+                commit_view = view,
+                "Rejecting stale commit_proposal (view mismatch)"
+            );
+            return false;
+        }
+
+        let hash_set: HashSet<_> = tx_hashes.iter().collect();
+
+        // Remove from all buckets
+        self.bucket0.retain(|p| !hash_set.contains(&p.hash));
+        self.bucket1.retain(|p| !hash_set.contains(&p.hash));
+        self.bucket2.retain(|p| !hash_set.contains(&p.hash));
+
+        // Clear pending set
+        self.pending_proposal.clear();
+        true
+    }
+
+    /// Commit a proposal without view checking (legacy, single-node mode)
+    ///
+    /// Use `commit_proposal` with view parameter for multi-node safety.
+    pub fn commit_proposal_unchecked(&mut self, tx_hashes: &[Hash]) {
         let hash_set: HashSet<_> = tx_hashes.iter().collect();
 
         // Remove from all buckets
@@ -201,8 +233,22 @@ impl Mempool {
     /// Rollback a proposal on view change (two-phase: abort)
     ///
     /// Transactions stay in mempool for the next leader.
-    pub fn rollback_proposal(&mut self) {
+    /// The `view` parameter is used for logging/debugging.
+    pub fn rollback_proposal(&mut self, view: View) {
+        if !self.pending_proposal.is_empty() {
+            tracing::debug!(
+                view,
+                proposal_view = self.proposal_view,
+                pending_count = self.pending_proposal.len(),
+                "Rolling back proposal (view change)"
+            );
+        }
         self.pending_proposal.clear();
+    }
+
+    /// Get the current proposal view
+    pub fn proposal_view(&self) -> View {
+        self.proposal_view
     }
 
     /// Drain transactions that were previously peeked (legacy, for single-node)
