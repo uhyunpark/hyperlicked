@@ -42,6 +42,21 @@ Additional fixes from comprehensive review:
 
 See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
 
+### Critical Issues Fixes (2026-01-29 PM) ✅
+
+Remaining critical issues from comprehensive review:
+- **CRITICAL-1: voted_views persisted** - Already fixed in runner.rs:651-667 (panic on failure)
+- **CRITICAL-2: ConsensusState persistence** - Already fixed (panic on failure for safety)
+- **CRITICAL-3: Max order/position size limits** - Added max_order_size, max_position_size, max_open_orders to MarketConfig
+- **CRITICAL-5: Insurance fund floor** - Floor at zero after ADL, warning log when below $1M threshold
+- **CRITICAL-6: SKIP_QC_VERIFY in prod** - Already fixed in config.rs:246-268 (blocked in mainnet mode)
+- **CRITICAL-7: Vote rate limiting** - MAX_VOTES_PER_VALIDATOR_PER_SECOND (10), vote pruning after commit
+
+**Deferred to P2:**
+- **CRITICAL-4: Isolated margin** - Complex feature requiring MarginMode enum, margin allocation txs, modified liquidation
+
+See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints

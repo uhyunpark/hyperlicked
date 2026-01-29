@@ -161,6 +161,25 @@ cargo build --release
 | `PEER_BLACKLIST_DURATION_MS` | 60000 | Duration to blacklist a peer (ms) |
 | `MAX_LIQUIDATIONS_PER_BLOCK` | 100 | Maximum liquidations per block (circuit breaker) |
 
+## MarketConfig
+
+Per-market configuration set in `src/app/mod.rs`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `symbol` | "BTC-USDT" | Market symbol |
+| `tick_size` | 1 | Minimum price increment (cents) |
+| `lot_size` | 1 | Minimum size increment (satoshis) |
+| `min_notional` | 1000 | Minimum order value (cents, $10) |
+| `maker_fee` | 2 | Maker fee in basis points (0.02%) |
+| `taker_fee` | 5 | Taker fee in basis points (0.05%) |
+| `funding_interval_ms` | 3600000 | Funding interval (1 hour) |
+| `interest_rate_bps` | 1 | Interest rate component (0.01%) |
+| `max_funding_rate_bps` | 400 | Max funding rate cap (4%) |
+| `max_order_size` | 1e12 | Max single order (10,000 BTC in satoshis) |
+| `max_position_size` | 1e13 | Max position per account (100,000 BTC in satoshis) |
+| `max_open_orders` | 100 | Max open orders per account |
+
 ## Golden Rules
 
 ### Must Do
