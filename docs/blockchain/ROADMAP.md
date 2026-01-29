@@ -20,6 +20,19 @@
 
 - **Multi-node testing** - TCP transport between validators, integration tests
 
+### Security Hardening (2026-01-29) ✅
+
+Critical security fixes applied:
+- **BLS verification** - Proper aggregate signature verification with `verify_aggregate_same_message`
+- **Observer halt-on-corruption** - Nodes halt on app_hash mismatch for operator intervention
+- **QC verification in sync** - Full cryptographic verification of certificates during sync
+- **Oracle signature verification** - BLS signature required for price updates (skippable in dev)
+- **Overflow prevention** - i128 intermediate calculations in all financial math
+- **Liquidation accounting** - Separated position PnL from insurance_fund_delta
+- **Mempool view safety** - View-checked commit_proposal prevents race conditions
+
+See `docs/reviews/2026-01-29-blockchain-review.md` for full details.
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
