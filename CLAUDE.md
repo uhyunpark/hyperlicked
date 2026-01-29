@@ -1,6 +1,6 @@
 # Hyperlicked
 
-A Hyperliquid clone built in Rust. AI-native codebase designed for AI-assisted development.
+A Hyperliquid clone built in Rust. Can also be used as a standalone perpdex starter. AI-native codebase designed for AI-assisted development.
 
 ## Vision
 
@@ -101,6 +101,7 @@ hyperlicked/
 ├── src/bin/
 │   ├── server.rs          # Main binary (API + consensus)
 │   ├── node.rs            # Consensus-only node
+│   ├── visor.rs           # Process supervisor (hl-visor)
 │   └── multinode.rs       # Multi-validator testing
 ├── tests/                 # Integration tests
 ├── web/                   # Next.js frontend
@@ -124,6 +125,10 @@ cargo test
 # Run frontend
 cd web && bun run dev
 
+# Run process supervisor (production)
+cargo run --bin hl-visor run-validator
+cargo run --bin hl-visor run-non-validator
+
 # Build release
 cargo build --release
 ```
@@ -133,6 +138,7 @@ cargo build --release
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MODE` | dev | Runtime mode (dev/testnet/mainnet) |
+| `NODE_ROLE` | validator | Node role (validator/rpc) |
 | `PORT` | 8080 | API server port |
 | `BLOCK_TIME_MS` | 100 | Block interval for server (0 = max speed) |
 | `CONSENSUS_LOOP_DELAY_MS` | 10 | Delay between consensus rounds (0 = yield only) |
@@ -147,6 +153,8 @@ cargo build --release
 | `MM_INTERVAL_MS` | 100 | Market maker tick interval |
 | `MM_INTENSITY` | medium | Intensity preset: low/medium/high |
 | `MM_SEED` | 12345 | RNG seed for deterministic MM addresses |
+| `PEERS` | (empty) | Comma-separated peer URLs for sync |
+| `SYNC_POLL_INTERVAL_MS` | 1000 | Sync poll interval for RPC nodes |
 
 ## Golden Rules
 
