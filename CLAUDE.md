@@ -157,6 +157,9 @@ cargo build --release
 | `MM_SEED` | 12345 | RNG seed for deterministic MM addresses |
 | `PEERS` | (empty) | Comma-separated peer URLs for sync |
 | `SYNC_POLL_INTERVAL_MS` | 1000 | Sync poll interval for RPC nodes |
+| `PEER_BLACKLIST_THRESHOLD` | 5 | Consecutive failures before blacklisting a peer |
+| `PEER_BLACKLIST_DURATION_MS` | 60000 | Duration to blacklist a peer (ms) |
+| `MAX_LIQUIDATIONS_PER_BLOCK` | 100 | Maximum liquidations per block (circuit breaker) |
 
 ## Golden Rules
 

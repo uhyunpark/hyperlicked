@@ -31,7 +31,16 @@ Critical security fixes applied:
 - **Liquidation accounting** - Separated position PnL from insurance_fund_delta
 - **Mempool view safety** - View-checked commit_proposal prevents race conditions
 
-See `docs/reviews/2026-01-29-blockchain-review.md` for full details.
+### High Priority Fixes (2026-01-29) ✅
+
+Additional fixes from comprehensive review:
+- **HIGH-3: Pacemaker crash-safe** - Timeout state (consecutive_timeouts, vc_sent_for_view) persisted in ConsensusState
+- **HIGH-4: ViewChange future limit** - Reject ViewChanges too far ahead (MAX_FUTURE_VIEWS = 10) to prevent memory exhaustion
+- **HIGH-8: Liquidation circuit breaker** - MAX_LIQUIDATIONS_PER_BLOCK (default 100) prevents cascade/long blocks
+- **HIGH-9: Nonce gap handling** - Allow out-of-order nonces within MAX_NONCE_GAP (10) for dropped tx recovery
+- **HIGH-11: Peer reputation** - Track peer failures, blacklist after consecutive failures (PEER_BLACKLIST_THRESHOLD)
+
+See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
 
 ### Recently Completed
 
