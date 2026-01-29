@@ -231,6 +231,7 @@ mod tests {
         let qc = Certificate {
             view: 0,
             block_hash: [0u8; 32],
+            app_hash: Some([0u8; 32]),
             votes: vec![],
             voters: vec![],
             bls_pubkeys: vec![],
@@ -270,6 +271,7 @@ mod tests {
         let qc = Certificate {
             view: pm.current_view(),
             block_hash: [0u8; 32],
+            app_hash: Some([0u8; 32]),
             votes: vec![],
             voters: vec![],
             bls_pubkeys: vec![],

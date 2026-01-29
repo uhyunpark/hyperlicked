@@ -476,6 +476,7 @@ async fn test_locking_prevents_conflicting_votes() {
         voters: vec![],
         bls_pubkeys: vec![],
         agg_signature: vec![],
+        app_hash: Some([0u8; 32]),
     };
     safety.update_locked_qc(locked_qc.clone());
 
@@ -487,6 +488,7 @@ async fn test_locking_prevents_conflicting_votes() {
         voters: vec![],
         bls_pubkeys: vec![],
         agg_signature: vec![],
+        app_hash: Some([0u8; 32]),
     };
     safety.update_high_qc(high_qc.clone());
 
@@ -625,6 +627,7 @@ async fn test_full_consensus_state_recovery() {
         voters: vec![],
         bls_pubkeys: vec![],
         agg_signature: vec![],
+        app_hash: Some([0u8; 32]),
     };
     let locked_qc = Certificate {
         view: 9,
@@ -633,6 +636,7 @@ async fn test_full_consensus_state_recovery() {
         voters: vec![],
         bls_pubkeys: vec![],
         agg_signature: vec![],
+        app_hash: Some([0u8; 32]),
     };
 
     let state = ConsensusState {

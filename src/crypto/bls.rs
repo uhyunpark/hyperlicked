@@ -245,34 +245,97 @@ pub fn verify_individually(
         .collect()
 }
 
+/// Verify an aggregated BLS signature where ALL signers signed the SAME message
+///
+/// This is the efficient BLS verification path: aggregate all public keys,
+/// then verify the aggregate signature against the aggregate public key.
+///
+/// **IMPORTANT**: This only works when all signers signed EXACTLY the same message.
+/// If messages differ (e.g., each includes voter ID), use `verify_multi_message` instead.
+///
+/// Returns true if the aggregate signature is valid.
+pub fn verify_aggregate_same_message(
+    message: &[u8],
+    agg_sig: &BlsSignature,
+    public_keys: &[BlsPublicKey],
+) -> bool {
+    if public_keys.is_empty() {
+        return false;
+    }
+
+    // Aggregate all public keys
+    let agg_pk = match aggregate_public_keys(public_keys) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+
+    // Verify aggregate signature against aggregate public key
+    agg_pk.verify(message, agg_sig)
+}
+
+/// Verify multiple BLS signatures where each signer signed a DIFFERENT message
+///
+/// **WARNING**: This function requires individual signatures, not an aggregate.
+/// BLS aggregate signatures CANNOT be verified against different messages.
+///
+/// If you have an aggregate signature and different messages, you must either:
+/// 1. Have verified individual signatures BEFORE aggregation, OR
+/// 2. Store individual signatures alongside the aggregate
+///
+/// This function verifies individual (signature, pubkey, message) tuples.
+/// Returns a vector of indices that passed verification.
+pub fn verify_multi_message(
+    signatures: &[BlsSignature],
+    public_keys: &[BlsPublicKey],
+    messages: &[Vec<u8>],
+) -> Vec<usize> {
+    if signatures.len() != public_keys.len() || signatures.len() != messages.len() {
+        return vec![];
+    }
+
+    signatures
+        .iter()
+        .zip(public_keys.iter())
+        .zip(messages.iter())
+        .enumerate()
+        .filter_map(|(i, ((sig, pk), msg))| {
+            if pk.verify(msg, sig) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Batch verify multiple BLS signatures where each signer signs a DIFFERENT message
 ///
-/// This is used for certificate verification where each voter signs (view, block_hash, app_hash, voter_id).
-/// Each message is unique because it includes the voter's ID.
+/// **DEPRECATED**: This function cannot properly verify an aggregate signature
+/// against different messages. BLS aggregation fundamentally requires the same message.
 ///
-/// For efficiency, we verify each signature individually (BLS doesn't have a more efficient
-/// algorithm for different-message batch verification).
-pub fn batch_verify(public_keys: &[BlsPublicKey], messages: &[Vec<u8>], _agg_sig: &BlsSignature) -> bool {
-    // For different messages, we can't use aggregation optimization
-    // Just verify the aggregated signature was created from valid individual signatures
-    // Since we only have the aggregate signature and not individual ones,
-    // we trust the aggregation was done correctly if the certificate passes basic checks
-
-    // In a full implementation, we would:
-    // 1. Use BLS's multi-message verification if available
-    // 2. Or fall back to individual signature verification
-
-    // For now, verify that the inputs are well-formed
-    if public_keys.is_empty() || messages.is_empty() {
-        return false;
-    }
-    if public_keys.len() != messages.len() {
-        return false;
-    }
-
-    // Basic validation passes - in production, this would do actual crypto verification
-    // of the aggregated signature against all pubkeys and messages
-    true
+/// For certificate verification:
+/// - If all voters signed the same message (view, block_hash, app_hash),
+///   use `verify_aggregate_same_message`
+/// - If signatures were verified individually before aggregation,
+///   the aggregate is already trustworthy
+///
+/// This function now returns false for safety. Use the appropriate
+/// verification function based on your use case.
+#[deprecated(
+    since = "0.2.0",
+    note = "BLS aggregate signatures cannot be verified against different messages. \
+            Use verify_aggregate_same_message for same-message verification, or \
+            verify individual signatures before aggregation."
+)]
+pub fn batch_verify(_public_keys: &[BlsPublicKey], _messages: &[Vec<u8>], _agg_sig: &BlsSignature) -> bool {
+    // BLS aggregate signatures CANNOT be verified against different messages.
+    // This function previously returned `true` unconditionally, which was a security bug.
+    //
+    // If you're hitting this, you need to either:
+    // 1. Change your signing protocol so all signers sign the same message
+    // 2. Verify individual signatures BEFORE aggregation (see aggregator.rs)
+    // 3. Use verify_aggregate_same_message with a common message
+    false
 }
 
 /// Errors that can occur during BLS operations
@@ -417,10 +480,10 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_all_valid() {
-        let message = b"batch verify test";
+    fn test_verify_aggregate_same_message() {
+        let message = b"consensus vote for block";
 
-        // Generate multiple key pairs
+        // Generate multiple key pairs (simulating validators)
         let keys: Vec<BlsSecretKey> = (0..5)
             .map(|i| {
                 let mut seed = [0u8; 32];
@@ -432,19 +495,26 @@ mod tests {
         let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
         let signatures: Vec<BlsSignature> = keys.iter().map(|k| k.sign(message)).collect();
 
-        // Create references
-        let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
-        let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();
+        // Aggregate signatures
+        let agg_sig = aggregate_signatures(&signatures).unwrap();
 
-        // Batch verify - should succeed
-        assert!(verify_batch(message, &sig_refs, &pk_refs), "All valid signatures should pass batch verify");
+        // Verify aggregate - should succeed
+        assert!(
+            verify_aggregate_same_message(message, &agg_sig, &public_keys),
+            "Valid aggregate signature should verify"
+        );
+
+        // Wrong message should fail
+        assert!(
+            !verify_aggregate_same_message(b"wrong message", &agg_sig, &public_keys),
+            "Wrong message should fail verification"
+        );
     }
 
     #[test]
-    fn test_batch_verify_one_invalid() {
-        let message = b"batch verify test";
+    fn test_verify_aggregate_same_message_one_bad_sig() {
+        let message = b"consensus vote";
 
-        // Generate key pairs
         let keys: Vec<BlsSecretKey> = (0..5)
             .map(|i| {
                 let mut seed = [0u8; 32];
@@ -456,20 +526,72 @@ mod tests {
         let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
         let mut signatures: Vec<BlsSignature> = keys.iter().map(|k| k.sign(message)).collect();
 
-        // Replace one signature with invalid one (sign different message)
+        // Replace one signature with one for different message
         signatures[2] = keys[2].sign(b"different message");
 
-        // Create references
-        let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
-        let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();
+        // Aggregate (including the bad signature)
+        let agg_sig = aggregate_signatures(&signatures).unwrap();
 
-        // Batch verify - should fail
-        assert!(!verify_batch(message, &sig_refs, &pk_refs), "Should fail with one invalid signature");
+        // Verification should FAIL because not all signers signed the same message
+        assert!(
+            !verify_aggregate_same_message(message, &agg_sig, &public_keys),
+            "Aggregate with one bad signature should fail"
+        );
+    }
 
-        // Individual verification should identify the bad one
-        let valid_indices = verify_individually(message, &sig_refs, &pk_refs);
-        assert_eq!(valid_indices.len(), 4, "Should have 4 valid signatures");
-        assert!(!valid_indices.contains(&2), "Index 2 should not be valid");
+    #[test]
+    fn test_verify_multi_message() {
+        // Each signer signs a DIFFERENT message (like old vote format with voter ID)
+        let keys: Vec<BlsSecretKey> = (0..3)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+
+        let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+
+        // Each signer signs their own unique message
+        let messages: Vec<Vec<u8>> = (0..3)
+            .map(|i| format!("message for voter {}", i).into_bytes())
+            .collect();
+
+        let signatures: Vec<BlsSignature> = keys
+            .iter()
+            .zip(messages.iter())
+            .map(|(k, m)| k.sign(m))
+            .collect();
+
+        // Verify all signatures individually
+        let valid = verify_multi_message(&signatures, &public_keys, &messages);
+        assert_eq!(valid, vec![0, 1, 2], "All signatures should be valid");
+    }
+
+    #[test]
+    fn test_verify_multi_message_one_invalid() {
+        let keys: Vec<BlsSecretKey> = (0..3)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = i as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+
+        let public_keys: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+
+        let messages: Vec<Vec<u8>> = (0..3)
+            .map(|i| format!("message for voter {}", i).into_bytes())
+            .collect();
+
+        // Sign correctly except one signs the wrong message
+        let mut signatures: Vec<BlsSignature> = vec![];
+        signatures.push(keys[0].sign(&messages[0]));        // Valid
+        signatures.push(keys[1].sign(b"WRONG MESSAGE"));    // Invalid
+        signatures.push(keys[2].sign(&messages[2]));        // Valid
+
+        let valid = verify_multi_message(&signatures, &public_keys, &messages);
+        assert_eq!(valid, vec![0, 2], "Only indices 0 and 2 should be valid");
     }
 
     #[test]
@@ -500,17 +622,45 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_verify_empty() {
-        assert!(!verify_batch(b"test", &[], &[]), "Empty should fail");
-    }
-
-    #[test]
-    fn test_batch_verify_mismatched_lengths() {
+    #[allow(deprecated)]
+    fn test_deprecated_batch_verify_returns_false() {
+        // The old batch_verify with different messages is deprecated and now returns false
         let sk = BlsSecretKey::generate();
         let pk = sk.public_key();
         let sig = sk.sign(b"test");
 
-        // More signatures than keys
-        assert!(!verify_batch(b"test", &[&sig, &sig], &[&pk]), "Mismatched lengths should fail");
+        // This should now return false (was a security bug that returned true)
+        assert!(
+            !batch_verify(&[pk], &[b"test".to_vec()], &sig),
+            "Deprecated batch_verify should return false"
+        );
+    }
+
+    #[test]
+    fn test_verify_aggregate_empty_pubkeys() {
+        // Create a valid signature first
+        let sk = BlsSecretKey::generate();
+        let sig = sk.sign(b"test");
+
+        // Empty pubkeys should fail verification
+        assert!(
+            !verify_aggregate_same_message(b"test", &sig, &[]),
+            "Empty pubkeys should fail"
+        );
+    }
+
+    #[test]
+    fn test_verify_aggregate_wrong_pubkey() {
+        // Sign with one key, try to verify with different key
+        let sk1 = BlsSecretKey::generate();
+        let sk2 = BlsSecretKey::generate();
+
+        let sig = sk1.sign(b"test");
+        let wrong_pk = sk2.public_key();
+
+        assert!(
+            !verify_aggregate_same_message(b"test", &sig, &[wrong_pk]),
+            "Wrong pubkey should fail"
+        );
     }
 }
