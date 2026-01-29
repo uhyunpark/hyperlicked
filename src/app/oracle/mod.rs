@@ -215,6 +215,9 @@ pub enum OracleError {
 
     #[error("deviation too high: {deviation_bps} bps > {max_bps} bps")]
     DeviationTooHigh { deviation_bps: i64, max_bps: i64 },
+
+    #[error("invalid signature: {0}")]
+    InvalidSignature(String),
 }
 
 #[cfg(test)]

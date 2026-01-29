@@ -443,7 +443,7 @@ impl AppState {
         operator: String,
         symbol: Symbol,
         sources: Vec<PriceSource>,
-        _signature: Vec<u8>,
+        signature: Vec<u8>,
     ) -> Result<Vec<Fill>, AppError> {
         // Check operator authorization (must be registered validator)
         // Skip check if signature verification is disabled (dev mode)
@@ -451,14 +451,19 @@ impl AppState {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        if !skip_verify && self.staking.get_validator(&operator).is_none() {
-            return Err(AppError::Oracle(
-                crate::app::oracle::OracleError::UnauthorizedOperator(operator),
-            ));
-        }
+        // Get validator (required even if skipping sig verify, for authorization)
+        let validator = self.staking.get_validator(&operator);
 
-        // TODO: Verify BLS signature over price data in production
-        // For now, we trust the operator authorization check
+        if !skip_verify {
+            let validator = validator.ok_or_else(|| {
+                AppError::Oracle(crate::app::oracle::OracleError::UnauthorizedOperator(
+                    operator.clone(),
+                ))
+            })?;
+
+            // Verify BLS signature over price data
+            self.verify_oracle_signature(&symbol, &sources, &signature, &validator.bls_pubkey)?;
+        }
 
         // Get mark price for circuit breaker check
         let mark_price = self.mark_prices.get(&symbol).copied();
@@ -474,5 +479,73 @@ impl AppState {
         );
 
         Ok(vec![])
+    }
+
+    /// Verify BLS signature over oracle price data
+    ///
+    /// The signing data is: symbol || timestamp || sources (serialized)
+    fn verify_oracle_signature(
+        &self,
+        symbol: &Symbol,
+        sources: &[PriceSource],
+        signature: &[u8],
+        bls_pubkey: &[u8],
+    ) -> Result<(), AppError> {
+        use crate::crypto::bls::{BlsPublicKey, BlsSignature};
+
+        // Parse BLS public key
+        if bls_pubkey.len() != 48 {
+            return Err(AppError::Oracle(
+                crate::app::oracle::OracleError::InvalidSignature("Invalid BLS pubkey length".into()),
+            ));
+        }
+        let mut pk_arr = [0u8; 48];
+        pk_arr.copy_from_slice(bls_pubkey);
+        let pubkey = BlsPublicKey::from_bytes(&pk_arr).map_err(|_| {
+            AppError::Oracle(crate::app::oracle::OracleError::InvalidSignature(
+                "Failed to parse BLS pubkey".into(),
+            ))
+        })?;
+
+        // Parse BLS signature
+        let sig = BlsSignature::from_slice(signature).map_err(|_| {
+            AppError::Oracle(crate::app::oracle::OracleError::InvalidSignature(
+                "Failed to parse BLS signature".into(),
+            ))
+        })?;
+
+        // Build signing data: symbol || timestamp || sources
+        let signing_data = self.build_oracle_signing_data(symbol, sources);
+
+        // Verify signature
+        if !pubkey.verify(&signing_data, &sig) {
+            return Err(AppError::Oracle(
+                crate::app::oracle::OracleError::InvalidSignature(
+                    "BLS signature verification failed".into(),
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Build deterministic signing data for oracle updates
+    fn build_oracle_signing_data(&self, symbol: &Symbol, sources: &[PriceSource]) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // Symbol
+        data.extend_from_slice(symbol.as_bytes());
+
+        // Timestamp (current block timestamp)
+        data.extend_from_slice(&self.timestamp.to_le_bytes());
+
+        // Sources (deterministic serialization)
+        for source in sources {
+            data.extend_from_slice(source.source_id.as_bytes());
+            data.extend_from_slice(&source.price.to_le_bytes());
+            data.extend_from_slice(&source.timestamp.to_le_bytes());
+        }
+
+        data
     }
 }

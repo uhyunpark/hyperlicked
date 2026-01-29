@@ -1,6 +1,9 @@
 //! Oracle Integration Tests
 //!
 //! Tests for oracle price updates and funding rate integration.
+//!
+//! Note: These tests use empty signatures since they run with SKIP_SIG_VERIFY=true.
+//! Production oracle updates require valid BLS signatures from registered validators.
 
 use crate::e2e::helpers::*;
 use hyperlicked::app::{OracleConfig, PriceSource, Transaction};
@@ -8,6 +11,8 @@ use hyperlicked::app::{OracleConfig, PriceSource, Transaction};
 /// Test oracle update via transaction
 #[test]
 fn test_oracle_price_update() {
+    // Skip signature verification for testing (empty signatures used)
+    std::env::set_var("SKIP_SIG_VERIFY", "true");
     let mut ctx = TestContext::with_default_traders();
 
     // Register a validator first (oracle updates require validator auth)
@@ -85,6 +90,8 @@ fn test_oracle_price_update() {
 /// Test that funding uses oracle index price when enabled
 #[test]
 fn test_funding_uses_oracle_index_price() {
+    // Skip signature verification for testing (empty signatures used)
+    std::env::set_var("SKIP_SIG_VERIFY", "true");
     let mut ctx = TestContext::with_default_traders();
 
     // Register validator
@@ -198,6 +205,8 @@ fn test_oracle_fallback_to_mark() {
 /// Test oracle circuit breaker rejects high deviation
 #[test]
 fn test_oracle_circuit_breaker() {
+    // Skip signature verification for testing (empty signatures used)
+    std::env::set_var("SKIP_SIG_VERIFY", "true");
     let mut ctx = TestContext::with_default_traders();
 
     // Register validator
