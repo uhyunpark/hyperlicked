@@ -179,10 +179,16 @@ impl AppState {
         }
 
         // Check margin (simplified: require full notional)
-        let notional = (size * price) / 100_000_000;
+        // SECURITY: Use i128 to prevent overflow with large orders.
+        // Example: 1000 BTC ($200M) × $200,000 = 2×10^16 (overflows i64)
+        let notional = ((size as i128 * price as i128) / 100_000_000)
+            .clamp(0, i64::MAX as i128) as i64;
         {
             let account = self.accounts.get_or_create(&trader);
-            if account.balance < notional / 10 {
+            // SECURITY: Use equity (balance + locked + unrealized PnL) for margin check.
+            // Using balance alone allows opening positions with underwater equity.
+            let equity = account.equity(&self.mark_prices);
+            if equity < notional / 10 {
                 return Err(AppError::InsufficientMargin);
             }
         }

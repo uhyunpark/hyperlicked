@@ -242,6 +242,30 @@ impl Config {
     pub fn init() {
         let _ = Self::global();
     }
+
+    /// Validate that security-critical flags are not enabled in production
+    ///
+    /// SECURITY: Prevents accidentally running with SKIP_SIG_VERIFY or SKIP_QC_VERIFY
+    /// in testnet or mainnet. These flags should only be used in dev mode.
+    pub fn validate_production_safety(&self) -> Result<(), String> {
+        if !self.mode.is_dev() {
+            if self.skip_signature_verification {
+                return Err(
+                    "FATAL: SKIP_SIG_VERIFY=true is not allowed in production (MODE != dev). \
+                     This flag disables EIP-712 signature verification and is DANGEROUS."
+                        .to_string(),
+                );
+            }
+            if self.skip_qc_verify {
+                return Err(
+                    "FATAL: SKIP_QC_VERIFY=true is not allowed in production (MODE != dev). \
+                     This flag disables BLS QC verification and is DANGEROUS."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -284,5 +308,49 @@ mod tests {
         let config = Config::from_env();
         assert!(config.node_role.is_validator());
         assert!(config.peers.is_empty());
+    }
+
+    #[test]
+    fn test_production_safety_dev_mode_allows_skip_flags() {
+        let mut config = Config::from_env();
+        config.mode = Mode::Dev;
+        config.skip_signature_verification = true;
+        config.skip_qc_verify = true;
+        // Dev mode should allow these flags
+        assert!(config.validate_production_safety().is_ok());
+    }
+
+    #[test]
+    fn test_production_safety_testnet_rejects_skip_sig_verify() {
+        let mut config = Config::from_env();
+        config.mode = Mode::Testnet;
+        config.skip_signature_verification = true;
+        config.skip_qc_verify = false;
+        // Testnet should reject SKIP_SIG_VERIFY
+        let result = config.validate_production_safety();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SKIP_SIG_VERIFY"));
+    }
+
+    #[test]
+    fn test_production_safety_mainnet_rejects_skip_qc_verify() {
+        let mut config = Config::from_env();
+        config.mode = Mode::Mainnet;
+        config.skip_signature_verification = false;
+        config.skip_qc_verify = true;
+        // Mainnet should reject SKIP_QC_VERIFY
+        let result = config.validate_production_safety();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SKIP_QC_VERIFY"));
+    }
+
+    #[test]
+    fn test_production_safety_mainnet_allows_safe_config() {
+        let mut config = Config::from_env();
+        config.mode = Mode::Mainnet;
+        config.skip_signature_verification = false;
+        config.skip_qc_verify = false;
+        // Mainnet with safe flags should pass
+        assert!(config.validate_production_safety().is_ok());
     }
 }

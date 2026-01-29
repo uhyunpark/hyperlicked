@@ -60,12 +60,14 @@ pub fn calculate_confidence(sources: &[PriceSource], median_price: Price) -> i64
     }
 
     // Find max deviation from median in basis points
+    // SECURITY: Use i128 to prevent overflow with large price differences
     let max_deviation_bps = sources
         .iter()
         .map(|s| {
             let diff = (s.price - median_price).abs();
             // deviation_bps = (diff / median_price) * 10000
-            (diff * 10000) / median_price
+            ((diff as i128 * 10000) / median_price as i128)
+                .clamp(0, i64::MAX as i128) as i64
         })
         .max()
         .unwrap_or(0);
@@ -85,17 +87,19 @@ pub fn filter_stale(sources: &[PriceSource], current_time: u64, max_age_ms: u64)
         .collect()
 }
 
-/// Check if oracle price deviates too much from mark price.
+/// Check if oracle price deviates too much from reference price.
 ///
 /// Returns true if deviation exceeds max_bps (circuit breaker should trigger).
-pub fn check_deviation(oracle_price: Price, mark_price: Price, max_bps: i64) -> bool {
-    if oracle_price == 0 || mark_price == 0 {
+pub fn check_deviation(oracle_price: Price, reference_price: Price, max_bps: i64) -> bool {
+    if oracle_price == 0 || reference_price == 0 {
         return false; // Can't check deviation with zero prices
     }
 
-    let diff = (oracle_price - mark_price).abs();
-    // deviation_bps = (diff / mark_price) * 10000
-    let deviation_bps = (diff * 10000) / mark_price;
+    let diff = (oracle_price - reference_price).abs();
+    // SECURITY: Use i128 to prevent overflow with large price differences
+    // deviation_bps = (diff / reference_price) * 10000
+    let deviation_bps = ((diff as i128 * 10000) / reference_price as i128)
+        .clamp(0, i64::MAX as i128) as i64;
 
     deviation_bps > max_bps
 }

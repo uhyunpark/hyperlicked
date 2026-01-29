@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use hyperlicked::app::AppState;
+use hyperlicked::config::Config;
 use hyperlicked::consensus::{Engine, MemoryBlockStore};
 use hyperlicked::types::{hash_short, ConsensusConfig};
 
@@ -18,6 +19,11 @@ fn main() {
         .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .init();
+
+    // SECURITY: Validate that dangerous flags are not enabled in production
+    Config::global()
+        .validate_production_safety()
+        .expect("FATAL: Unsafe configuration for production");
 
     println!("╔════════════════════════════════════════╗");
     println!("║      Hyperlicked    Node v0.1.0        ║");

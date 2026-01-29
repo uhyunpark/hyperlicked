@@ -408,6 +408,18 @@ where
         // Verify BLS signature structure if present
         if justify.is_bls() {
             self.verify_bls_certificate_structure(justify)?;
+
+            // SECURITY: Verify BLS aggregate signature cryptographically, not just structurally.
+            // This prevents Byzantine leaders from proposing blocks with invalid QCs.
+            // Skip cryptographic verification only in dev mode with explicit flag.
+            if !Config::global().skip_qc_verify {
+                justify.verify_bls().map_err(|e| {
+                    format!(
+                        "QC BLS verification failed for block {}: {}",
+                        block.height, e
+                    )
+                })?;
+            }
         } else if justify.voters.is_empty() && justify.votes.is_empty() {
             return Err(format!(
                 "QC for block {} has no voters or votes",

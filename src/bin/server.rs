@@ -53,6 +53,11 @@ async fn main() -> Result<()> {
     // Initialize config from environment
     let config = Config::global();
 
+    // SECURITY: Validate that dangerous flags are not enabled in production
+    config
+        .validate_production_safety()
+        .expect("FATAL: Unsafe configuration for production");
+
     println!("╔════════════════════════════════════════╗");
     println!("║     Hyperlicked Server v0.1.0          ║");
     println!("║     REST + WebSocket + Consensus       ║");

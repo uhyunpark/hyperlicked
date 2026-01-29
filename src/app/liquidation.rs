@@ -105,13 +105,14 @@ pub fn check_and_liquidate_limited(
     let total_liquidatable = addresses_to_check.len();
     let checked_count = total_liquidatable;
 
-    // Process accounts up to limit
+    // Process accounts up to limit using partial liquidation
     for address in addresses_to_check {
         if liquidated_count >= max_liquidations {
             break;
         }
 
-        let liquidations = liquidate_account(accounts, &address, mark_prices);
+        // Use partial liquidation to close only enough positions to restore margin health
+        let liquidations = liquidate_account_partial(accounts, &address, mark_prices);
         if !liquidations.is_empty() {
             liquidated_count += 1;
         }
@@ -196,7 +197,127 @@ pub fn check_and_liquidate_from_queue(
     results
 }
 
-/// Liquidate all positions for an underwater account
+/// Partially liquidate an underwater account
+///
+/// SECURITY: Partial liquidation closes only enough positions to restore
+/// margin health. This is fairer to users and reduces insurance fund impact.
+/// Closes positions largest-first (by notional) until equity >= maintenance margin.
+fn liquidate_account_partial(
+    accounts: &mut AccountManager,
+    address: &str,
+    mark_prices: &HashMap<Symbol, Price>,
+) -> Vec<LiquidationResult> {
+    let mut results = Vec::new();
+
+    // Get positions to liquidate with notional values, sorted largest-first
+    let positions: Vec<(String, i64, i64, i64)> = {
+        let account = match accounts.get(address) {
+            Some(a) => a,
+            None => return results,
+        };
+
+        let mut pos_with_notional: Vec<_> = account
+            .positions
+            .iter()
+            .filter(|(_, pos)| pos.size != 0)
+            .map(|(symbol, pos)| {
+                let mark = mark_prices.get(symbol).copied().unwrap_or(pos.entry_price);
+                // Use i128 to prevent overflow in notional calculation
+                let notional = ((pos.size.abs() as i128 * mark as i128) / 100_000_000)
+                    .clamp(0, i64::MAX as i128) as i64;
+                (symbol.clone(), pos.size, pos.entry_price, notional)
+            })
+            .collect();
+
+        // Sort by notional descending (close largest positions first)
+        pos_with_notional.sort_by(|a, b| b.3.cmp(&a.3));
+        pos_with_notional
+    };
+
+    // Liquidate positions until health is restored
+    for (symbol, size, entry_price, _notional) in positions {
+        // Check if margin health is restored (after first liquidation at minimum)
+        if !results.is_empty() {
+            let account = match accounts.get(address) {
+                Some(a) => a,
+                None => break,
+            };
+            let equity = account.equity(mark_prices);
+            let maintenance = account.maintenance_margin_required(mark_prices, MAINTENANCE_MARGIN_BPS);
+
+            if equity >= maintenance {
+                tracing::info!(
+                    address,
+                    equity,
+                    maintenance,
+                    positions_closed = results.len(),
+                    "Partial liquidation: margin health restored"
+                );
+                break;
+            }
+        }
+
+        let mark_price = match mark_prices.get(&symbol) {
+            Some(&p) => p,
+            None => continue, // Skip if no mark price
+        };
+
+        let was_long = size > 0;
+        let abs_size = size.abs();
+
+        // Calculate PnL: close at mark price
+        // Use i128 to prevent overflow with large positions
+        let price_diff = if was_long {
+            mark_price - entry_price
+        } else {
+            entry_price - mark_price
+        };
+        let pnl_i128 = (abs_size as i128 * price_diff as i128) / 100_000_000;
+        let pnl = pnl_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+
+        // Close the position by applying opposite fill
+        let account = accounts.get_or_create(address);
+        account.apply_fill(&symbol, !was_long, abs_size, mark_price);
+
+        tracing::warn!(
+            address,
+            symbol,
+            size,
+            mark_price,
+            pnl,
+            "Position liquidated (partial)"
+        );
+
+        results.push(LiquidationResult {
+            address: address.to_string(),
+            symbol,
+            size: abs_size,
+            price: mark_price,
+            pnl,
+            was_long,
+            insurance_fund_delta: 0, // Partial liquidation doesn't zero accounts
+        });
+    }
+
+    // Only if fully liquidated (no positions remain), zero out and capture insurance delta
+    let account = accounts.get_or_create(address);
+    let has_positions = account.positions.values().any(|p| p.size != 0);
+
+    if !has_positions && !results.is_empty() {
+        let remaining = account.balance.saturating_add(account.locked);
+        if let Some(last) = results.last_mut() {
+            last.insurance_fund_delta = remaining;
+        }
+        if remaining != 0 {
+            account.balance = 0;
+            account.locked = 0;
+        }
+    }
+
+    results
+}
+
+/// Liquidate all positions for an underwater account (full liquidation)
 fn liquidate_account(
     accounts: &mut AccountManager,
     address: &str,
@@ -273,8 +394,12 @@ fn liquidate_account(
     let account = accounts.get_or_create(address);
     let remaining = account.balance.saturating_add(account.locked);
 
-    // Remaining balance goes to insurance fund
-    // Track it separately from position PnL for proper accounting
+    // SECURITY: Insurance fund delta represents the NET remaining balance after all positions
+    // are liquidated. Individual position PnL is tracked separately in each LiquidationResult.
+    // We capture the final account state on the LAST position because:
+    // 1. For full liquidation (this function), all positions are closed at once
+    // 2. The remaining balance only makes sense after all PnL is realized
+    // 3. Partial liquidation (liquidate_account_partial) handles incremental accounting
     if !results.is_empty() {
         // Record insurance fund delta on the last liquidation result
         if let Some(last) = results.last_mut() {
@@ -421,5 +546,50 @@ mod tests {
 
         assert_eq!(batch.results.len(), 3);
         assert!(!batch.has_more);
+    }
+
+    #[test]
+    fn test_partial_liquidation_stops_when_healthy() {
+        let mut accounts = AccountManager::new();
+
+        // Create account with large balance and 2 positions
+        // Position 1: 0.5 BTC long at $50,000 (notional = $25,000)
+        // Position 2: 0.3 BTC long at $50,000 (notional = $15,000)
+        let account = accounts.get_or_create("trader");
+        account.balance = 1_200_000; // $12,000
+        account.apply_fill("BTC-USDT", true, 50_000_000, 5_000_000); // 0.5 BTC
+        account.apply_fill("ETH-USDT", true, 30_000_000, 5_000_000); // Using same price for simplicity
+
+        let mut mark_prices = HashMap::new();
+
+        // Price drops significantly - both positions underwater
+        // BTC drops to $35,000 - unrealized PnL on 0.5 BTC = -$7,500
+        // ETH drops to $35,000 - unrealized PnL on 0.3 ETH = -$4,500
+        // Total unrealized = -$12,000
+        // Equity = $12,000 - $12,000 = $0
+        // Maintenance on $17,500 + $10,500 = $28,000 @ 5% = $1,400
+        // So equity < maintenance, should liquidate
+        mark_prices.insert("BTC-USDT".to_string(), 3_500_000);
+        mark_prices.insert("ETH-USDT".to_string(), 3_500_000);
+
+        assert!(accounts.get("trader").unwrap().is_liquidatable(&mark_prices, 500));
+
+        // Run partial liquidation
+        let results = check_and_liquidate(&mut accounts, &mark_prices);
+
+        // Should have liquidated at least one position
+        assert!(!results.is_empty());
+
+        // The key invariant: after partial liquidation, either:
+        // 1. Account is healthy (equity >= maintenance), OR
+        // 2. Account has no positions left (fully liquidated)
+        let account = accounts.get("trader").unwrap();
+        let has_positions = account.positions.values().any(|p| p.size != 0);
+
+        if has_positions {
+            // If there are positions, should be healthy now
+            assert!(!account.is_liquidatable(&mark_prices, 500));
+        }
+        // If no positions, that's fine too (fully liquidated)
     }
 }

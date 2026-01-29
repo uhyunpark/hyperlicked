@@ -149,11 +149,22 @@ impl OracleState {
         // Calculate confidence
         let confidence_bps = calculate_confidence(&fresh_sources, price);
 
-        // Check deviation from mark (circuit breaker)
-        if let Some(mark) = mark_price {
-            if check_deviation(price, mark, config.max_deviation_bps) {
+        // SECURITY: Compare to previous oracle price, not mark price.
+        // Mark price is easily manipulated via orderbook trading.
+        // Only fall back to mark price on the very first oracle update.
+        let reference_price = self
+            .prices
+            .get(symbol)
+            .map(|p| p.price)
+            .or(mark_price);
+
+        if let Some(reference) = reference_price {
+            if check_deviation(price, reference, config.max_deviation_bps) {
+                // Use i128 to prevent overflow in deviation calculation
+                let deviation_bps = (((price - reference).abs() as i128 * 10000) / reference as i128)
+                    .clamp(0, i64::MAX as i128) as i64;
                 return Err(OracleError::DeviationTooHigh {
-                    deviation_bps: ((price - mark).abs() * 10000) / mark,
+                    deviation_bps,
                     max_bps: config.max_deviation_bps,
                 });
             }
@@ -317,5 +328,75 @@ mod tests {
 
         // 4 seconds later = stale
         assert!(oracle.is_stale("BTC-USDT", 1700000004000));
+    }
+
+    #[test]
+    fn test_oracle_circuit_breaker_uses_previous_oracle() {
+        let mut oracle = OracleState::new();
+        oracle.enabled = true;
+
+        let mut config = OracleConfig::default();
+        config.min_sources = 3;
+        config.max_deviation_bps = 500; // 5% max deviation
+        oracle.set_config("BTC-USDT", config);
+
+        // First update - uses mark price as reference
+        let sources1 = vec![
+            make_source("binance", 5_000_000, 1700000000000),
+            make_source("coinbase", 5_010_000, 1700000000000),
+            make_source("okx", 5_020_000, 1700000000000),
+        ];
+        let result1 = oracle.process_update("BTC-USDT", sources1, 1700000000000, Some(5_000_000));
+        assert!(result1.is_ok());
+
+        // Store the first oracle price
+        let first_oracle_price = oracle.prices.get("BTC-USDT").unwrap().price;
+        assert!(first_oracle_price >= 5_000_000 && first_oracle_price <= 5_020_000);
+
+        // Second update - should compare to previous oracle, not mark
+        // Mark price is now manipulated to $6M (20% off), but we should compare to oracle
+        let sources2 = vec![
+            make_source("binance", 5_050_000, 1700000001000), // 1% higher
+            make_source("coinbase", 5_060_000, 1700000001000),
+            make_source("okx", 5_070_000, 1700000001000),
+        ];
+
+        // With manipulated mark price of $6M, this would fail if using mark
+        // But it should pass because we compare to previous oracle (~$5M)
+        let result2 = oracle.process_update("BTC-USDT", sources2, 1700000001000, Some(6_000_000));
+        assert!(result2.is_ok(), "Should use previous oracle price, not manipulated mark");
+
+        // Verify the oracle price updated
+        let second_oracle_price = oracle.prices.get("BTC-USDT").unwrap().price;
+        assert!(second_oracle_price > first_oracle_price);
+    }
+
+    #[test]
+    fn test_oracle_circuit_breaker_rejects_large_jump() {
+        let mut oracle = OracleState::new();
+        oracle.enabled = true;
+
+        let mut config = OracleConfig::default();
+        config.min_sources = 3;
+        config.max_deviation_bps = 500; // 5% max deviation
+        oracle.set_config("BTC-USDT", config);
+
+        // First update
+        let sources1 = vec![
+            make_source("binance", 5_000_000, 1700000000000),
+            make_source("coinbase", 5_010_000, 1700000000000),
+            make_source("okx", 5_020_000, 1700000000000),
+        ];
+        assert!(oracle.process_update("BTC-USDT", sources1, 1700000000000, Some(5_000_000)).is_ok());
+
+        // Second update with 10% jump - should be rejected
+        let sources2 = vec![
+            make_source("binance", 5_500_000, 1700000001000),
+            make_source("coinbase", 5_510_000, 1700000001000),
+            make_source("okx", 5_520_000, 1700000001000),
+        ];
+
+        let result = oracle.process_update("BTC-USDT", sources2, 1700000001000, Some(5_000_000));
+        assert!(matches!(result, Err(OracleError::DeviationTooHigh { .. })));
     }
 }
