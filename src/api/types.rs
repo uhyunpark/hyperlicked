@@ -419,6 +419,9 @@ pub struct CertificateExport {
     pub view: u64,
     #[serde(rename = "blockHash")]
     pub block_hash: String, // hex
+    /// App state hash that all voters agreed on (required for BLS verification)
+    #[serde(rename = "appHash", skip_serializing_if = "Option::is_none", default)]
+    pub app_hash: Option<String>, // hex
     /// Voters who contributed (NodeId hex strings)
     pub voters: Vec<String>,
     /// BLS public keys (hex, 48 bytes each)

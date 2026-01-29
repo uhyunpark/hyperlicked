@@ -55,6 +55,9 @@ pub struct PeerCertificateExport {
     pub view: u64,
     #[serde(rename = "blockHash")]
     pub block_hash: String, // hex
+    /// App state hash that all voters agreed on (required for BLS verification)
+    #[serde(rename = "appHash", default)]
+    pub app_hash: Option<String>, // hex
     /// Voters who contributed (NodeId hex strings)
     pub voters: Vec<String>,
     /// BLS public keys (hex, 48 bytes each)
@@ -337,6 +340,19 @@ impl ActiveSyncClient {
             .try_into()
             .map_err(|_| "Invalid certificate block hash length")?;
 
+        // Parse app_hash if present (required for BLS verification)
+        let app_hash: Option<[u8; 32]> = match export.app_hash {
+            Some(ref hash_hex) => {
+                let bytes = hex::decode(hash_hex)
+                    .map_err(|e| format!("Invalid certificate app hash: {}", e))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| "Invalid certificate app hash length")?;
+                Some(arr)
+            }
+            None => None,
+        };
+
         let voters: Result<Vec<[u8; 32]>, String> = export
             .voters
             .iter()
@@ -362,6 +378,7 @@ impl ActiveSyncClient {
         Ok(Certificate {
             view: export.view,
             block_hash,
+            app_hash,
             votes: vec![], // BLS mode doesn't store individual votes
             voters,
             bls_pubkeys,
@@ -451,65 +468,32 @@ impl ActiveSyncClient {
 
     /// Verify BLS aggregated signature on a certificate
     ///
-    /// Validates:
+    /// Performs FULL cryptographic verification:
     /// 1. Certificate has voters and matching pubkeys
-    /// 2. Aggregated signature is valid BLS format (96 bytes)
-    /// 3. All pubkeys are valid BLS format (48 bytes)
+    /// 2. Certificate has app_hash (required for verification)
+    /// 3. Aggregated BLS signature verifies against the signing message
     ///
-    /// Note: Full cryptographic verification of the aggregate signature requires
-    /// either multi-message verification or the app_hash which is not stored in the certificate.
-    /// For now, we verify structural validity and trust the validator set.
+    /// The signing message is: view || block_hash || app_hash
     fn verify_bls_certificate(&self, cert: &Certificate) -> bool {
-        use crate::crypto::bls::{BlsPublicKey, BlsSignature};
-
-        // Must have voters
-        if cert.voters.is_empty() {
-            warn!("Certificate has no voters");
-            return false;
-        }
-
-        // Must have matching voters and pubkeys
-        if cert.voters.len() != cert.bls_pubkeys.len() {
-            warn!(
-                voters = cert.voters.len(),
-                pubkeys = cert.bls_pubkeys.len(),
-                "Certificate voter/pubkey count mismatch"
-            );
-            return false;
-        }
-
-        // Validate aggregated signature format
-        if cert.agg_signature.len() != 96 {
-            warn!(
-                len = cert.agg_signature.len(),
-                "Invalid aggregate signature length (expected 96)"
-            );
-            return false;
-        }
-
-        // Try to parse aggregated signature
-        if BlsSignature::from_slice(&cert.agg_signature).is_err() {
-            warn!("Failed to parse aggregate signature");
-            return false;
-        }
-
-        // Validate all public keys
-        for (i, pk_bytes) in cert.bls_pubkeys.iter().enumerate() {
-            if pk_bytes.len() != 48 {
-                warn!(index = i, len = pk_bytes.len(), "Invalid BLS pubkey length");
-                return false;
+        // Use the Certificate's built-in verification
+        match cert.verify_bls() {
+            Ok(()) => {
+                debug!(
+                    view = cert.view,
+                    voters = cert.voters.len(),
+                    "BLS certificate verified successfully"
+                );
+                true
             }
-            let mut pk_arr = [0u8; 48];
-            pk_arr.copy_from_slice(pk_bytes);
-            if BlsPublicKey::from_bytes(&pk_arr).is_err() {
-                warn!(index = i, "Failed to parse BLS pubkey");
-                return false;
+            Err(e) => {
+                warn!(
+                    view = cert.view,
+                    error = %e,
+                    "BLS certificate verification failed"
+                );
+                false
             }
         }
-
-        // All structural checks passed
-        // TODO: Add full cryptographic verification when app_hash is available in certificate
-        true
     }
 
     /// Download snapshot from a peer

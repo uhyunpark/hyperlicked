@@ -34,6 +34,7 @@ fn export_certificate(cert: &Certificate) -> CertificateExport {
     CertificateExport {
         view: cert.view,
         block_hash: hex::encode(cert.block_hash),
+        app_hash: cert.app_hash.map(|h| hex::encode(h)),
         voters: cert.voters.iter().map(|v| hex::encode(v)).collect(),
         bls_pubkeys: cert.bls_pubkeys.iter().map(|pk| hex::encode(pk)).collect(),
         agg_signature: hex::encode(&cert.agg_signature),
