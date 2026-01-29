@@ -525,6 +525,26 @@ impl AppHook for AppState {
         }
         self.pending_liquidations = liquidations;
 
+        // CRITICAL-5: Ensure insurance fund never goes negative after ADL processing.
+        // If ADL couldn't fully cover losses, cap fund at zero to prevent negative balance.
+        // A negative fund would cause incorrect accounting in subsequent liquidations.
+        if self.insurance_fund < 0 {
+            tracing::warn!(
+                fund = self.insurance_fund,
+                "Insurance fund went negative after liquidations, flooring at zero"
+            );
+            self.insurance_fund = 0;
+        }
+
+        // CRITICAL-5: Warn when fund drops below warning threshold
+        if self.insurance_fund < super::INSURANCE_FUND_WARNING_THRESHOLD && self.insurance_fund > 0 {
+            tracing::warn!(
+                fund = self.insurance_fund,
+                threshold = super::INSURANCE_FUND_WARNING_THRESHOLD,
+                "Insurance fund below warning threshold"
+            );
+        }
+
         // === Funding Rate Logic ===
         self.process_funding();
 
