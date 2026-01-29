@@ -52,6 +52,13 @@ where
 
     /// Queue of blocks received from network (for observers)
     received_blocks: Vec<Block>,
+
+    /// State corruption flag - set when app_hash mismatch detected after valid QC
+    ///
+    /// When this is true, the node's state is potentially corrupt and should not
+    /// process further blocks. Operator intervention is required (resync from scratch
+    /// or restore from trusted snapshot).
+    state_corrupted: bool,
 }
 
 impl<A, S> Engine<A, S>
@@ -76,6 +83,7 @@ where
             committed_height: 0,
             observer_mode: false,
             received_blocks: Vec::new(),
+            state_corrupted: false,
         }
     }
 
@@ -99,6 +107,7 @@ where
             committed_height: 0,
             observer_mode: true,
             received_blocks: Vec::new(),
+            state_corrupted: false,
         }
     }
 
@@ -124,12 +133,25 @@ where
             committed_height,
             observer_mode,
             received_blocks: Vec::new(),
+            state_corrupted: false,
         }
     }
 
     /// Check if running in observer mode
     pub fn is_observer(&self) -> bool {
         self.observer_mode
+    }
+
+    /// Check if state is corrupted (Byzantine detection triggered)
+    ///
+    /// When true, the node detected an app_hash mismatch after a valid QC,
+    /// indicating either:
+    /// 1. This node's state is corrupt and needs resync
+    /// 2. The validator network is Byzantine (2f+1 colluding)
+    ///
+    /// The node should NOT process further blocks until operator intervention.
+    pub fn is_state_corrupted(&self) -> bool {
+        self.state_corrupted
     }
 
     /// Get reference to the application state
@@ -240,7 +262,26 @@ where
     /// 4. Not participating in voting or proposing
     ///
     /// Processes one block per tick to mirror validator behavior.
+    ///
+    /// ## State Corruption Handling
+    ///
+    /// If app_hash mismatch is detected after a valid QC, this indicates either:
+    /// - This node's state is corrupt (needs resync from trusted snapshot)
+    /// - The validator network is Byzantine (2f+1 validators colluding)
+    ///
+    /// In either case, the node marks itself as corrupted and refuses to process
+    /// further blocks until operator intervention.
     fn run_observer(&mut self) -> Option<Block> {
+        // CRITICAL: Do not process blocks if state is corrupted
+        if self.state_corrupted {
+            warn!(
+                "Observer state is CORRUPTED - refusing to process blocks. \
+                 Operator intervention required: resync from trusted snapshot \
+                 or investigate potential Byzantine network."
+            );
+            return None;
+        }
+
         // Process any blocks in the queue
         if self.received_blocks.is_empty() {
             return None;
@@ -268,17 +309,23 @@ where
         // Remove block from queue
         let block = self.received_blocks.remove(block_idx);
 
-        // Verify QC before committing (unless SKIP_QC_VERIFY is set)
-        if !Config::global().skip_qc_verify {
-            if let Err(e) = self.verify_block_qc(&block) {
-                error!(
-                    height = block.height,
-                    error = %e,
-                    "Observer rejecting block: QC verification failed"
-                );
-                return None;
+        // Track whether QC was verified (for Byzantine detection logic)
+        let qc_verified = if Config::global().skip_qc_verify {
+            debug!(height = block.height, "Skipping QC verification (dev mode)");
+            false
+        } else {
+            match self.verify_block_qc(&block) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!(
+                        height = block.height,
+                        error = %e,
+                        "Observer rejecting block: QC verification failed"
+                    );
+                    return None;
+                }
             }
-        }
+        };
 
         // Execute the block
         debug!(
@@ -290,16 +337,31 @@ where
 
         let app_hash = self.app.execute(&block);
 
-        // Verify app hash matches (Byzantine detection) - REJECT on mismatch
+        // Verify app hash matches (Byzantine detection)
         if app_hash != block.app_hash {
-            error!(
-                height = block.height,
-                expected = %hash_short(&block.app_hash),
-                got = %hash_short(&app_hash),
-                "Observer rejecting block: app hash mismatch!"
-            );
-            // TODO: Add rollback capability to undo the execution
-            // For now, reject the block and don't commit
+            if qc_verified {
+                // QC was valid but app_hash differs - this is CRITICAL
+                // Either we are corrupt or the network is Byzantine
+                error!(
+                    height = block.height,
+                    expected = %hash_short(&block.app_hash),
+                    got = %hash_short(&app_hash),
+                    "CRITICAL: App hash mismatch after valid QC! \
+                     This indicates either: \
+                     (1) This node's state is corrupt - resync from trusted snapshot, or \
+                     (2) The validator network is Byzantine (2f+1 colluding). \
+                     Node is now HALTED - operator intervention required."
+                );
+                self.state_corrupted = true;
+            } else {
+                // QC wasn't verified (dev mode), just log warning
+                warn!(
+                    height = block.height,
+                    expected = %hash_short(&block.app_hash),
+                    got = %hash_short(&app_hash),
+                    "App hash mismatch (QC not verified - dev mode)"
+                );
+            }
             return None;
         }
 
