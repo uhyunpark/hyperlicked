@@ -45,6 +45,14 @@ pub use view_change::{
 
 use crate::types::{Block, Hash};
 
+// === Rate Limiting Constants (CRITICAL-7) ===
+
+/// Maximum votes per validator per second (prevents vote spam DoS)
+pub const MAX_VOTES_PER_VALIDATOR_PER_SECOND: usize = 10;
+
+/// How many views of votes to retain (older votes are pruned after commit)
+pub const VOTE_RETENTION_VIEWS: u64 = 10;
+
 // =============================================================================
 // Traits (Module Boundaries)
 // =============================================================================

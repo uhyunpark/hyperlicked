@@ -3,9 +3,9 @@
 //! Orchestrates the consensus engine with network I/O.
 //! This is the main entry point for running a validator node.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::time::timeout;
@@ -73,6 +73,9 @@ pub struct ConsensusRunner {
 
     /// Equivocation detector for Byzantine fault detection
     equivocation_detector: EquivocationDetector,
+
+    /// CRITICAL-7: Vote timestamps per validator for rate limiting
+    vote_timestamps: HashMap<crate::types::NodeId, VecDeque<Instant>>,
 }
 
 impl ConsensusRunner {
@@ -108,6 +111,7 @@ impl ConsensusRunner {
             sync_client: SyncClient::new(0),
             syncing: false,
             equivocation_detector: EquivocationDetector::new(),
+            vote_timestamps: HashMap::new(),
         })
     }
 
@@ -218,6 +222,7 @@ impl ConsensusRunner {
             sync_client: SyncClient::new(committed_height),
             syncing: false,
             equivocation_detector: EquivocationDetector::new(),
+            vote_timestamps: HashMap::new(),
         })
     }
 
@@ -492,6 +497,10 @@ impl ConsensusRunner {
                     debug!(got = propose.block.view, expected = target_view, "Wrong view proposal");
                 }
                 Message::Vote(vote) => {
+                    // CRITICAL-7: Rate limit votes to prevent DoS
+                    if self.is_vote_rate_limited(&vote.voter) {
+                        continue;
+                    }
                     if let Some(proof) = store_vote_with_equivocation_check(
                         &mut self.votes,
                         vote,
@@ -531,6 +540,10 @@ impl ConsensusRunner {
             match msg {
                 Message::Prepare(prepare) if prepare.view >= target_view => return Ok(prepare),
                 Message::Vote(vote) => {
+                    // CRITICAL-7: Rate limit votes to prevent DoS
+                    if self.is_vote_rate_limited(&vote.voter) {
+                        continue;
+                    }
                     if let Some(proof) = store_vote_with_equivocation_check(
                         &mut self.votes,
                         vote,
@@ -577,6 +590,10 @@ impl ConsensusRunner {
             match timeout(remaining, self.network.recv_msg()).await {
                 Ok(Ok((from, msg))) => match msg {
                     Message::Vote(vote) if vote.block_hash == block_hash => {
+                        // CRITICAL-7: Rate limit votes to prevent DoS
+                        if self.is_vote_rate_limited(&vote.voter) {
+                            continue;
+                        }
                         debug!(from = %hash_short(&from), view = vote.view, "Received vote");
                         // Check for equivocation before storing
                         if let Some(proof) = store_vote_with_equivocation_check(
@@ -588,6 +605,10 @@ impl ConsensusRunner {
                         }
                     }
                     Message::Vote(vote) => {
+                        // CRITICAL-7: Rate limit votes to prevent DoS
+                        if self.is_vote_rate_limited(&vote.voter) {
+                            continue;
+                        }
                         // Vote for different block - still check for equivocation
                         if let Some(proof) = store_vote_with_equivocation_check(
                             &mut self.votes,
@@ -782,6 +803,8 @@ impl ConsensusRunner {
         self.pending.retain(|_, b| b.height > self.committed_height);
         self.safety.prune_votes_below(block.view);
         self.equivocation_detector.prune_below(block.view);
+        // CRITICAL-7: Prune old vote collections to prevent unbounded memory growth
+        self.prune_old_votes(block.view);
 
         Some(block)
     }
@@ -871,6 +894,53 @@ impl ConsensusRunner {
     /// Get all detected equivocations (for operator visibility)
     pub fn get_equivocations(&self) -> Vec<EquivocationProof> {
         self.equivocation_detector.get_equivocations()
+    }
+
+    /// CRITICAL-7: Check if a voter is rate-limited.
+    ///
+    /// Returns true if the voter has exceeded MAX_VOTES_PER_VALIDATOR_PER_SECOND
+    /// and the vote should be dropped. This prevents vote spam DoS attacks.
+    fn is_vote_rate_limited(&mut self, voter: &crate::types::NodeId) -> bool {
+        use super::MAX_VOTES_PER_VALIDATOR_PER_SECOND;
+
+        let now = Instant::now();
+        let one_second_ago = now - Duration::from_secs(1);
+
+        let timestamps = self.vote_timestamps.entry(*voter).or_default();
+
+        // Remove timestamps older than 1 second
+        while timestamps.front().map(|t| *t < one_second_ago).unwrap_or(false) {
+            timestamps.pop_front();
+        }
+
+        // Check if at limit
+        if timestamps.len() >= MAX_VOTES_PER_VALIDATOR_PER_SECOND {
+            debug!(
+                voter = %hash_short(voter),
+                count = timestamps.len(),
+                limit = MAX_VOTES_PER_VALIDATOR_PER_SECOND,
+                "Vote rate limited"
+            );
+            return true;
+        }
+
+        // Record this vote timestamp
+        timestamps.push_back(now);
+        false
+    }
+
+    /// CRITICAL-7: Prune old votes to prevent unbounded memory growth.
+    ///
+    /// Called after each commit to remove votes older than VOTE_RETENTION_VIEWS.
+    fn prune_old_votes(&mut self, committed_view: crate::types::View) {
+        use super::VOTE_RETENTION_VIEWS;
+
+        let min_view = committed_view.saturating_sub(VOTE_RETENTION_VIEWS);
+
+        // Prune vote collections for old views
+        self.votes.retain(|_, votes| {
+            votes.first().map(|v| v.view >= min_view).unwrap_or(false)
+        });
     }
 
     // =========================================================================
