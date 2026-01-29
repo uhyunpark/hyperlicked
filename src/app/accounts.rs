@@ -2,14 +2,23 @@
 //!
 //! Tracks trader balances, positions, and margin.
 //! Uses integer math (satoshis/cents) for determinism.
+//!
+//! ## Nonce Gap Handling
+//!
+//! Allows transactions to arrive out of order with a configurable gap tolerance.
+//! If a transaction with nonce N+k arrives before N+1 through N+k-1, it will be
+//! accepted if k <= MAX_NONCE_GAP.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use super::positions::Position;
 use super::{Address, Symbol};
 use crate::types::{Price, Size};
+
+/// Maximum allowed gap in nonces before rejection
+pub const MAX_NONCE_GAP: u64 = 10;
 
 /// Trader account
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +33,25 @@ pub struct Account {
     /// Next expected nonce (for replay protection)
     #[serde(default)]
     pub nonce: u64,
+    /// Pending nonces that have been used out-of-order (for gap handling)
+    /// These are nonces > current nonce that have already been accepted
+    #[serde(default)]
+    pub pending_nonces: BTreeSet<u64>,
+}
+
+/// Result of nonce validation with gap handling
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NonceResult {
+    /// Nonce is exactly what we expected
+    Valid,
+    /// Nonce is within gap tolerance (accepted but out of order)
+    ValidWithGap,
+    /// Nonce is too low (already used)
+    TooLow { expected: u64 },
+    /// Nonce is too far ahead
+    GapTooLarge { expected: u64, got: u64, max_gap: u64 },
+    /// Nonce has already been used (duplicate within gap window)
+    AlreadyUsed,
 }
 
 impl Account {
@@ -34,12 +62,65 @@ impl Account {
             locked: 0,
             positions: HashMap::new(),
             nonce: 0,
+            pending_nonces: BTreeSet::new(),
         }
     }
 
     /// Check if nonce is valid (must be exactly current nonce)
+    /// Legacy function - use validate_nonce_with_gap for gap tolerance
     pub fn validate_nonce(&self, nonce: u64) -> bool {
         nonce == self.nonce
+    }
+
+    /// Validate nonce with gap tolerance
+    ///
+    /// Allows out-of-order transactions within MAX_NONCE_GAP of expected nonce.
+    pub fn validate_nonce_with_gap(&self, nonce: u64) -> NonceResult {
+        // Exact match - ideal case
+        if nonce == self.nonce {
+            return NonceResult::Valid;
+        }
+
+        // Too low - already used or before expected
+        if nonce < self.nonce {
+            return NonceResult::TooLow { expected: self.nonce };
+        }
+
+        // Check gap tolerance
+        let gap = nonce.saturating_sub(self.nonce);
+        if gap > MAX_NONCE_GAP {
+            return NonceResult::GapTooLarge {
+                expected: self.nonce,
+                got: nonce,
+                max_gap: MAX_NONCE_GAP,
+            };
+        }
+
+        // Within gap - check if already used
+        if self.pending_nonces.contains(&nonce) {
+            return NonceResult::AlreadyUsed;
+        }
+
+        NonceResult::ValidWithGap
+    }
+
+    /// Use a nonce with gap handling
+    ///
+    /// If nonce == expected, increments normally and clears pending.
+    /// If nonce > expected (within gap), adds to pending_nonces.
+    pub fn use_nonce_with_gap(&mut self, nonce: u64) {
+        if nonce == self.nonce {
+            // Increment nonce
+            self.nonce += 1;
+            // Clear any pending nonces that are now <= current nonce
+            while self.pending_nonces.first().copied() == Some(self.nonce) {
+                self.pending_nonces.remove(&self.nonce);
+                self.nonce += 1;
+            }
+        } else if nonce > self.nonce {
+            // Out of order - add to pending
+            self.pending_nonces.insert(nonce);
+        }
     }
 
     /// Increment nonce after successful transaction
@@ -324,7 +405,7 @@ impl AccountManager {
             .unwrap_or(false)
     }
 
-    /// Validate and consume nonce atomically
+    /// Validate and consume nonce atomically (legacy, no gap tolerance)
     pub fn use_nonce(&mut self, address: &str, nonce: u64) -> Result<(), AccountError> {
         let account = self.get_or_create(address);
         if !account.validate_nonce(nonce) {
@@ -335,6 +416,28 @@ impl AccountManager {
         }
         account.increment_nonce();
         Ok(())
+    }
+
+    /// Validate and consume nonce with gap tolerance
+    ///
+    /// Allows out-of-order transactions within MAX_NONCE_GAP.
+    pub fn use_nonce_with_gap(&mut self, address: &str, nonce: u64) -> Result<(), AccountError> {
+        let account = self.get_or_create(address);
+        match account.validate_nonce_with_gap(nonce) {
+            NonceResult::Valid | NonceResult::ValidWithGap => {
+                account.use_nonce_with_gap(nonce);
+                Ok(())
+            }
+            NonceResult::TooLow { expected } => {
+                Err(AccountError::InvalidNonce { expected, got: nonce })
+            }
+            NonceResult::GapTooLarge { expected, got, max_gap } => {
+                Err(AccountError::NonceGapTooLarge { expected, got, max_gap })
+            }
+            NonceResult::AlreadyUsed => {
+                Err(AccountError::NonceAlreadyUsed { nonce })
+            }
+        }
     }
 
     /// Get current nonce for an address
@@ -363,6 +466,10 @@ pub enum AccountError {
     NotFound,
     #[error("invalid nonce: expected {expected}, got {got}")]
     InvalidNonce { expected: u64, got: u64 },
+    #[error("nonce gap too large: expected {expected}, got {got}, max gap is {max_gap}")]
+    NonceGapTooLarge { expected: u64, got: u64, max_gap: u64 },
+    #[error("nonce already used: {nonce}")]
+    NonceAlreadyUsed { nonce: u64 },
 }
 
 #[cfg(test)]
@@ -462,5 +569,101 @@ mod tests {
         // equity = 5000 - 4000 = $1,000, maintenance = $2,300 (5% of $46k)
         mark_prices.insert("BTC-USDT".to_string(), 4_600_000);
         assert!(account.is_liquidatable(&mark_prices, 500)); // Liquidatable!
+    }
+
+    #[test]
+    fn test_nonce_gap_validation() {
+        let mut account = Account::new("trader");
+
+        // Exact nonce is valid
+        assert_eq!(account.validate_nonce_with_gap(0), NonceResult::Valid);
+
+        // Too low is invalid
+        account.nonce = 5;
+        assert_eq!(
+            account.validate_nonce_with_gap(3),
+            NonceResult::TooLow { expected: 5 }
+        );
+
+        // Within gap is valid with gap flag
+        assert_eq!(account.validate_nonce_with_gap(7), NonceResult::ValidWithGap);
+
+        // At max gap is valid
+        assert_eq!(account.validate_nonce_with_gap(15), NonceResult::ValidWithGap);
+
+        // Beyond max gap is invalid
+        assert_eq!(
+            account.validate_nonce_with_gap(16),
+            NonceResult::GapTooLarge {
+                expected: 5,
+                got: 16,
+                max_gap: MAX_NONCE_GAP
+            }
+        );
+    }
+
+    #[test]
+    fn test_nonce_gap_usage() {
+        let mut account = Account::new("trader");
+
+        // Use nonce 0 (exact match)
+        account.use_nonce_with_gap(0);
+        assert_eq!(account.nonce, 1);
+        assert!(account.pending_nonces.is_empty());
+
+        // Use nonce 3 (gap of 2)
+        account.use_nonce_with_gap(3);
+        assert_eq!(account.nonce, 1); // Not incremented yet
+        assert!(account.pending_nonces.contains(&3));
+
+        // Use nonce 2 (gap of 1)
+        account.use_nonce_with_gap(2);
+        assert_eq!(account.nonce, 1);
+        assert!(account.pending_nonces.contains(&2));
+        assert!(account.pending_nonces.contains(&3));
+
+        // Use nonce 1 (fills the gap)
+        account.use_nonce_with_gap(1);
+        assert_eq!(account.nonce, 4); // Incremented past all pending
+        assert!(account.pending_nonces.is_empty());
+    }
+
+    #[test]
+    fn test_nonce_already_used() {
+        let mut account = Account::new("trader");
+        account.nonce = 5;
+
+        // Use nonce 7 (gap)
+        account.use_nonce_with_gap(7);
+        assert!(account.pending_nonces.contains(&7));
+
+        // Try to use 7 again - should be AlreadyUsed
+        assert_eq!(account.validate_nonce_with_gap(7), NonceResult::AlreadyUsed);
+    }
+
+    #[test]
+    fn test_account_manager_nonce_with_gap() {
+        let mut mgr = AccountManager::new();
+
+        // Use nonces out of order
+        assert!(mgr.use_nonce_with_gap("alice", 0).is_ok());
+        assert!(mgr.use_nonce_with_gap("alice", 2).is_ok()); // Gap
+        assert!(mgr.use_nonce_with_gap("alice", 1).is_ok()); // Fills gap
+
+        // Now nonce should be 3
+        assert_eq!(mgr.get_nonce("alice"), 3);
+
+        // Gap too large should fail
+        assert!(matches!(
+            mgr.use_nonce_with_gap("alice", 20),
+            Err(AccountError::NonceGapTooLarge { .. })
+        ));
+
+        // Already used should fail
+        mgr.use_nonce_with_gap("alice", 5).unwrap(); // Add pending
+        assert!(matches!(
+            mgr.use_nonce_with_gap("alice", 5),
+            Err(AccountError::NonceAlreadyUsed { .. })
+        ));
     }
 }
