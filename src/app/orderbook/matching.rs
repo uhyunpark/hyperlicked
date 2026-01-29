@@ -17,6 +17,17 @@ impl OrderBook {
         // Validate
         self.validate_order(&order, config)?;
 
+        // CRITICAL-3: Check max open orders limit before placing
+        // Only count if this is an order type that can rest on the book
+        if order.order_type != OrderType::Ioc {
+            let current_orders = self.count_orders_by_trader(&order.trader);
+            if current_orders >= config.max_open_orders {
+                return Err(OrderBookError::TooManyOpenOrders {
+                    max: config.max_open_orders,
+                });
+            }
+        }
+
         // ALO check: reject if would match immediately
         if order.order_type == OrderType::Alo && self.would_match(&order) {
             return Err(OrderBookError::AloWouldMatch);
@@ -371,7 +382,9 @@ mod tests {
     fn test_cancel_performance() {
         // This test verifies O(log n) cancel behavior
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        // Use a config with high order limit for this performance test
+        let mut config = MarketConfig::default();
+        config.max_open_orders = 10000;
 
         // Place many orders at different prices
         for i in 0..1000 {
@@ -460,5 +473,47 @@ mod tests {
 
         // Best bid should now be 50000 (51k was filled)
         assert_eq!(book.best_bid(), Some(50000));
+    }
+
+    #[test]
+    fn test_max_order_size_rejected() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let mut config = MarketConfig::default();
+        config.max_order_size = 1000; // Small limit for testing
+
+        // Order within limit should succeed
+        let small_order = make_order("bid1", Side::Bid, 50000, 500);
+        assert!(book.place(small_order, &config).is_ok());
+
+        // Order exceeding limit should fail
+        let large_order = make_order("bid2", Side::Bid, 50000, 2000);
+        let result = book.place(large_order, &config);
+        assert!(matches!(
+            result,
+            Err(OrderBookError::OrderSizeTooLarge { max: 1000, got: 2000 })
+        ));
+    }
+
+    #[test]
+    fn test_max_open_orders_rejected() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let mut config = MarketConfig::default();
+        config.max_open_orders = 3; // Small limit for testing
+
+        // Place orders up to the limit
+        for i in 0..3 {
+            let order = make_order_with_trader(&format!("bid_{}", i), "alice", Side::Bid, 50000 - i as i64, 100);
+            assert!(book.place(order, &config).is_ok());
+        }
+
+        // Next order should fail
+        let excess_order = make_order_with_trader("bid_3", "alice", Side::Bid, 49997, 100);
+        let result = book.place(excess_order, &config);
+        assert!(matches!(result, Err(OrderBookError::TooManyOpenOrders { max: 3 })));
+
+        // IOC orders should still work (don't rest on book)
+        let mut ioc_order = make_order_with_trader("ioc_1", "alice", Side::Bid, 49996, 100);
+        ioc_order.order_type = OrderType::Ioc;
+        assert!(book.place(ioc_order, &config).is_ok());
     }
 }

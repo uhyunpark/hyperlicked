@@ -191,6 +191,21 @@ impl AppState {
             if equity < notional / 10 {
                 return Err(AppError::InsufficientMargin);
             }
+
+            // CRITICAL-3: Check that resulting position wouldn't exceed max_position_size
+            let current_pos = account.position(&symbol).size;
+            let max_pos = config.max_position_size;
+            // Calculate worst-case resulting position (if entire order fills)
+            let resulting_pos = match side {
+                Side::Bid => current_pos.saturating_add(size),
+                Side::Ask => current_pos.saturating_sub(size),
+            };
+            if resulting_pos.abs() > max_pos {
+                return Err(AppError::PositionTooLarge {
+                    max: max_pos,
+                    would_be: resulting_pos.abs(),
+                });
+            }
         }
 
         // Place order in isolated scope so book borrow ends

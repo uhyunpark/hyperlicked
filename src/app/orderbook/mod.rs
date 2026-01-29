@@ -221,6 +221,17 @@ impl OrderBook {
             .collect()
     }
 
+    /// Count open orders for a specific trader (for limit enforcement)
+    pub fn count_orders_by_trader(&self, trader: &str) -> usize {
+        let trader_lower = trader.to_lowercase();
+        self.bids
+            .values()
+            .chain(self.asks.values())
+            .flat_map(|orders| orders.iter())
+            .filter(|order| order.trader.to_lowercase() == trader_lower)
+            .count()
+    }
+
     // --- Internal helpers ---
 
     pub(crate) fn validate_order(
@@ -239,6 +250,13 @@ impl OrderBook {
         }
         if order.size % config.lot_size != 0 {
             return Err(OrderBookError::SizeNotAligned);
+        }
+        // CRITICAL-3: Check max order size to prevent OOM
+        if order.size > config.max_order_size {
+            return Err(OrderBookError::OrderSizeTooLarge {
+                max: config.max_order_size,
+                got: order.size,
+            });
         }
         Ok(())
     }
@@ -296,4 +314,8 @@ pub enum OrderBookError {
     SizeNotAligned,
     #[error("ALO order would match immediately")]
     AloWouldMatch,
+    #[error("order size {got} exceeds max {max}")]
+    OrderSizeTooLarge { max: i64, got: i64 },
+    #[error("too many open orders (max: {max})")]
+    TooManyOpenOrders { max: usize },
 }

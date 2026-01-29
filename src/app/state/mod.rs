@@ -32,6 +32,10 @@ pub const MAX_TRADES_PER_SYMBOL: usize = 1000;
 /// Maintenance margin rate in basis points (500 = 5%)
 pub const MAINTENANCE_MARGIN_BPS: i64 = 500;
 
+/// Insurance fund warning threshold (CRITICAL-5)
+/// When fund drops below this level ($1M in cents), emit warning log
+pub const INSURANCE_FUND_WARNING_THRESHOLD: i64 = 100_000_000;
+
 /// Order update info for WebSocket event emission
 #[derive(Debug, Clone)]
 pub struct OrderUpdateInfo {
@@ -581,4 +585,6 @@ pub enum AppError {
     InsufficientMargin,
     #[error("reduce-only order would increase position")]
     ReduceOnlyViolation,
+    #[error("position size {would_be} would exceed max {max}")]
+    PositionTooLarge { max: i64, would_be: i64 },
 }

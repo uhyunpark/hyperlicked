@@ -50,7 +50,10 @@ pub use staking::{
 };
 pub use oracle::{OracleConfig, OracleError, OraclePrice, OracleState, PriceSource};
 pub use market_maker::{MarketMakerConfig, MarketMakerState, Intensity as MMIntensity};
-pub use state::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS};
+pub use state::{
+    AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS,
+    INSURANCE_FUND_WARNING_THRESHOLD,
+};
 pub use trigger::{
     Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType,
     TriggerOrder, TriggerOrderId, TriggerOrderStatus, TriggerType,
@@ -233,6 +236,10 @@ pub struct MarketConfig {
     pub funding_interval_ms: u64,  // Funding interval in ms (3600000 = 1 hour)
     pub interest_rate_bps: i64,    // Interest rate component (1 = 0.01%)
     pub max_funding_rate_bps: i64, // Max funding rate cap (400 = 4%)
+    // Position/order limits (CRITICAL-3: OOM prevention)
+    pub max_order_size: Size,      // Max single order size (satoshis)
+    pub max_position_size: Size,   // Max position per account (satoshis)
+    pub max_open_orders: usize,    // Max open orders per account
 }
 
 impl Default for MarketConfig {
@@ -247,6 +254,10 @@ impl Default for MarketConfig {
             funding_interval_ms: 3600000, // 1 hour
             interest_rate_bps: 1,        // 0.01% interest
             max_funding_rate_bps: 400,   // 4% max hourly rate
+            // Position/order limits (sane defaults for BTC)
+            max_order_size: 1_000_000_000_000,    // 10,000 BTC (1e12 satoshis)
+            max_position_size: 10_000_000_000_000, // 100,000 BTC (1e13 satoshis)
+            max_open_orders: 100,                  // 100 open orders per account
         }
     }
 }
