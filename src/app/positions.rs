@@ -26,28 +26,33 @@ pub struct Position {
 
 impl Position {
     /// Calculate unrealized PnL at a given mark price
+    ///
+    /// Uses i128 intermediate to prevent overflow with large positions.
     pub fn unrealized_pnl(&self, mark_price: Price) -> i64 {
         if self.size == 0 {
             return 0;
         }
         // PnL = size * (mark - entry) / scale_factor
-        // Since price is in cents and size in satoshis,
-        // we need to adjust for the scaling
+        // Use i128 to prevent overflow: 100M satoshis × 10B cents = 10^18
         let price_diff = mark_price - self.entry_price;
-        // For simplicity: PnL in cents = size * price_diff / 100_000_000
-        // This gives PnL per satoshi of position
-        (self.size * price_diff) / 100_000_000
+        let pnl_i128 = (self.size as i128 * price_diff as i128) / 100_000_000;
+        pnl_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
     }
 
     /// Calculate notional value at mark price
+    ///
+    /// Uses i128 intermediate to prevent overflow.
     pub fn notional(&self, mark_price: Price) -> i64 {
-        (self.size.abs() * mark_price) / 100_000_000
+        let notional_i128 = (self.size.abs() as i128 * mark_price as i128) / 100_000_000;
+        notional_i128.clamp(0, i64::MAX as i128) as i64
     }
 
     /// Apply funding payment to this position
     /// funding_rate_bps: positive = longs pay shorts
     /// index_price: price used to calculate payment (usually mark/index price)
     /// Returns the payment amount (positive = received, negative = paid)
+    ///
+    /// Uses i128 intermediate to prevent overflow with large notional × funding rate.
     pub fn apply_funding(
         &mut self,
         funding_rate_bps: i64,
@@ -59,10 +64,10 @@ impl Position {
         }
 
         // Payment = |size| * index_price * funding_rate / 1e8 / 10000
-        // Longs pay when rate > 0, shorts receive
-        // Shorts pay when rate < 0, longs receive
-        let notional = (self.size.abs() * index_price) / 100_000_000;
-        let payment = (notional * funding_rate_bps) / 10000;
+        // Use i128 for entire calculation to prevent overflow
+        let notional_i128 = (self.size.abs() as i128 * index_price as i128) / 100_000_000;
+        let payment_i128 = (notional_i128 * funding_rate_bps as i128) / 10000;
+        let payment = payment_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
         // Positive rate: longs pay, shorts receive
         // Negative rate: shorts pay, longs receive
@@ -72,7 +77,7 @@ impl Position {
             payment // Short receives (or pays if rate negative)
         };
 
-        self.cumulative_funding += signed_payment;
+        self.cumulative_funding = self.cumulative_funding.saturating_add(signed_payment);
         self.last_funding_timestamp = timestamp;
 
         signed_payment
@@ -80,47 +85,51 @@ impl Position {
 
     /// Calculate liquidation price given available margin
     /// Returns 0 if position is empty or margin is insufficient to calculate
+    ///
+    /// Uses i128 intermediate to prevent overflow in margin ratio calculations.
     pub fn liquidation_price(&self, available_margin: i64, maintenance_rate_bps: i64) -> Price {
         if self.size == 0 || self.entry_price == 0 {
             return 0;
         }
 
         // Notional at entry = |size| * entry_price / 1e8
-        let notional_at_entry = (self.size.abs() * self.entry_price) / 100_000_000;
-        if notional_at_entry == 0 {
+        // Use i128 for the multiplication
+        let notional_i128 = (self.size.abs() as i128 * self.entry_price as i128) / 100_000_000;
+        if notional_i128 == 0 {
             return 0;
         }
+        let notional_at_entry = notional_i128.min(i64::MAX as i128) as i64;
 
-        // Maintenance margin = notional * maintenance_rate / 10000
-        // At liquidation: equity = maintenance_margin
-        // equity = margin + unrealized_pnl
-        // For long: pnl = size * (liq_price - entry) / 1e8
-        // At liquidation: margin + size * (liq - entry) / 1e8 = notional_at_liq * maint / 10000
-        // Simplified: liq_price where margin covers losses down to maintenance
-
-        // margin_ratio = available_margin * 1e8 / (|size| * entry_price)
-        // For long: liq = entry * (1 - margin_ratio + maintenance_rate)
-        // For short: liq = entry * (1 + margin_ratio - maintenance_rate)
-
-        let margin_ratio_bps = if notional_at_entry > 0 {
-            (available_margin * 10000) / notional_at_entry
+        // margin_ratio = available_margin * 10000 / notional_at_entry
+        // Use i128 for the multiplication
+        let margin_ratio_i128 = if notional_at_entry > 0 {
+            (available_margin as i128 * 10000) / notional_at_entry as i128
         } else {
             0
         };
+        let margin_ratio_bps = margin_ratio_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
         if self.size > 0 {
             // Long position: liquidated when price drops
             // liq_price = entry * (10000 - margin_ratio_bps + maintenance_rate_bps) / 10000
-            let factor = 10000 - margin_ratio_bps + maintenance_rate_bps;
+            let factor = 10000i64
+                .saturating_sub(margin_ratio_bps)
+                .saturating_add(maintenance_rate_bps);
             if factor <= 0 {
                 return 0; // Well-margined, won't liquidate
             }
-            (self.entry_price * factor) / 10000
+            // Use i128 for final multiplication
+            let liq_i128 = (self.entry_price as i128 * factor as i128) / 10000;
+            liq_i128.clamp(0, i64::MAX as i128) as i64
         } else {
             // Short position: liquidated when price rises
             // liq_price = entry * (10000 + margin_ratio_bps - maintenance_rate_bps) / 10000
-            let factor = 10000 + margin_ratio_bps - maintenance_rate_bps;
-            (self.entry_price * factor) / 10000
+            let factor = 10000i64
+                .saturating_add(margin_ratio_bps)
+                .saturating_sub(maintenance_rate_bps);
+            // Use i128 for final multiplication
+            let liq_i128 = (self.entry_price as i128 * factor as i128) / 10000;
+            liq_i128.clamp(0, i64::MAX as i128) as i64
         }
     }
 }

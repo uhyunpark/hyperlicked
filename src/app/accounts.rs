@@ -135,10 +135,14 @@ impl Account {
             pos.entry_price = fill_price;
         } else if (pos.size > 0) == side_is_buy {
             // Adding to position - update average entry
-            let old_notional = pos.size.abs() * pos.entry_price;
-            let add_notional = fill_size * fill_price;
-            let new_size = pos.size + fill_size_signed;
-            pos.entry_price = (old_notional + add_notional) / new_size.abs();
+            // Use i128 for notional calculations to prevent overflow
+            let old_notional = pos.size.abs() as i128 * pos.entry_price as i128;
+            let add_notional = fill_size as i128 * fill_price as i128;
+            let new_size = pos.size.saturating_add(fill_size_signed);
+            if new_size.abs() > 0 {
+                let new_entry = (old_notional + add_notional) / new_size.abs() as i128;
+                pos.entry_price = new_entry.clamp(0, i64::MAX as i128) as i64;
+            }
             pos.size = new_size;
         } else {
             // Reducing position - realize PnL
@@ -148,14 +152,16 @@ impl Account {
             } else {
                 pos.entry_price - fill_price // Short: profit when buy lower
             };
-            let realized = (close_size * pnl_per_unit) / 100_000_000;
-            pos.realized_pnl += realized;
-            self.balance += realized;
+            // Use i128 for PnL calculation to prevent overflow
+            let realized_i128 = (close_size as i128 * pnl_per_unit as i128) / 100_000_000;
+            let realized = realized_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            pos.realized_pnl = pos.realized_pnl.saturating_add(realized);
+            self.balance = self.balance.saturating_add(realized);
 
-            pos.size += fill_size_signed;
+            pos.size = pos.size.saturating_add(fill_size_signed);
 
             // If flipped sides
-            if (pos.size > 0) != (pos.size - fill_size_signed > 0) && pos.size != 0 {
+            if (pos.size > 0) != (pos.size.saturating_sub(fill_size_signed) > 0) && pos.size != 0 {
                 pos.entry_price = fill_price;
             }
         }

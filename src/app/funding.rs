@@ -91,9 +91,10 @@ pub fn sample_premium(book: &OrderBook, index_price: Price) -> i64 {
     let mid_price = (bid + ask) / 2;
 
     // Premium in bps = (mid - index) / index * 10000
-    let premium_bps = ((mid_price - index_price) * 10000) / index_price;
-
-    premium_bps
+    // Use i128 to prevent overflow: price_diff × 10000 can exceed i64
+    let price_diff = mid_price as i128 - index_price as i128;
+    let premium_i128 = (price_diff * 10000) / index_price as i128;
+    premium_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 /// Sample premium with oracle weighting for manipulation resistance
@@ -140,16 +141,21 @@ pub fn sample_premium_with_oracle(
         let bid = best_bid.unwrap();
         let ask = best_ask.unwrap();
         let mid_price = (bid + ask) / 2;
-        ((mid_price - oracle_price) * 10000) / oracle_price
+        // Use i128 to prevent overflow
+        let price_diff = mid_price as i128 - oracle_price as i128;
+        let premium_i128 = (price_diff * 10000) / oracle_price as i128;
+        premium_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
     } else {
         0
     };
 
     // Blend: weighted average
     // blended = (weight * oracle_premium + (10000 - weight) * mid_premium) / 10000
-    let blended = (weight * oracle_premium + (10000 - weight) * mid_premium) / 10000;
-
-    blended
+    // Use i128 to prevent overflow in weighted sum
+    let weighted_oracle = weight as i128 * oracle_premium as i128;
+    let weighted_mid = (10000 - weight) as i128 * mid_premium as i128;
+    let blended_i128 = (weighted_oracle + weighted_mid) / 10000;
+    blended_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 /// Calculate funding rate from average premium

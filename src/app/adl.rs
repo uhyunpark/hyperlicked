@@ -104,27 +104,32 @@ pub fn find_adl_candidates(
 
             let abs_size = position.size.abs();
 
-            // Calculate unrealized PnL
-            let pnl = if is_short {
+            // Calculate unrealized PnL using i128 to prevent overflow
+            let pnl_i128 = if is_short {
                 // Short: profit when price drops
                 // PnL = (entry - mark) * size / 100_000_000
-                (position.entry_price - mark_price) * abs_size / 100_000_000
+                let price_diff = position.entry_price as i128 - mark_price as i128;
+                (price_diff * abs_size as i128) / 100_000_000
             } else {
                 // Long: profit when price rises
                 // PnL = (mark - entry) * size / 100_000_000
-                (mark_price - position.entry_price) * abs_size / 100_000_000
+                let price_diff = mark_price as i128 - position.entry_price as i128;
+                (price_diff * abs_size as i128) / 100_000_000
             };
+            let pnl = pnl_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
             // Only include profitable positions
             if pnl > 0 {
-                // Calculate notional value (in cents)
+                // Calculate notional value (in cents) using i128
                 // notional = size * entry_price / 100_000_000
-                let notional = abs_size * position.entry_price / 100_000_000;
+                let notional_i128 = (abs_size as i128 * position.entry_price as i128) / 100_000_000;
+                let notional = notional_i128.clamp(0, i64::MAX as i128) as i64;
 
                 // Calculate profit percentage in basis points (10000 bps = 100%)
-                // profit_pct = pnl / notional * 10000
+                // profit_pct = pnl / notional * 10000, using i128
                 let profit_pct_bps = if notional > 0 {
-                    pnl * 10000 / notional
+                    let pct_i128 = (pnl as i128 * 10000) / notional as i128;
+                    pct_i128.clamp(0, i64::MAX as i128) as i64
                 } else {
                     0
                 };
@@ -169,14 +174,17 @@ pub fn calculate_adl_distribution(
             break;
         }
 
-        // Calculate max value this position can absorb
+        // Calculate max value this position can absorb using i128
         // Value = size * mark_price / 100_000_000 (convert to cents)
-        let max_value = candidate.size * mark_price / 100_000_000;
+        let max_value_i128 = (candidate.size as i128 * mark_price as i128) / 100_000_000;
+        let max_value = max_value_i128.clamp(0, i64::MAX as i128) as i64;
 
         // How much of this position do we need?
         let value_needed = remaining_loss.min(max_value);
         let size_to_reduce = if max_value > 0 {
-            (value_needed * 100_000_000) / mark_price
+            // Use i128 to prevent overflow: value_needed × 100_000_000 can be large
+            let size_i128 = (value_needed as i128 * 100_000_000) / mark_price as i128;
+            size_i128.clamp(0, i64::MAX as i128) as i64
         } else {
             0
         };
@@ -215,12 +223,15 @@ pub fn execute_adl(
         let is_short = position.size < 0;
         let entry_price = position.entry_price;
 
-        // Calculate realized PnL for the ADL'd position
-        let realized_pnl = if is_short {
-            (entry_price - mark_price) * size_to_reduce / 100_000_000
+        // Calculate realized PnL for the ADL'd position using i128
+        let realized_pnl_i128 = if is_short {
+            let price_diff = entry_price as i128 - mark_price as i128;
+            (price_diff * *size_to_reduce as i128) / 100_000_000
         } else {
-            (mark_price - entry_price) * size_to_reduce / 100_000_000
+            let price_diff = mark_price as i128 - entry_price as i128;
+            (price_diff * *size_to_reduce as i128) / 100_000_000
         };
+        let realized_pnl = realized_pnl_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
 
         // Apply fill to close part of the position
         // For shorts being ADL'd: buy to close (is_buy = true)
