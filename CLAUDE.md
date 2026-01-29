@@ -68,7 +68,8 @@ hyperlicked/
 │   ├── types.rs           # Core types (Block, Vote, Order)
 │   ├── config.rs          # Runtime config (mode, faucet, etc.)
 │   ├── consensus/         # HotStuff-2 engine + BLS vote aggregation
-│   ├── network/           # TCP transport
+│   ├── network/           # TCP transport, RPC sync client
+│   │   └── active_sync.rs # RPC node sync with QC verification
 │   ├── app/               # Orderbook, accounts, mempool, staking
 │   │   ├── mod.rs         # Transaction types, MarketConfig
 │   │   ├── state/         # AppState (implements AppHook)
@@ -148,6 +149,7 @@ cargo build --release
 | `DATA_DIR` | None | RocksDB persistence path (None = in-memory only) |
 | `SNAPSHOT_INTERVAL` | 1000 | Snapshot app state every N blocks (0 = disabled) |
 | `SKIP_SIG_VERIFY` | false | Skip signature verification (dev mode only, unsafe!) |
+| `SKIP_QC_VERIFY` | false | Skip QC verification for RPC sync (dev mode only, unsafe!) |
 | `ORACLE_ENABLED` | false | Enable oracle system at startup (dev mode) |
 | `MM_ENABLED` | false | Enable artificial market maker (dev mode) |
 | `MM_INTERVAL_MS` | 100 | Market maker tick interval |

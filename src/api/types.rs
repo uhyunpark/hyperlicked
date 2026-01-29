@@ -413,8 +413,24 @@ pub struct SyncStatus {
     pub is_persistent: bool,
 }
 
+/// Certificate export for sync (QC verification)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificateExport {
+    pub view: u64,
+    #[serde(rename = "blockHash")]
+    pub block_hash: String, // hex
+    /// Voters who contributed (NodeId hex strings)
+    pub voters: Vec<String>,
+    /// BLS public keys (hex, 48 bytes each)
+    #[serde(rename = "blsPubkeys", skip_serializing_if = "Vec::is_empty", default)]
+    pub bls_pubkeys: Vec<String>,
+    /// Aggregated signature (hex, 96 bytes for BLS)
+    #[serde(rename = "aggSignature")]
+    pub agg_signature: String,
+}
+
 /// Block export for sync
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BlockExport {
     pub height: u64,
     pub view: u64,
@@ -429,6 +445,9 @@ pub struct BlockExport {
     pub payload_size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// QC that justifies this block (proves parent was certified)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justify: Option<CertificateExport>,
 }
 
 /// Block range query parameters

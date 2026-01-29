@@ -4,6 +4,10 @@
 //! - `dev` (default): Auto-faucet, relaxed validation, test accounts
 //! - `testnet`: Real validation, but test network
 //! - `mainnet`: Full validation, production mode
+//!
+//! Node role (NODE_ROLE env var):
+//! - `validator` (default): Full consensus participation
+//! - `rpc`: Observer mode, serve API only
 
 use std::sync::OnceLock;
 
@@ -49,11 +53,49 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// Node role in the network
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeRole {
+    /// Full consensus participation (propose blocks, vote)
+    Validator,
+    /// Observer mode (follow chain, serve API, no voting)
+    Rpc,
+}
+
+impl NodeRole {
+    pub fn from_env() -> Self {
+        match std::env::var("NODE_ROLE").as_deref() {
+            Ok("rpc") | Ok("observer") => NodeRole::Rpc,
+            _ => NodeRole::Validator, // Default to validator
+        }
+    }
+
+    pub fn is_validator(&self) -> bool {
+        matches!(self, NodeRole::Validator)
+    }
+
+    pub fn is_rpc(&self) -> bool {
+        matches!(self, NodeRole::Rpc)
+    }
+}
+
+impl std::fmt::Display for NodeRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeRole::Validator => write!(f, "validator"),
+            NodeRole::Rpc => write!(f, "rpc"),
+        }
+    }
+}
+
 /// Runtime configuration
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Runtime mode
     pub mode: Mode,
+
+    /// Node role (validator or rpc)
+    pub node_role: NodeRole,
 
     /// Auto-fund new accounts with this amount (cents)
     /// Only applies in dev mode
@@ -86,12 +128,24 @@ pub struct Config {
 
     /// Enable artificial market maker (dev mode only)
     pub mm_enabled: bool,
+
+    /// Peer URLs for sync (RPC nodes use these to catch up)
+    /// Format: "http://host:port"
+    pub peers: Vec<String>,
+
+    /// Sync poll interval in milliseconds
+    pub sync_poll_interval_ms: u64,
+
+    /// Skip QC signature verification (dev mode only, dangerous!)
+    /// Used for testing RPC sync without full BLS verification
+    pub skip_qc_verify: bool,
 }
 
 impl Config {
     /// Load configuration from environment
     pub fn from_env() -> Self {
         let mode = Mode::from_env();
+        let node_role = NodeRole::from_env();
 
         let faucet_amount = if mode.is_dev() {
             std::env::var("DEV_FAUCET_AMOUNT")
@@ -107,8 +161,20 @@ impl Config {
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(false);
 
+        let skip_qc_verify = mode.is_dev()
+            && std::env::var("SKIP_QC_VERIFY")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false);
+
+        // Parse peers from PEERS env var (comma-separated URLs)
+        let peers: Vec<String> = std::env::var("PEERS")
+            .ok()
+            .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+
         Self {
             mode,
+            node_role,
             faucet_amount,
             block_time_ms: std::env::var("BLOCK_TIME_MS")
                 .ok()
@@ -137,6 +203,12 @@ impl Config {
             mm_enabled: std::env::var("MM_ENABLED")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(false),
+            peers,
+            sync_poll_interval_ms: std::env::var("SYNC_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000), // Default: poll every 1 second
+            skip_qc_verify,
         }
     }
 
@@ -172,5 +244,24 @@ mod tests {
         let config = Config::from_env();
         assert!(config.mode.is_dev());
         assert_eq!(config.faucet_amount, 10_000_000); // $100k
+    }
+
+    #[test]
+    fn test_node_role_default_is_validator() {
+        // Without NODE_ROLE env var, should default to validator
+        assert!(NodeRole::from_env().is_validator());
+    }
+
+    #[test]
+    fn test_node_role_display() {
+        assert_eq!(NodeRole::Validator.to_string(), "validator");
+        assert_eq!(NodeRole::Rpc.to_string(), "rpc");
+    }
+
+    #[test]
+    fn test_config_node_role() {
+        let config = Config::from_env();
+        assert!(config.node_role.is_validator());
+        assert!(config.peers.is_empty());
     }
 }

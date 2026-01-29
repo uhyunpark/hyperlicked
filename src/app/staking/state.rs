@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{
     Delegation, EpochSnapshot, Evidence, LivenessRecord, UnstakeRequest, ValidatorInfo,
-    ValidatorStatus, MAX_ACTIVE_VALIDATORS, MIN_SELF_STAKE, ROUNDS_PER_EPOCH,
+    ValidatorSetUpdate, ValidatorStatus, MAX_ACTIVE_VALIDATORS, MIN_SELF_STAKE, ROUNDS_PER_EPOCH,
 };
 use crate::app::Address;
 use crate::types::NodeId;
@@ -248,6 +248,37 @@ impl StakingState {
             .take(MAX_ACTIVE_VALIDATORS)
             .map(|v| v.node_id)
             .collect()
+    }
+
+    /// Get active validator set for consensus
+    ///
+    /// Returns (node_ids, bls_pubkeys, stakes) tuples for the active set.
+    /// Used to update consensus configuration on epoch transitions.
+    pub fn active_validator_set_for_consensus(&self) -> ValidatorSetUpdate {
+        let mut validators: Vec<_> = self
+            .validators
+            .values()
+            .filter(|v| v.can_be_active())
+            .collect();
+
+        // Sort by total stake descending, then by operator address for determinism
+        validators.sort_by(|a, b| {
+            b.total_stake
+                .cmp(&a.total_stake)
+                .then_with(|| a.operator.cmp(&b.operator))
+        });
+
+        // Take top N
+        let active: Vec<_> = validators
+            .into_iter()
+            .take(MAX_ACTIVE_VALIDATORS)
+            .collect();
+
+        ValidatorSetUpdate {
+            node_ids: active.iter().map(|v| v.node_id).collect(),
+            bls_pubkeys: active.iter().map(|v| v.bls_pubkey.clone()).collect(),
+            stakes: active.iter().map(|v| (v.node_id, v.total_stake as u64)).collect(),
+        }
     }
 
     /// Check if should transition to new epoch

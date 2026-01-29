@@ -94,6 +94,8 @@ pub struct AppState {
     pub(crate) staking: StakingState,
     /// Pending staking events from last block
     pub(crate) pending_staking_events: Vec<crate::app::staking::StakingTxResult>,
+    /// Pending validator set update from epoch transition (for consensus to consume)
+    pub(crate) pending_validator_update: Option<crate::app::staking::ValidatorSetUpdate>,
     /// Current view (for epoch tracking)
     pub(crate) current_view: View,
     // === Trigger Orders ===
@@ -151,6 +153,7 @@ impl AppState {
             candle_manager: CandleManager::new(),
             staking: StakingState::new(),
             pending_staking_events: Vec::new(),
+            pending_validator_update: None,
             current_view: 0,
             trigger_orders: HashMap::new(),
             trigger_orders_by_trader: HashMap::new(),
@@ -376,6 +379,14 @@ impl AppState {
     /// Take pending staking events (clears the list)
     pub fn take_pending_staking_events(&mut self) -> Vec<crate::app::staking::StakingTxResult> {
         std::mem::take(&mut self.pending_staking_events)
+    }
+
+    /// Take pending validator set update (clears the value)
+    ///
+    /// Returns the validator set update from the most recent epoch transition.
+    /// Used by consensus layer to update its validator configuration.
+    pub fn take_pending_validator_update(&mut self) -> Option<crate::app::staking::ValidatorSetUpdate> {
+        self.pending_validator_update.take()
     }
 
     /// Get active validators for consensus

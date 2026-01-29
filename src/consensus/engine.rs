@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+use crate::config::Config;
 
 use super::{AppHook, BlockStore, Pacemaker, Safety};
 use crate::types::{
@@ -44,6 +46,12 @@ where
 
     /// Last committed height
     committed_height: u64,
+
+    /// Observer mode (follow chain without voting/proposing)
+    observer_mode: bool,
+
+    /// Queue of blocks received from network (for observers)
+    received_blocks: Vec<Block>,
 }
 
 impl<A, S> Engine<A, S>
@@ -66,7 +74,62 @@ where
             store,
             pending: HashMap::new(),
             committed_height: 0,
+            observer_mode: false,
+            received_blocks: Vec::new(),
         }
+    }
+
+    /// Create a new consensus engine in observer mode
+    ///
+    /// Observer mode allows following the chain without voting or proposing.
+    /// Used by RPC nodes that serve API requests but don't participate in consensus.
+    pub fn new_observer(config: ConsensusConfig, app: A, store: S) -> Self {
+        // Initialize with genesis block
+        let genesis = Block::genesis();
+        store.save(&genesis);
+        store.set_committed(&genesis.hash());
+
+        Self {
+            config,
+            safety: Safety::new(),
+            pacemaker: Pacemaker::default(),
+            app,
+            store,
+            pending: HashMap::new(),
+            committed_height: 0,
+            observer_mode: true,
+            received_blocks: Vec::new(),
+        }
+    }
+
+    /// Create engine with existing state (for recovery)
+    pub fn with_state(
+        config: ConsensusConfig,
+        app: A,
+        store: S,
+        committed_height: u64,
+        current_view: u64,
+        observer_mode: bool,
+    ) -> Self {
+        let mut pacemaker = Pacemaker::default();
+        pacemaker.set_view(current_view);
+
+        Self {
+            config,
+            safety: Safety::new(),
+            pacemaker,
+            app,
+            store,
+            pending: HashMap::new(),
+            committed_height,
+            observer_mode,
+            received_blocks: Vec::new(),
+        }
+    }
+
+    /// Check if running in observer mode
+    pub fn is_observer(&self) -> bool {
+        self.observer_mode
     }
 
     /// Get reference to the application state
@@ -83,6 +146,11 @@ where
     ///
     /// Returns the committed block if one was committed this round.
     pub fn tick(&mut self) -> Option<Block> {
+        // Observer mode: process received blocks without voting/proposing
+        if self.observer_mode {
+            return self.run_observer();
+        }
+
         let view = self.pacemaker.current_view();
 
         if self.config.is_leader(view) {
@@ -161,6 +229,211 @@ where
         // This is placeholder for Phase 2
         debug!(view, "Would run as follower (not implemented yet)");
         None
+    }
+
+    /// Observer logic: process received blocks without voting
+    ///
+    /// Observers follow the chain by:
+    /// 1. Verifying QC on received blocks (Byzantine detection)
+    /// 2. Executing them to maintain local state
+    /// 3. Verifying app_hash matches (reject on mismatch)
+    /// 4. Not participating in voting or proposing
+    ///
+    /// Processes one block per tick to mirror validator behavior.
+    fn run_observer(&mut self) -> Option<Block> {
+        // Process any blocks in the queue
+        if self.received_blocks.is_empty() {
+            return None;
+        }
+
+        // Sort blocks by height to process in order
+        self.received_blocks.sort_by_key(|b| b.height);
+
+        // Remove any blocks we've already committed
+        self.received_blocks
+            .retain(|b| b.height > self.committed_height);
+
+        // Find the next block we can commit (must be sequential)
+        let next_height = self.committed_height + 1;
+        let block_idx = self
+            .received_blocks
+            .iter()
+            .position(|b| b.height == next_height);
+
+        let block_idx = match block_idx {
+            Some(idx) => idx,
+            None => return None, // No sequential block available
+        };
+
+        // Remove block from queue
+        let block = self.received_blocks.remove(block_idx);
+
+        // Verify QC before committing (unless SKIP_QC_VERIFY is set)
+        if !Config::global().skip_qc_verify {
+            if let Err(e) = self.verify_block_qc(&block) {
+                error!(
+                    height = block.height,
+                    error = %e,
+                    "Observer rejecting block: QC verification failed"
+                );
+                return None;
+            }
+        }
+
+        // Execute the block
+        debug!(
+            height = block.height,
+            view = block.view,
+            hash = %hash_short(&block.hash()),
+            "Observer executing block"
+        );
+
+        let app_hash = self.app.execute(&block);
+
+        // Verify app hash matches (Byzantine detection) - REJECT on mismatch
+        if app_hash != block.app_hash {
+            error!(
+                height = block.height,
+                expected = %hash_short(&block.app_hash),
+                got = %hash_short(&app_hash),
+                "Observer rejecting block: app hash mismatch!"
+            );
+            // TODO: Add rollback capability to undo the execution
+            // For now, reject the block and don't commit
+            return None;
+        }
+
+        // Store and commit
+        self.store.save(&block);
+        self.store.set_committed(&block.hash());
+        self.committed_height = block.height;
+
+        info!(
+            height = block.height,
+            hash = %hash_short(&block.hash()),
+            "Observer committed block"
+        );
+
+        Some(block)
+    }
+
+    /// Verify a block's QC (justify certificate)
+    ///
+    /// Returns Ok(()) if:
+    /// - Block is genesis (height <= 1, no QC needed)
+    /// - QC is present and structurally valid
+    fn verify_block_qc(&self, block: &Block) -> Result<(), String> {
+        // Genesis and first blocks don't need QC verification
+        if block.height <= 1 {
+            return Ok(());
+        }
+
+        // Non-genesis blocks must have a justify certificate
+        let justify = block
+            .justify
+            .as_ref()
+            .ok_or_else(|| format!("Block {} missing QC (justify certificate)", block.height))?;
+
+        // QC must certify the parent block
+        if justify.block_hash != block.parent {
+            return Err(format!(
+                "QC block_hash {} doesn't match parent {}",
+                hash_short(&justify.block_hash),
+                hash_short(&block.parent)
+            ));
+        }
+
+        // Verify BLS signature structure if present
+        if justify.is_bls() {
+            self.verify_bls_certificate_structure(justify)?;
+        } else if justify.voters.is_empty() && justify.votes.is_empty() {
+            return Err(format!(
+                "QC for block {} has no voters or votes",
+                block.height
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify BLS certificate has valid structure
+    fn verify_bls_certificate_structure(&self, cert: &Certificate) -> Result<(), String> {
+        use crate::crypto::bls::{BlsPublicKey, BlsSignature};
+
+        // Must have voters
+        if cert.voters.is_empty() {
+            return Err("Certificate has no voters".to_string());
+        }
+
+        // Must have matching voters and pubkeys
+        if cert.voters.len() != cert.bls_pubkeys.len() {
+            return Err(format!(
+                "Certificate voter/pubkey count mismatch: {} vs {}",
+                cert.voters.len(),
+                cert.bls_pubkeys.len()
+            ));
+        }
+
+        // Validate aggregated signature format (96 bytes for BLS)
+        if cert.agg_signature.len() != 96 {
+            return Err(format!(
+                "Invalid aggregate signature length: {} (expected 96)",
+                cert.agg_signature.len()
+            ));
+        }
+
+        // Try to parse aggregated signature
+        BlsSignature::from_slice(&cert.agg_signature)
+            .map_err(|_| "Failed to parse aggregate signature".to_string())?;
+
+        // Validate all public keys
+        for (i, pk_bytes) in cert.bls_pubkeys.iter().enumerate() {
+            if pk_bytes.len() != 48 {
+                return Err(format!(
+                    "Invalid BLS pubkey length at index {}: {} (expected 48)",
+                    i,
+                    pk_bytes.len()
+                ));
+            }
+            let mut pk_arr = [0u8; 48];
+            pk_arr.copy_from_slice(pk_bytes);
+            BlsPublicKey::from_bytes(&pk_arr)
+                .map_err(|_| format!("Failed to parse BLS pubkey at index {}", i))?;
+        }
+
+        Ok(())
+    }
+
+    /// Queue a block for processing (used by sync client)
+    pub fn queue_block(&mut self, block: Block) {
+        // Don't queue blocks we've already committed
+        if block.height <= self.committed_height {
+            return;
+        }
+
+        // Don't queue duplicates
+        if self.received_blocks.iter().any(|b| b.height == block.height) {
+            return;
+        }
+
+        debug!(
+            height = block.height,
+            view = block.view,
+            "Queuing block for observer"
+        );
+        self.received_blocks.push(block);
+    }
+
+    /// Queue multiple blocks (batch operation for sync)
+    pub fn queue_blocks(&mut self, blocks: Vec<Block>) {
+        for block in blocks {
+            self.queue_block(block);
+        }
+    }
+
+    /// Get the number of queued blocks
+    pub fn queued_block_count(&self) -> usize {
+        self.received_blocks.len()
     }
 
     /// Process a received proposal
@@ -294,6 +567,37 @@ where
     pub fn is_leader(&self) -> bool {
         self.config.is_leader(self.pacemaker.current_view())
     }
+
+    /// Handle epoch transition by updating validator set
+    ///
+    /// Called by application layer when epoch boundary is reached.
+    /// Updates consensus configuration with the new active validator set.
+    pub fn on_epoch_transition(&mut self, update: crate::app::staking::ValidatorSetUpdate) {
+        if update.is_empty() {
+            info!("Epoch transition: no validators in update, keeping current set");
+            return;
+        }
+
+        info!(
+            validators = update.len(),
+            "Epoch transition: updating validator set"
+        );
+
+        // Update config with new validators and BLS keys
+        self.config.update_validators(update.node_ids, update.bls_pubkeys);
+
+        debug!(
+            validators = ?self.config.validators.len(),
+            "Consensus config updated with new validator set"
+        );
+    }
+
+    /// Get a mutable reference to the consensus config
+    ///
+    /// Used for external updates (e.g., epoch transitions)
+    pub fn config_mut(&mut self) -> &mut ConsensusConfig {
+        &mut self.config
+    }
 }
 
 #[cfg(test)]
@@ -387,5 +691,150 @@ mod tests {
         let view_after = engine.current_view();
 
         assert!(view_after > view_before);
+    }
+
+    #[test]
+    fn test_observer_mode_creation() {
+        let config = ConsensusConfig::single_node();
+        let app = NoOpApp;
+        let store = MemoryBlockStore::new();
+
+        let engine = Engine::new_observer(config, app, store);
+        assert!(engine.is_observer());
+        assert_eq!(engine.committed_height(), 0);
+    }
+
+    #[test]
+    fn test_observer_processes_queued_blocks() {
+        let config = ConsensusConfig::single_node();
+        let app = NoOpApp;
+        let store = MemoryBlockStore::new();
+
+        let mut engine = Engine::new_observer(config, app, store);
+        assert!(engine.is_observer());
+
+        // Block 1 at height 1 is exempt from QC verification
+        let block1 = Block {
+            view: 1,
+            height: 1,
+            parent: Block::genesis().hash(),
+            payload: vec![],
+            proposer: [1u8; 32],
+            app_hash: [0u8; 32], // NoOpApp returns [0u8; 32]
+            timestamp: 1000,
+            justify: None,
+        };
+
+        // Block 2 needs a QC certifying block 1, so add one
+        let qc_for_block1 = Certificate::new(1, block1.hash(), vec![
+            Vote::new(1, block1.hash(), [0u8; 32], [1u8; 32])
+        ]);
+
+        let block2 = Block {
+            view: 2,
+            height: 2,
+            parent: block1.hash(),
+            payload: vec![],
+            proposer: [1u8; 32],
+            app_hash: [0u8; 32],
+            timestamp: 2000,
+            justify: Some(qc_for_block1),
+        };
+
+        // Queue blocks out of order
+        engine.queue_block(block2.clone());
+        engine.queue_block(block1.clone());
+        assert_eq!(engine.queued_block_count(), 2);
+
+        // First tick should commit block 1
+        let committed = engine.tick();
+        assert!(committed.is_some());
+        assert_eq!(committed.unwrap().height, 1);
+        assert_eq!(engine.committed_height(), 1);
+
+        // Second tick should commit block 2 (has valid QC for parent)
+        let committed = engine.tick();
+        assert!(committed.is_some());
+        assert_eq!(committed.unwrap().height, 2);
+        assert_eq!(engine.committed_height(), 2);
+
+        // No more blocks to process
+        let committed = engine.tick();
+        assert!(committed.is_none());
+    }
+
+    #[test]
+    fn test_observer_ignores_already_committed() {
+        let config = ConsensusConfig::single_node();
+        let app = NoOpApp;
+        let store = MemoryBlockStore::new();
+
+        let mut engine = Engine::new_observer(config, app, store);
+
+        // Height 1 blocks are exempt from QC verification
+        let block1 = Block {
+            view: 1,
+            height: 1,
+            parent: Block::genesis().hash(),
+            payload: vec![],
+            proposer: [1u8; 32],
+            app_hash: [0u8; 32],
+            timestamp: 1000,
+            justify: None,
+        };
+
+        // Queue and process
+        engine.queue_block(block1.clone());
+        engine.tick();
+        assert_eq!(engine.committed_height(), 1);
+
+        // Try to queue again - should be ignored
+        engine.queue_block(block1);
+        assert_eq!(engine.queued_block_count(), 0);
+    }
+
+    #[test]
+    fn test_observer_rejects_block_without_qc() {
+        let config = ConsensusConfig::single_node();
+        let app = NoOpApp;
+        let store = MemoryBlockStore::new();
+
+        let mut engine = Engine::new_observer(config, app, store);
+
+        // Block 1 at height 1 is exempt from QC check
+        let block1 = Block {
+            view: 1,
+            height: 1,
+            parent: Block::genesis().hash(),
+            payload: vec![],
+            proposer: [1u8; 32],
+            app_hash: [0u8; 32],
+            timestamp: 1000,
+            justify: None,
+        };
+
+        // Block 2 at height 2 REQUIRES a QC but doesn't have one
+        let block2 = Block {
+            view: 2,
+            height: 2,
+            parent: block1.hash(),
+            payload: vec![],
+            proposer: [1u8; 32],
+            app_hash: [0u8; 32],
+            timestamp: 2000,
+            justify: None, // Missing required QC
+        };
+
+        // Process block 1 (should succeed)
+        engine.queue_block(block1.clone());
+        let committed = engine.tick();
+        assert!(committed.is_some());
+        assert_eq!(engine.committed_height(), 1);
+
+        // Process block 2 (should be rejected due to missing QC)
+        engine.queue_block(block2);
+        let committed = engine.tick();
+        assert!(committed.is_none(), "Block without QC should be rejected");
+        assert_eq!(engine.committed_height(), 1, "Height should not advance");
     }
 }

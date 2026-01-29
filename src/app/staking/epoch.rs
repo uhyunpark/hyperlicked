@@ -22,6 +22,8 @@ pub struct EpochTransitionResult {
     pub rewards: Vec<(NodeId, i64)>,
     /// Unstake completions (delegator, amount)
     pub unstake_completions: Vec<(String, i64)>,
+    /// Validator set update for consensus layer
+    pub validator_set_update: Option<super::ValidatorSetUpdate>,
 }
 
 impl StakingState {
@@ -45,6 +47,7 @@ impl StakingState {
             jailed: Vec::new(),
             rewards: Vec::new(),
             unstake_completions: Vec::new(),
+            validator_set_update: None,
         };
 
         // 1. Process liveness (only if we have multiple validators)
@@ -62,16 +65,19 @@ impl StakingState {
         // 4. Compute new active set
         result.new_active_set = self.compute_active_set(timestamp);
 
-        // 5. Create new epoch snapshot
+        // 5. Create validator set update for consensus
+        result.validator_set_update = Some(self.active_validator_set_for_consensus());
+
+        // 6. Create new epoch snapshot
         let mut snapshot = EpochSnapshot::new(new_epoch, view, timestamp);
         snapshot.active_validators = result.new_active_set.clone();
         snapshot.total_staked = self.total_staked;
         self.epoch_snapshot = Some(snapshot);
 
-        // 6. Reset liveness tracking for new epoch
+        // 7. Reset liveness tracking for new epoch
         self.reset_liveness();
 
-        // 7. Reset validator epoch counters
+        // 8. Reset validator epoch counters
         for validator in self.validators.values_mut() {
             validator.reset_epoch_counters();
         }
@@ -358,5 +364,46 @@ mod tests {
             state.get_validator(&"v2".into()).unwrap().status,
             ValidatorStatus::Jailed
         );
+    }
+
+    #[test]
+    fn test_epoch_transition_includes_validator_set_update() {
+        let mut state = StakingState::new();
+
+        // Register validators with different stakes
+        state
+            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .unwrap();
+        state
+            .register_validator("v2".into(), test_node_id(2), test_bls_key(), MIN_SELF_STAKE * 3, 500)
+            .unwrap();
+        state
+            .register_validator("v3".into(), test_node_id(3), test_bls_key(), MIN_SELF_STAKE * 2, 500)
+            .unwrap();
+
+        // First epoch transition
+        let result = state.transition_epoch(0, 1000);
+
+        // Should have validator set update
+        assert!(result.validator_set_update.is_some());
+        let update = result.validator_set_update.unwrap();
+
+        // Should have 3 validators
+        assert_eq!(update.len(), 3);
+
+        // Should be sorted by stake (v2 > v3 > v1)
+        assert_eq!(update.node_ids[0], test_node_id(2)); // Highest stake
+        assert_eq!(update.node_ids[1], test_node_id(3)); // Second highest
+        assert_eq!(update.node_ids[2], test_node_id(1)); // Lowest stake
+
+        // BLS keys should match
+        assert_eq!(update.bls_pubkeys.len(), 3);
+        assert_eq!(update.bls_pubkeys[0].len(), 48);
+
+        // Stakes should be correct
+        assert_eq!(update.stakes.len(), 3);
+        assert_eq!(update.stakes[0].1, (MIN_SELF_STAKE * 3) as u64);
+        assert_eq!(update.stakes[1].1, (MIN_SELF_STAKE * 2) as u64);
+        assert_eq!(update.stakes[2].1, MIN_SELF_STAKE as u64);
     }
 }

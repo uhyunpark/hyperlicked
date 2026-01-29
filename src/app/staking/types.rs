@@ -247,3 +247,33 @@ pub const MAX_COMMISSION_BPS: i64 = 1000;
 
 /// Block reward per block (in cents, $0.01 = 1 cent)
 pub const BLOCK_REWARD: i64 = 1;
+
+// =============================================================================
+// Validator Set Update (for consensus integration)
+// =============================================================================
+
+/// Update to validator set for consensus layer
+///
+/// This is returned by `StakingState::active_validator_set_for_consensus()`
+/// and used to update the consensus configuration on epoch transitions.
+#[derive(Debug, Clone)]
+pub struct ValidatorSetUpdate {
+    /// Active validator node IDs (sorted by stake descending)
+    pub node_ids: Vec<NodeId>,
+    /// BLS public keys (same order as node_ids)
+    pub bls_pubkeys: Vec<Vec<u8>>,
+    /// Stake amounts for weighted leader selection
+    pub stakes: Vec<(NodeId, u64)>,
+}
+
+impl ValidatorSetUpdate {
+    /// Check if the update is empty (no validators)
+    pub fn is_empty(&self) -> bool {
+        self.node_ids.is_empty()
+    }
+
+    /// Number of validators
+    pub fn len(&self) -> usize {
+        self.node_ids.len()
+    }
+}

@@ -18,10 +18,12 @@
 
 ### In Progress
 
-- **Multi-node testing** - TCP transport between validators
+- **Multi-node testing** - TCP transport between validators, integration tests
 
 ### Recently Completed
 
+- **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
+- **Staking Foundation** ✅ - Epoch transitions, validator sets, jailing, slashing
 - **Real-time Streaming** ✅ - Trigger order events, enhanced position updates, order history streaming
 - **Market Maker** ✅ - Dev mode artificial liquidity with multiple strategies
 - **Oracle Fetcher** ✅ - Background CEX price fetching (Binance, etc.)
@@ -73,6 +75,25 @@ Reduce vote size:
 - ✅ BLS12-381 signatures (blst crate)
 - ✅ Aggregate 2f+1 votes into single 96-byte signature
 - Threshold signatures (future)
+
+#### RPC Node Sync ✅
+Observer mode for non-validator nodes:
+- ✅ Active sync client (poll validators for new blocks)
+- ✅ QC certificate verification (Byzantine protection)
+- ✅ App hash mismatch rejection (state integrity)
+- ✅ Snapshot-based catch-up for nodes far behind
+- ✅ `SKIP_QC_VERIFY` flag for dev mode testing
+- ✅ Sync API endpoints (`/api/v1/sync/status`, `/blocks`, `/snapshot`)
+
+#### Staking Foundation ✅
+Validator economics foundation:
+- ✅ ValidatorInfo, Delegation, UnstakeRequest types
+- ✅ Epoch-based transitions (~90 min epochs)
+- ✅ Active validator set selection (top-N by stake)
+- ✅ Epoch transition hook to consensus layer
+- ✅ Liveness tracking and jailing
+- ✅ Slashing for equivocation (double-voting)
+- ✅ 7-day unbonding period
 
 ### P2: Hyperlicked Features
 
@@ -151,12 +172,12 @@ Cross-chain deposits/withdrawals:
 - Deposit verification
 - Withdrawal queue
 
-#### Staking
-Validator economics:
-- Top-21 validators by stake
-- Epoch-based rotation (~90 min)
-- Slashing for misbehavior
-- Jailing for downtime
+#### Staking (Advanced)
+Validator economics enhancements:
+- Rewards distribution proportional to stake
+- Commission rates for validators
+- Delegation UI in frontend
+- Staking transaction signing
 
 #### EVM Surface (Optional)
 Smart contract support:

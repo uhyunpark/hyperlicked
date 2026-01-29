@@ -316,6 +316,7 @@ impl AppState {
             candle_manager: CandleManager::new(), // Candles are rebuilt from trades
             staking,
             pending_staking_events: Vec::new(),
+            pending_validator_update: None,
             current_view: 0,
             // Trigger orders are restored from snapshot if present
             trigger_orders: HashMap::new(),
@@ -391,6 +392,15 @@ impl AppHook for AppState {
                 if let Err(e) = self.accounts.deposit(&delegator, amount) {
                     tracing::warn!(error = %e, "Failed to return unstaked funds");
                 }
+            }
+
+            // Store validator set update for consensus layer to consume
+            if let Some(update) = result.validator_set_update {
+                tracing::debug!(
+                    validators = update.len(),
+                    "Storing validator set update for consensus"
+                );
+                self.pending_validator_update = Some(update);
             }
         }
 

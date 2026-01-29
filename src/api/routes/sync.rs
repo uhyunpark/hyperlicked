@@ -18,14 +18,27 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use crate::api::types::{
-    ApiState, BlockExport, BlockRangeQuery, BlockRangeResponse, SnapshotExport,
-    SnapshotMetadata, SyncStatus,
+    ApiState, BlockExport, BlockRangeQuery, BlockRangeResponse, CertificateExport,
+    SnapshotExport, SnapshotMetadata, SyncStatus,
 };
+
+use crate::types::Certificate;
 
 /// Maximum blocks per request (prevents DoS)
 const MAX_BLOCKS_PER_REQUEST: u64 = 1000;
 /// Default blocks per request
 const DEFAULT_BLOCKS_PER_REQUEST: u64 = 100;
+
+/// Convert Certificate to CertificateExport
+fn export_certificate(cert: &Certificate) -> CertificateExport {
+    CertificateExport {
+        view: cert.view,
+        block_hash: hex::encode(cert.block_hash),
+        voters: cert.voters.iter().map(|v| hex::encode(v)).collect(),
+        bls_pubkeys: cert.bls_pubkeys.iter().map(|pk| hex::encode(pk)).collect(),
+        agg_signature: hex::encode(&cert.agg_signature),
+    }
+}
 
 // =============================================================================
 // Sync Status
@@ -141,6 +154,7 @@ pub async fn get_blocks(
                 } else {
                     None
                 },
+                justify: b.justify.as_ref().map(export_certificate),
             }
         })
         .collect();
@@ -197,6 +211,7 @@ pub async fn get_block_by_height(
         timestamp: block.timestamp,
         payload_size: block.payload.len(),
         payload: Some(BASE64.encode(&block.payload)),
+        justify: block.justify.as_ref().map(export_certificate),
     }))
 }
 

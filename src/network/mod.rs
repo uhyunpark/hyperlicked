@@ -24,11 +24,13 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
+pub mod active_sync;
 pub mod handshake;
 mod mock;
 pub mod sync;
 mod transport;
 
+pub use active_sync::{ActiveSyncClient, ActiveSyncConfig, SyncResult};
 pub use handshake::{HandshakeConfig, HandshakeResult};
 pub use mock::MockNetwork;
 pub use sync::{SyncClient, SyncHandler};

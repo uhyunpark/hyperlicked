@@ -8,11 +8,13 @@
 //!
 //! Environment variables:
 //!   RUST_LOG=info        - Log level (error, warn, info, debug, trace)
+//!   NODE_ROLE=validator  - Node role (validator or rpc)
 //!   BLOCK_TIME_MS=100    - Block interval in milliseconds
 //!   LOG_BLOCKS=true      - Log every block (even empty ones)
 //!   DATA_DIR=/path       - RocksDB persistence directory (optional)
 //!   SNAPSHOT_INTERVAL=1000 - Snapshot every N blocks
 //!   ORACLE_ENABLED=true  - Enable oracle system at startup (dev mode)
+//!   PEERS=http://host:port,... - Peer URLs for sync (RPC nodes)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,6 +32,7 @@ use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
 use hyperlicked::app::AppState;
 use hyperlicked::config::Config;
 use hyperlicked::consensus::AppHook;
+use hyperlicked::network::{ActiveSyncClient, ActiveSyncConfig};
 use hyperlicked::storage::{ConsensusState, PersistentStore, RocksDbStore};
 use hyperlicked::types::Block;
 
@@ -134,6 +137,7 @@ async fn main() -> Result<()> {
 
     println!("Configuration:");
     println!("  Mode: {} {}", config.mode, if config.mode.is_dev() { "(faucet enabled)" } else { "" });
+    println!("  Role: {}", config.node_role);
     println!("  Port: {}", port);
     println!("  Block time: {}ms", config.block_time_ms);
     println!("  Log blocks: {}", config.log_all_blocks);
@@ -147,6 +151,9 @@ async fn main() -> Result<()> {
         println!("  Recovered: height={}, view={}", initial_height, initial_view);
     } else {
         println!("  Storage: in-memory (no persistence)");
+    }
+    if config.node_role.is_rpc() && !config.peers.is_empty() {
+        println!("  Peers: {}", config.peers.join(", "));
     }
     println!("  Markets: BTC-USDT");
     println!("  Oracle: {}", if config.oracle_enabled { "enabled" } else { "disabled" });
@@ -167,12 +174,28 @@ async fn main() -> Result<()> {
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
-    // Spawn consensus simulation in background
-    let consensus_state = shared_state.clone();
-    let consensus_store = store.clone();
-    tokio::spawn(async move {
-        run_consensus_loop(consensus_state, consensus_store, initial_height, initial_view).await;
-    });
+    // Spawn consensus or sync based on node role
+    if config.node_role.is_validator() {
+        // Validator: run full consensus loop
+        let consensus_state = shared_state.clone();
+        let consensus_store = store.clone();
+        tokio::spawn(async move {
+            run_consensus_loop(consensus_state, consensus_store, initial_height, initial_view).await;
+        });
+    } else {
+        // RPC node: run sync client to follow validators
+        let sync_state = shared_state.clone();
+        let sync_store: Option<Arc<dyn PersistentStore + Send + Sync>> =
+            store.clone().map(|s| s as Arc<dyn PersistentStore + Send + Sync>);
+        let sync_config = ActiveSyncConfig {
+            peers: config.peers.clone(),
+            poll_interval: Duration::from_millis(config.sync_poll_interval_ms),
+            snapshot_threshold: 1000,
+        };
+        tokio::spawn(async move {
+            run_rpc_sync_loop(sync_state, sync_store, sync_config).await;
+        });
+    }
 
     // Spawn oracle price fetcher if enabled
     if config.oracle_enabled {
@@ -956,4 +979,28 @@ async fn run_market_maker_loop(state: SharedState) {
         // Wait for next interval
         tokio::time::sleep(Duration::from_millis(mm_config.interval_ms)).await;
     }
+}
+
+/// Run RPC sync loop
+///
+/// This runs for RPC (observer) nodes. It polls validators for new blocks
+/// and syncs local state to follow the chain.
+async fn run_rpc_sync_loop(
+    state: SharedState,
+    store: Option<Arc<dyn PersistentStore + Send + Sync>>,
+    sync_config: ActiveSyncConfig,
+) {
+    if sync_config.peers.is_empty() {
+        tracing::warn!("No peers configured for RPC node. Set PEERS env var to sync.");
+        return;
+    }
+
+    info!(
+        peers = ?sync_config.peers,
+        poll_interval_ms = sync_config.poll_interval.as_millis(),
+        "Starting RPC sync client"
+    );
+
+    let sync_client = ActiveSyncClient::new(sync_config);
+    sync_client.run(state.app.clone(), store).await;
 }

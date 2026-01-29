@@ -46,7 +46,7 @@ pub use state::{StakingError, StakingState};
 pub use transactions::{StakingTransaction, StakingTxResult};
 pub use types::{
     Delegation, EpochSnapshot, Evidence, EvidenceType, LivenessRecord, UnstakeRequest,
-    ValidatorInfo, ValidatorStatus,
+    ValidatorInfo, ValidatorSetUpdate, ValidatorStatus,
     // Constants
     BLOCK_REWARD, EQUIVOCATION_SLASH_BPS, JAIL_DURATION_MS, MAX_ACTIVE_VALIDATORS,
     MAX_COMMISSION_BPS, MAX_CONSECUTIVE_MISSED, MIN_LIVENESS_BPS, MIN_SELF_STAKE,
