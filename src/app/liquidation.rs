@@ -7,6 +7,11 @@
 //!
 //! Use `check_and_liquidate_from_queue` with a `LiquidationQueue` for
 //! O(k) checks per block instead of O(n) where k << n.
+//!
+//! ## Circuit Breaker
+//!
+//! To prevent liquidation cascades, use `check_and_liquidate_limited` which
+//! limits the number of liquidations per block.
 
 use std::collections::HashMap;
 
@@ -16,6 +21,9 @@ use super::accounts::AccountManager;
 use super::liquidation_queue::LiquidationQueue;
 use super::state::MAINTENANCE_MARGIN_BPS;
 use super::Symbol;
+
+/// Default maximum liquidations per block (circuit breaker)
+pub const MAX_LIQUIDATIONS_PER_BLOCK: usize = 100;
 
 /// Liquidation errors
 #[derive(Debug, Clone, thiserror::Error)]
@@ -49,6 +57,17 @@ pub struct LiquidationResult {
     pub insurance_fund_delta: i64,
 }
 
+/// Batch result from limited liquidation check (circuit breaker)
+#[derive(Debug, Clone)]
+pub struct LiquidationBatch {
+    /// Liquidations performed
+    pub results: Vec<LiquidationResult>,
+    /// True if there are more accounts to check (hit limit)
+    pub has_more: bool,
+    /// Number of accounts checked (for metrics)
+    pub checked_count: usize,
+}
+
 /// Check all accounts and liquidate underwater positions
 ///
 /// Returns list of liquidations performed and total PnL for insurance fund
@@ -56,7 +75,23 @@ pub fn check_and_liquidate(
     accounts: &mut AccountManager,
     mark_prices: &HashMap<Symbol, Price>,
 ) -> Vec<LiquidationResult> {
+    check_and_liquidate_limited(accounts, mark_prices, usize::MAX).results
+}
+
+/// Check accounts and liquidate with a maximum limit (circuit breaker)
+///
+/// Returns a LiquidationBatch containing results and whether more accounts remain.
+/// Use this to prevent liquidation cascades from causing long block times.
+///
+/// Parameters:
+/// - `max_liquidations`: Maximum number of accounts to liquidate per call
+pub fn check_and_liquidate_limited(
+    accounts: &mut AccountManager,
+    mark_prices: &HashMap<Symbol, Price>,
+    max_liquidations: usize,
+) -> LiquidationBatch {
     let mut results = Vec::new();
+    let mut liquidated_count = 0;
 
     // Collect addresses that need liquidation
     // (can't modify while iterating)
@@ -67,22 +102,48 @@ pub fn check_and_liquidate(
         .map(|a| a.address.clone())
         .collect();
 
-    // Process each underwater account
+    let total_liquidatable = addresses_to_check.len();
+    let checked_count = total_liquidatable;
+
+    // Process accounts up to limit
     for address in addresses_to_check {
+        if liquidated_count >= max_liquidations {
+            break;
+        }
+
         let liquidations = liquidate_account(accounts, &address, mark_prices);
+        if !liquidations.is_empty() {
+            liquidated_count += 1;
+        }
         results.extend(liquidations);
     }
 
+    let has_more = liquidated_count >= max_liquidations && liquidated_count < total_liquidatable;
+
     if !results.is_empty() {
         let total_pnl: i64 = results.iter().map(|r| r.pnl).sum();
-        tracing::info!(
-            count = results.len(),
-            total_pnl,
-            "Liquidations processed"
-        );
+        if has_more {
+            tracing::warn!(
+                count = results.len(),
+                total_pnl,
+                limit = max_liquidations,
+                remaining = total_liquidatable - liquidated_count,
+                "Liquidation limit reached - more accounts pending"
+            );
+        } else {
+            tracing::info!(
+                count = results.len(),
+                total_pnl,
+                "Liquidations processed"
+            );
+        }
     }
 
-    results
+    LiquidationBatch {
+        results,
+        has_more,
+        checked_count,
+    }
 }
 
 /// Event-driven liquidation: check only accounts from the queue
@@ -309,5 +370,56 @@ mod tests {
 
         let results = check_and_liquidate(&mut accounts, &mark_prices);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_liquidation_circuit_breaker() {
+        let mut accounts = AccountManager::new();
+
+        // Create 5 underwater accounts
+        for i in 0..5 {
+            let account = accounts.get_or_create(&format!("trader{}", i));
+            account.balance = 500_000; // $5,000
+            account.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+        }
+
+        let mut mark_prices = HashMap::new();
+        // Price drops to $46,000 - all should be liquidatable
+        mark_prices.insert("BTC-USDT".to_string(), 4_600_000);
+
+        // Limit to 2 liquidations
+        let batch = check_and_liquidate_limited(&mut accounts, &mark_prices, 2);
+
+        // Should have liquidated exactly 2 accounts
+        // Each account has 1 position, so 2 results
+        assert_eq!(batch.results.len(), 2);
+        assert!(batch.has_more);
+        assert_eq!(batch.checked_count, 5);
+
+        // Process remaining 3
+        let batch2 = check_and_liquidate_limited(&mut accounts, &mark_prices, 10);
+        assert_eq!(batch2.results.len(), 3);
+        assert!(!batch2.has_more);
+    }
+
+    #[test]
+    fn test_liquidation_batch_no_limit() {
+        let mut accounts = AccountManager::new();
+
+        // Create 3 underwater accounts
+        for i in 0..3 {
+            let account = accounts.get_or_create(&format!("trader{}", i));
+            account.balance = 500_000;
+            account.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+        }
+
+        let mut mark_prices = HashMap::new();
+        mark_prices.insert("BTC-USDT".to_string(), 4_600_000);
+
+        // No limit (max usize)
+        let batch = check_and_liquidate_limited(&mut accounts, &mark_prices, usize::MAX);
+
+        assert_eq!(batch.results.len(), 3);
+        assert!(!batch.has_more);
     }
 }

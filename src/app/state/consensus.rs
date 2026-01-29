@@ -101,6 +101,17 @@ impl AppState {
             hasher.update(account.locked.to_le_bytes());
             hasher.update(account.nonce.to_le_bytes());
 
+            // Hash pending_nonces (already sorted since BTreeSet)
+            // Only include if non-empty to maintain backward compat with old state
+            if !account.pending_nonces.is_empty() {
+                hasher.update(&[1u8]); // Flag: has pending nonces
+                for pending_nonce in &account.pending_nonces {
+                    hasher.update(pending_nonce.to_le_bytes());
+                }
+            } else {
+                hasher.update(&[0u8]); // Flag: no pending nonces
+            }
+
             // Hash positions for this account (sorted by symbol)
             let mut position_symbols: Vec<_> = account.positions.keys().collect();
             position_symbols.sort();
@@ -449,11 +460,14 @@ impl AppHook for AppState {
             self.mempool.commit_proposal_unchecked(&tx_hashes);
         }
 
-        // Check and execute liquidations after all transactions
-        let liquidations = crate::app::liquidation::check_and_liquidate(
+        // Check and execute liquidations after all transactions (with circuit breaker)
+        let max_liquidations = crate::config::Config::global().max_liquidations_per_block;
+        let liquidation_batch = crate::app::liquidation::check_and_liquidate_limited(
             &mut self.accounts,
             &self.mark_prices,
+            max_liquidations,
         );
+        let liquidations = liquidation_batch.results;
 
         // Process liquidation results with ADL check
         for liq in &liquidations {
