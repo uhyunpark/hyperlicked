@@ -1,13 +1,13 @@
 //! TCP Transport Implementation
 //!
-//! Simple TCP-based networking for consensus messages.
+//! TCP-based networking for consensus messages with BLS-authenticated handshakes.
 //! Uses length-prefixed bincode for efficient message framing.
 //!
-//! ## Security
+//! ## Security (CRITICAL-6)
 //!
-//! **IMPORTANT**: This module currently uses unauthenticated handshakes (NodeId only).
-//! For production use, integrate the authenticated handshake protocol from
-//! `network::handshake` which uses BLS signatures to prevent impersonation.
+//! This module uses authenticated handshakes via BLS signatures to prevent
+//! impersonation attacks. When `require_authenticated_peers` is true in
+//! NetworkConfig, connections without valid BLS signatures are rejected.
 //!
 //! See `HandshakeConfig::authenticated()` for setup.
 //!
@@ -18,18 +18,25 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+/// Read timeout for TCP connections (30 seconds)
+/// Prevents resource exhaustion from slow/stalled connections
+const TCP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+use super::handshake::{handshake_inbound, handshake_outbound, HandshakeConfig};
 use super::{Network, NetworkConfig};
 use crate::types::{hash_short, Message, NewView, NodeId, Prepare, Propose, ViewChange, Vote};
 
-/// TCP-based network implementation
+/// TCP-based network implementation with BLS authentication
 pub struct TcpNetwork {
     /// Our node ID
     node_id: NodeId,
@@ -45,13 +52,32 @@ pub struct TcpNetwork {
 
     /// Network config
     config: NetworkConfig,
+
+    /// Handshake config for BLS authentication (CRITICAL-6)
+    handshake_config: HandshakeConfig,
 }
 
 impl TcpNetwork {
-    /// Create and start a new TCP network
+    /// Create and start a new TCP network with BLS authentication support
     pub async fn new(config: NetworkConfig) -> Result<Self> {
         let (incoming_tx, incoming_rx) = mpsc::channel(1000);
         let peers = Arc::new(RwLock::new(HashMap::new()));
+
+        // Create handshake config from network config (CRITICAL-6)
+        let handshake_config = config.handshake_config();
+
+        if handshake_config.require_auth {
+            info!(
+                node = %hash_short(&config.node_id),
+                validators = handshake_config.validator_pubkeys.len(),
+                "Network authentication ENABLED"
+            );
+        } else {
+            warn!(
+                node = %hash_short(&config.node_id),
+                "Network authentication DISABLED (dev mode only!)"
+            );
+        }
 
         let network = Self {
             node_id: config.node_id,
@@ -59,6 +85,7 @@ impl TcpNetwork {
             incoming_rx,
             incoming_tx,
             config,
+            handshake_config,
         };
 
         Ok(network)
@@ -74,13 +101,14 @@ impl TcpNetwork {
         info!(
             addr = %self.config.listen_addr,
             node = %hash_short(&self.node_id),
+            authenticated = self.handshake_config.require_auth,
             "Network listening"
         );
 
         // Spawn listener task
         let incoming_tx = self.incoming_tx.clone();
         let peers = self.peers.clone();
-        let our_node_id = self.node_id;
+        let handshake_config = self.handshake_config.clone();
 
         tokio::spawn(async move {
             loop {
@@ -89,7 +117,8 @@ impl TcpNetwork {
                         debug!(%addr, "Accepted connection");
                         let tx = incoming_tx.clone();
                         let peers = peers.clone();
-                        tokio::spawn(handle_connection(stream, tx, peers, our_node_id));
+                        let hs_config = handshake_config.clone();
+                        tokio::spawn(handle_connection(stream, tx, peers, hs_config));
                     }
                     Err(e) => {
                         error!(error = %e, "Accept failed");
@@ -100,6 +129,7 @@ impl TcpNetwork {
 
         // Connect to peers with LOWER IDs only (to avoid duplicate connections)
         // Nodes with higher IDs will connect to us
+        let our_node_id = self.node_id;
         for (peer_id, addr) in &self.config.peers {
             // Only connect if peer has lower ID than us
             if *peer_id >= our_node_id {
@@ -114,10 +144,10 @@ impl TcpNetwork {
             let incoming_tx = self.incoming_tx.clone();
             let peer_id = *peer_id;
             let addr = addr.clone();
-            let our_node_id = self.node_id;
+            let handshake_config = self.handshake_config.clone();
 
             tokio::spawn(async move {
-                connect_to_peer(peer_id, addr, peers, incoming_tx, our_node_id).await;
+                connect_to_peer(peer_id, addr, peers, incoming_tx, handshake_config).await;
             });
         }
 
@@ -225,30 +255,39 @@ impl TcpNetwork {
     }
 }
 
-/// Handle an incoming connection
+/// Handle an incoming connection with BLS authentication (CRITICAL-6)
 async fn handle_connection(
     stream: TcpStream,
     incoming_tx: mpsc::Sender<(NodeId, Message)>,
     peers: Arc<RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>>,
-    our_node_id: NodeId,
+    handshake_config: HandshakeConfig,
 ) {
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // First, perform handshake: receive peer's node ID
-    let mut id_buf = [0u8; 32];
-    if let Err(e) = read_half.read_exact(&mut id_buf).await {
-        warn!(error = %e, "Failed to read peer ID");
+    // Perform authenticated handshake (CRITICAL-6)
+    let handshake_result = match handshake_inbound(&mut read_half, &mut write_half, &handshake_config).await {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, "Inbound handshake failed - rejecting connection");
+            return;
+        }
+    };
+
+    let peer_id = handshake_result.peer_id;
+
+    if handshake_config.require_auth && !handshake_result.authenticated {
+        warn!(
+            peer = %hash_short(&peer_id),
+            "Rejecting unauthenticated peer (authentication required)"
+        );
         return;
     }
-    let peer_id: NodeId = id_buf;
 
-    // Send our node ID
-    if let Err(e) = write_half.write_all(&our_node_id).await {
-        warn!(error = %e, "Failed to send our ID");
-        return;
-    }
-
-    info!(peer = %hash_short(&peer_id), "Peer connected");
+    info!(
+        peer = %hash_short(&peer_id),
+        authenticated = handshake_result.authenticated,
+        "Peer connected"
+    );
 
     // Create channel for outgoing messages to this peer
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(100);
@@ -277,10 +316,15 @@ async fn handle_connection(
 
     // Read loop
     loop {
-        // Read length prefix
+        // Read length prefix with timeout
         let mut len_buf = [0u8; 4];
-        if read_half.read_exact(&mut len_buf).await.is_err() {
-            break;
+        match timeout(TCP_READ_TIMEOUT, read_half.read_exact(&mut len_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break, // Read error
+            Err(_) => {
+                debug!(peer = %hash_short(&peer_id), "Read timeout, closing connection");
+                break;
+            }
         }
         let len = u32::from_be_bytes(len_buf) as usize;
 
@@ -290,10 +334,15 @@ async fn handle_connection(
             break;
         }
 
-        // Read message
+        // Read message with timeout
         let mut msg_buf = vec![0u8; len];
-        if read_half.read_exact(&mut msg_buf).await.is_err() {
-            break;
+        match timeout(TCP_READ_TIMEOUT, read_half.read_exact(&mut msg_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {
+                debug!(peer = %hash_short(&peer_id), "Read timeout on message body");
+                break;
+            }
         }
 
         // Deserialize
@@ -314,13 +363,13 @@ async fn handle_connection(
     peers.write().await.remove(&peer_id);
 }
 
-/// Connect to a peer with retry
+/// Connect to a peer with retry and BLS authentication (CRITICAL-6)
 async fn connect_to_peer(
     peer_id: NodeId,
     addr: String,
     peers: Arc<RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>>,
     incoming_tx: mpsc::Sender<(NodeId, Message)>,
-    our_node_id: NodeId,
+    handshake_config: HandshakeConfig,
 ) {
     let mut retry_delay = std::time::Duration::from_millis(100);
     let max_delay = std::time::Duration::from_secs(5);
@@ -328,23 +377,48 @@ async fn connect_to_peer(
     loop {
         match TcpStream::connect(&addr).await {
             Ok(stream) => {
-                info!(peer = %hash_short(&peer_id), %addr, "Connected to peer");
+                debug!(peer = %hash_short(&peer_id), %addr, "TCP connection established, starting handshake");
 
-                // Handshake: send our ID, receive their ID
+                // Perform authenticated handshake (CRITICAL-6)
                 let (mut read_half, mut write_half) = stream.into_split();
 
-                // Send our ID
-                if write_half.write_all(&our_node_id).await.is_err() {
+                let handshake_result = match handshake_outbound(
+                    &mut read_half,
+                    &mut write_half,
+                    &handshake_config,
+                    &peer_id,
+                ).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            peer = %hash_short(&peer_id),
+                            %addr,
+                            error = %e,
+                            "Outbound handshake failed, retrying"
+                        );
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(max_delay);
+                        continue;
+                    }
+                };
+
+                // Reject unauthenticated peers if authentication is required
+                if handshake_config.require_auth && !handshake_result.authenticated {
+                    warn!(
+                        peer = %hash_short(&peer_id),
+                        "Rejecting unauthenticated peer (authentication required)"
+                    );
                     tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(max_delay);
                     continue;
                 }
 
-                // Read their ID
-                let mut id_buf = [0u8; 32];
-                if read_half.read_exact(&mut id_buf).await.is_err() {
-                    tokio::time::sleep(retry_delay).await;
-                    continue;
-                }
+                info!(
+                    peer = %hash_short(&peer_id),
+                    %addr,
+                    authenticated = handshake_result.authenticated,
+                    "Connected to peer"
+                );
 
                 // Create channel for outgoing messages
                 let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(100);
@@ -375,10 +449,15 @@ async fn connect_to_peer(
                 let peers = peers.clone();
                 tokio::spawn(async move {
                     loop {
-                        // Read length prefix
+                        // Read length prefix with timeout
                         let mut len_buf = [0u8; 4];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
+                        match timeout(TCP_READ_TIMEOUT, read_half.read_exact(&mut len_buf)).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(_)) => break,
+                            Err(_) => {
+                                debug!(peer = %hash_short(&peer_id), "Read timeout");
+                                break;
+                            }
                         }
                         let len = u32::from_be_bytes(len_buf) as usize;
 
@@ -386,9 +465,12 @@ async fn connect_to_peer(
                             break;
                         }
 
+                        // Read message with timeout
                         let mut msg_buf = vec![0u8; len];
-                        if read_half.read_exact(&mut msg_buf).await.is_err() {
-                            break;
+                        match timeout(TCP_READ_TIMEOUT, read_half.read_exact(&mut msg_buf)).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(_)) => break,
+                            Err(_) => break,
                         }
 
                         match deserialize_message(&msg_buf) {

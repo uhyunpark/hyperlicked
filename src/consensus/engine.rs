@@ -190,8 +190,16 @@ where
         let parent = self.get_proposal_parent();
         let parent_hash = parent.hash();
 
-        // 2. Prepare payload from app
-        let payload = self.app.prepare_payload(&parent);
+        // 2. Prepare payload from app (truncate if too large)
+        let mut payload = self.app.prepare_payload(&parent);
+        if payload.len() > crate::types::MAX_BLOCK_PAYLOAD_SIZE {
+            warn!(
+                original_size = payload.len(),
+                max_size = crate::types::MAX_BLOCK_PAYLOAD_SIZE,
+                "Truncating oversized payload"
+            );
+            payload.truncate(crate::types::MAX_BLOCK_PAYLOAD_SIZE);
+        }
 
         // 3. Create block (justify is the QC that certifies our parent)
         let mut block = Block {
@@ -308,6 +316,16 @@ where
 
         // Remove block from queue
         let block = self.received_blocks.remove(block_idx);
+
+        // Validate block structure (DoS protection)
+        if let Err(e) = block.validate() {
+            error!(
+                height = block.height,
+                error = %e,
+                "Observer rejecting invalid block"
+            );
+            return None;
+        }
 
         // Track whether QC was verified (for Byzantine detection logic)
         let qc_verified = if Config::global().skip_qc_verify {
@@ -521,6 +539,12 @@ where
             hash = %hash_short(&block.hash()),
             "Received proposal"
         );
+
+        // 0. Validate block structure (DoS protection)
+        if let Err(e) = block.validate() {
+            warn!(view, error = %e, "Rejecting invalid block");
+            return None;
+        }
 
         // 1. Execute block locally
         let local_app_hash = self.app.execute(block);

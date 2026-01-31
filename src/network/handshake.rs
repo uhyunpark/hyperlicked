@@ -17,11 +17,17 @@
 //! - Mutual authentication: Both sides prove identity
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::time::timeout;
 use tracing::{debug, warn};
+
+/// Handshake timeout (10 seconds)
+/// Shorter than normal read timeout since handshakes should be fast
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::crypto::bls::{BlsPublicKey, BlsSecretKey, BlsSignature};
 use crate::types::{hash_short, NodeId};
@@ -93,9 +99,12 @@ pub async fn handshake_outbound(
     let our_msg = create_handshake_message(&config.node_id, &our_nonce, config, &[0u8; 32])?;
     write_half.write_all(&our_msg).await?;
 
-    // Receive their handshake message
+    // Receive their handshake message with timeout
     let mut their_msg = [0u8; HANDSHAKE_SIZE];
-    read_half.read_exact(&mut their_msg).await?;
+    timeout(HANDSHAKE_TIMEOUT, read_half.read_exact(&mut their_msg))
+        .await
+        .map_err(|_| anyhow!("Handshake timeout waiting for peer response"))?
+        .map_err(|e| anyhow!("Handshake read error: {}", e))?;
 
     let (peer_id, their_nonce, their_sig) = parse_handshake_message(&their_msg)?;
 
@@ -135,9 +144,12 @@ pub async fn handshake_inbound(
     write_half: &mut OwnedWriteHalf,
     config: &HandshakeConfig,
 ) -> Result<HandshakeResult> {
-    // Receive their handshake message
+    // Receive their handshake message with timeout
     let mut their_msg = [0u8; HANDSHAKE_SIZE];
-    read_half.read_exact(&mut their_msg).await?;
+    timeout(HANDSHAKE_TIMEOUT, read_half.read_exact(&mut their_msg))
+        .await
+        .map_err(|_| anyhow!("Handshake timeout waiting for initial message"))?
+        .map_err(|e| anyhow!("Handshake read error: {}", e))?;
 
     let (peer_id, their_nonce, _their_initial_sig) = parse_handshake_message(&their_msg)?;
 
@@ -155,9 +167,12 @@ pub async fn handshake_inbound(
     our_msg[64..].copy_from_slice(&our_sig);
     write_half.write_all(&our_msg).await?;
 
-    // Receive their signature (proving their identity)
+    // Receive their signature (proving their identity) with timeout
     let mut their_sig = [0u8; 96];
-    read_half.read_exact(&mut their_sig).await?;
+    timeout(HANDSHAKE_TIMEOUT, read_half.read_exact(&mut their_sig))
+        .await
+        .map_err(|_| anyhow!("Handshake timeout waiting for signature"))?
+        .map_err(|e| anyhow!("Handshake read error: {}", e))?;
 
     // Verify their signature
     let their_challenge = create_challenge(&our_nonce, &their_nonce);
