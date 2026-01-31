@@ -15,6 +15,9 @@
 
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
+use crate::crypto::bls::BlsPublicKey;
 use crate::types::{Certificate, NewView, NodeId, View, ViewChange, ViewChangeCertificate};
 
 use super::view_change::ViewChangeCollector;
@@ -59,6 +62,17 @@ impl Pacemaker {
     /// Enable view change protocol with given quorum size
     pub fn with_view_change(&mut self, quorum: usize) {
         self.vc_collector = Some(ViewChangeCollector::new(quorum));
+    }
+
+    /// Enable view change protocol with BLS signature verification.
+    ///
+    /// ViewChanges must be signed with valid BLS keys to be accepted.
+    pub fn with_view_change_verified(
+        &mut self,
+        quorum: usize,
+        validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
+    ) {
+        self.vc_collector = Some(ViewChangeCollector::with_validators(quorum, validator_pubkeys));
     }
 
     /// Get current view
@@ -153,6 +167,9 @@ impl Pacemaker {
     /// Returns None if:
     /// - ViewChange already sent for this view
     /// - View change protocol not enabled
+    ///
+    /// Note: This creates unsigned ViewChanges (placeholder signature).
+    /// Use `create_signed_view_change()` for BLS-signed ViewChanges.
     pub fn create_view_change(
         &mut self,
         node_id: NodeId,
@@ -172,8 +189,35 @@ impl Pacemaker {
             to_view: current + 1,
             high_qc,
             sender: node_id,
-            signature: vec![0u8; 64], // Placeholder until BLS
+            signature: vec![0u8; 64], // Placeholder - use create_signed_view_change for BLS
         })
+    }
+
+    /// Create a BLS-signed ViewChange message for current timeout.
+    ///
+    /// Returns None if ViewChange already sent for this view.
+    pub fn create_signed_view_change(
+        &mut self,
+        node_id: NodeId,
+        high_qc: Option<Certificate>,
+        bls_sk: &crate::crypto::bls::BlsSecretKey,
+    ) -> Option<ViewChange> {
+        let current = self.current_view;
+
+        // Only send once per view
+        if self.vc_sent_for_view == Some(current) {
+            return None;
+        }
+
+        self.vc_sent_for_view = Some(current);
+
+        Some(super::view_change::create_signed_view_change(
+            current,
+            current + 1,
+            high_qc,
+            node_id,
+            bls_sk,
+        ))
     }
 
     /// Process received ViewChange message.

@@ -226,6 +226,27 @@ impl ConsensusRunner {
         })
     }
 
+    /// Build map of validator NodeIds to BLS public keys.
+    ///
+    /// Used for signature verification in ViewChange and Timeout collection.
+    fn build_validator_pubkeys(config: &ConsensusConfig) -> HashMap<crate::types::NodeId, crate::crypto::bls::BlsPublicKey> {
+        use crate::crypto::bls::BlsPublicKey;
+
+        let mut validator_pubkeys = HashMap::new();
+        for (i, node_id) in config.validators.iter().enumerate() {
+            if let Some(pk_bytes) = config.bls_pubkeys.get(i) {
+                if pk_bytes.len() == 48 {
+                    let mut pk_array = [0u8; 48];
+                    pk_array.copy_from_slice(pk_bytes);
+                    if let Ok(pk) = BlsPublicKey::from_bytes(&pk_array) {
+                        validator_pubkeys.insert(*node_id, pk);
+                    }
+                }
+            }
+        }
+        validator_pubkeys
+    }
+
     /// Run the consensus loop
     pub async fn run(&mut self) -> Result<()> {
         info!(
@@ -233,8 +254,13 @@ impl ConsensusRunner {
             "Starting consensus runner"
         );
 
-        // Enable view change protocol
-        self.pacemaker.with_view_change(self.config.quorum());
+        // Enable view change protocol (with BLS verification when enabled)
+        if self.config.bls_enabled() {
+            let pubkeys = Self::build_validator_pubkeys(&self.config);
+            self.pacemaker.with_view_change_verified(self.config.quorum(), pubkeys);
+        } else {
+            self.pacemaker.with_view_change(self.config.quorum());
+        }
 
         loop {
             let view = self.pacemaker.current_view();
@@ -386,11 +412,21 @@ impl ConsensusRunner {
             }
         }
 
-        // Create and broadcast ViewChange (legacy/fallback protocol)
-        if let Some(vc) = self.pacemaker.create_view_change(
-            self.config.node_id,
-            self.safety.high_qc().cloned(),
-        ) {
+        // Create and broadcast ViewChange (BLS-signed when key available, else unsigned)
+        let vc_opt = if let Some(bls_sk) = self.config.bls_secret_key() {
+            self.pacemaker.create_signed_view_change(
+                self.config.node_id,
+                self.safety.high_qc().cloned(),
+                &bls_sk,
+            )
+        } else {
+            self.pacemaker.create_view_change(
+                self.config.node_id,
+                self.safety.high_qc().cloned(),
+            )
+        };
+
+        if let Some(vc) = vc_opt {
             info!(
                 from_view = vc.from_view,
                 to_view = vc.to_view,
@@ -797,6 +833,32 @@ impl ConsensusRunner {
                 Halting to prevent inconsistent state recovery.",
                 block.height, e
             );
+        }
+
+        // Check for validator set update from epoch transition
+        if let Some(update) = self.app.take_validator_update() {
+            if !update.is_empty() {
+                info!(
+                    validators = update.len(),
+                    epoch_block = block.height,
+                    "Applying epoch validator set update"
+                );
+
+                // Update consensus config with new validators
+                self.config.validators = update.node_ids;
+                self.config.bls_pubkeys = update.bls_pubkeys;
+
+                // Rebuild timeout collector with new validator set
+                self.timeout_collector = Self::create_timeout_collector(&self.config);
+
+                // Rebuild view change collector with new validators
+                if self.config.bls_enabled() {
+                    let pubkeys = Self::build_validator_pubkeys(&self.config);
+                    self.pacemaker.with_view_change_verified(self.config.quorum(), pubkeys);
+                } else {
+                    self.pacemaker.with_view_change(self.config.quorum());
+                }
+            }
         }
 
         // Prune

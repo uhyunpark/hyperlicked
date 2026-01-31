@@ -121,17 +121,44 @@ pub struct ViewChangeCertificate {
 }
 
 impl ViewChangeCertificate {
-    /// Create from collected ViewChange messages
+    /// Create from collected ViewChange messages.
+    ///
+    /// If all ViewChanges have valid BLS signatures (96 bytes), aggregates them.
+    /// Otherwise falls back to concatenating signatures.
     pub fn new(view: View, view_changes: Vec<ViewChange>) -> Self {
-        let agg_signature = view_changes
+        use crate::crypto::bls::{aggregate_signatures, BlsSignature};
+
+        // Try to collect BLS signatures from view changes
+        let bls_sigs: Vec<BlsSignature> = view_changes
             .iter()
-            .flat_map(|vc| vc.signature.iter().copied())
+            .filter(|vc| vc.signature.len() == 96)
+            .filter_map(|vc| BlsSignature::from_slice(&vc.signature).ok())
             .collect();
+
+        // Use BLS aggregation if we have enough valid BLS signatures for quorum
+        // (at least half+1 of the view changes should have valid BLS sigs)
+        let quorum_threshold = view_changes.len() / 2 + 1;
+        let agg_signature = if bls_sigs.len() >= quorum_threshold {
+            aggregate_signatures(&bls_sigs)
+                .map(|a| a.to_bytes().to_vec())
+                .unwrap_or_else(|_| Self::concat_signatures(&view_changes))
+        } else {
+            Self::concat_signatures(&view_changes)
+        };
+
         Self {
             view,
             view_changes,
             agg_signature,
         }
+    }
+
+    /// Concatenate signatures (fallback when BLS aggregation not available)
+    fn concat_signatures(view_changes: &[ViewChange]) -> Vec<u8> {
+        view_changes
+            .iter()
+            .flat_map(|vc| vc.signature.iter().copied())
+            .collect()
     }
 
     /// Get the highest QC among all ViewChange messages

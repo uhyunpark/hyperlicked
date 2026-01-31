@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::trigger::TriggerOrder;
 use crate::app::{Account, MarketConfig, OracleState, StakingState, Symbol};
 use crate::types::Price;
 
@@ -47,6 +48,15 @@ pub struct AppSnapshot {
     /// Oracle state (price feeds)
     #[serde(default)]
     pub oracle: Option<OracleState>,
+    /// Trigger orders (TP/SL)
+    #[serde(default)]
+    pub trigger_orders: Vec<TriggerOrder>,
+    /// Premium samples per symbol (for funding rate calculation)
+    #[serde(default)]
+    pub premium_samples: Vec<(Symbol, Vec<i64>)>,
+    /// Trigger order sequence number
+    #[serde(default)]
+    pub trigger_seq: u64,
 }
 
 impl AppSnapshot {
@@ -63,6 +73,9 @@ impl AppSnapshot {
             last_funding_times: Vec::new(),
             staking: None,
             oracle: None,
+            trigger_orders: Vec::new(),
+            premium_samples: Vec::new(),
+            trigger_seq: 0,
         }
     }
 

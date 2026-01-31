@@ -286,12 +286,22 @@ impl AppState {
                 .collect(),
             staking: Some(self.staking.clone()),
             oracle: Some(self.oracle.clone()),
+            trigger_orders: self.trigger_orders.values().cloned().collect(),
+            premium_samples: self
+                .premium_samples
+                .iter()
+                .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+                .collect(),
+            trigger_seq: self.trigger_seq,
         }
     }
 
     /// Restore state from snapshot (for recovery)
     pub fn from_snapshot(snapshot: crate::storage::AppSnapshot) -> Self {
+        use std::collections::VecDeque;
+
         use crate::app::oracle::OracleState;
+        use crate::app::trigger::{Cloid, TriggerOrderId};
 
         // Extract fields from snapshot (consuming it)
         let mark_prices = snapshot.mark_prices_map();
@@ -307,6 +317,39 @@ impl AppState {
         // Restore oracle state if present
         let oracle = snapshot.oracle.unwrap_or_else(OracleState::new);
 
+        // Restore trigger orders with indexes
+        let mut trigger_orders = HashMap::new();
+        let mut trigger_orders_by_trader: HashMap<String, Vec<TriggerOrderId>> = HashMap::new();
+        let mut trigger_orders_by_symbol: HashMap<Symbol, Vec<TriggerOrderId>> = HashMap::new();
+        let mut trigger_orders_by_cloid: HashMap<(String, Symbol, Cloid), TriggerOrderId> =
+            HashMap::new();
+
+        for order in snapshot.trigger_orders {
+            let id = order.id.clone();
+            trigger_orders_by_trader
+                .entry(order.trader.clone())
+                .or_default()
+                .push(id.clone());
+            trigger_orders_by_symbol
+                .entry(order.symbol.clone())
+                .or_default()
+                .push(id.clone());
+            if let Some(ref cloid) = order.cloid {
+                trigger_orders_by_cloid.insert(
+                    (order.trader.clone(), order.symbol.clone(), cloid.clone()),
+                    id.clone(),
+                );
+            }
+            trigger_orders.insert(id, order);
+        }
+
+        // Restore premium samples
+        let premium_samples: HashMap<Symbol, VecDeque<i64>> = snapshot
+            .premium_samples
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+
         let mut state = Self {
             orderbooks: HashMap::new(),
             accounts: AccountManager::from_accounts(snapshot.accounts),
@@ -319,7 +362,7 @@ impl AppState {
             trade_history: HashMap::new(),
             insurance_fund,
             pending_liquidations: Vec::new(),
-            premium_samples: HashMap::new(), // Premium samples are recalculated
+            premium_samples,
             current_funding_rates: funding_rates,
             last_funding_times,
             pending_funding: Vec::new(),
@@ -329,12 +372,11 @@ impl AppState {
             pending_staking_events: Vec::new(),
             pending_validator_update: None,
             current_view: 0,
-            // Trigger orders are restored from snapshot if present
-            trigger_orders: HashMap::new(),
-            trigger_orders_by_trader: HashMap::new(),
-            trigger_orders_by_symbol: HashMap::new(),
-            trigger_orders_by_cloid: HashMap::new(),
-            trigger_seq: 0,
+            trigger_orders,
+            trigger_orders_by_trader,
+            trigger_orders_by_symbol,
+            trigger_orders_by_cloid,
+            trigger_seq: snapshot.trigger_seq,
             pending_trigger_events: Vec::new(),
             pending_adl_events: Vec::new(),
             oracle,
@@ -361,6 +403,10 @@ impl AppState {
 }
 
 impl AppHook for AppState {
+    fn take_validator_update(&mut self) -> Option<crate::app::staking::ValidatorSetUpdate> {
+        self.pending_validator_update.take()
+    }
+
     fn prepare_payload(&self, _parent: &Block) -> Vec<u8> {
         // Peek pending transactions (without removing them yet)
         // They get drained after block commit via commit_proposal()

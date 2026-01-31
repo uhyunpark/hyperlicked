@@ -64,6 +64,14 @@ pub trait AppHook: Send + Sync {
 
     /// Execute block and return state hash (called after commit)
     fn execute(&mut self, block: &Block) -> Hash;
+
+    /// Take pending validator set update from epoch transition.
+    ///
+    /// Called after commit to check if the validator set should be updated.
+    /// Returns None if no epoch transition occurred or if staking is disabled.
+    fn take_validator_update(&mut self) -> Option<crate::app::staking::ValidatorSetUpdate> {
+        None // Default implementation - no staking
+    }
 }
 
 /// Block storage abstraction
