@@ -192,46 +192,34 @@ async fn submit_cancel_tx(
     }))
 }
 
+/// Cancel order endpoint - requires signed request
+///
+/// SECURITY: All cancels must be signed to prevent attackers from
+/// canceling other users' orders. The signature proves ownership.
 pub async fn cancel_order(
     State(state): State<ApiState>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Try signed cancel format first
-    if let Some(tx_type) = body.get("type").and_then(|v| v.as_str()) {
-        if tx_type == "cancel" {
-            let req: SignedTransaction =
-                serde_json::from_value(body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // Only accept signed cancel format
+    let req: SignedTransaction = serde_json::from_value(body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cancel request: {}. Cancels must be signed.", e)))?;
 
-            let cancel = req
-                .cancel
-                .ok_or((StatusCode::BAD_REQUEST, "Missing cancel details".to_string()))?;
+    // Verify signature and extract verified data
+    let verified = verify_cancel(&req, &state.eip712_signer)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-            let tx = Transaction::CancelOrder {
-                trader: cancel.owner,
-                order_id: cancel.order_id.clone(),
-            };
-
-            let mut app = state.shared.app.write().await;
-            let _ = app.submit_tx(tx);
-
-            return Ok(Json(serde_json::json!({
-                "status": "submitted",
-                "orderId": cancel.order_id
-            })));
-        }
+    // Validate and consume nonce
+    let trader = format!("{:?}", verified.owner);
+    {
+        let mut app = state.shared.app.write().await;
+        app.accounts_mut()
+            .use_nonce(&trader, verified.nonce)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
-    // Simple cancel format: { orderId, address }
-    let order_id = body
-        .get("orderId")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::BAD_REQUEST, "Missing orderId".to_string()))?;
-
-    let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("unknown");
-
     let tx = Transaction::CancelOrder {
-        trader: address.to_string(),
-        order_id: order_id.to_string(),
+        trader,
+        order_id: verified.order_id.clone(),
     };
 
     let mut app = state.shared.app.write().await;
@@ -239,6 +227,7 @@ pub async fn cancel_order(
 
     Ok(Json(serde_json::json!({
         "status": "submitted",
-        "orderId": order_id
-    })))
+        "orderId": verified.order_id
+    }))
+    )
 }

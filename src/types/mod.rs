@@ -46,6 +46,10 @@ pub type Price = i64;
 /// Size in satoshis (1 unit = 100_000_000). Integer math for determinism.
 pub type Size = i64;
 
+/// Maximum block payload size in bytes (10 MB)
+/// Prevents DoS attacks via oversized blocks
+pub const MAX_BLOCK_PAYLOAD_SIZE: usize = 10_000_000;
+
 // =============================================================================
 // Helper Functions
 // =============================================================================

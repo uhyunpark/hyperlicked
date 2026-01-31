@@ -95,12 +95,18 @@ pub fn check_and_liquidate_limited(
 
     // Collect addresses that need liquidation
     // (can't modify while iterating)
-    let addresses_to_check: Vec<String> = accounts
+    let mut addresses_to_check: Vec<String> = accounts
         .all_accounts()
         .iter()
         .filter(|a| a.is_liquidatable(mark_prices, MAINTENANCE_MARGIN_BPS))
         .map(|a| a.address.clone())
         .collect();
+
+    // CRITICAL: Sort for deterministic ordering across validators.
+    // HashMap iteration order is non-deterministic, which would cause
+    // consensus failures if different validators process liquidations
+    // in different orders. DO NOT remove this sort.
+    addresses_to_check.sort();
 
     let total_liquidatable = addresses_to_check.len();
     let checked_count = total_liquidatable;

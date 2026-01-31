@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Certificate, Hash, Height, NodeId, View};
+use super::{Certificate, Hash, Height, NodeId, View, MAX_BLOCK_PAYLOAD_SIZE};
 
 /// A block in the chain.
 ///
@@ -59,5 +59,20 @@ impl Block {
             timestamp: 0,
             justify: None,
         }
+    }
+
+    /// Validate block structure (DoS protection)
+    ///
+    /// Returns error if block violates size limits.
+    /// Call this before voting on or executing blocks from other validators.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.payload.len() > MAX_BLOCK_PAYLOAD_SIZE {
+            return Err(format!(
+                "Block payload too large: {} bytes > {} bytes max",
+                self.payload.len(),
+                MAX_BLOCK_PAYLOAD_SIZE
+            ));
+        }
+        Ok(())
     }
 }
