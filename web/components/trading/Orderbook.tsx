@@ -1,13 +1,14 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, memo } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { getOrderbook, getTrades, convertPrice, convertSize } from '@/lib/api'
 import type { PriceLevel } from '@/lib/types'
 
 type OrderbookTab = 'orderbook' | 'trades'
 
-function OrderbookRow({
+// Memoized row component to prevent unnecessary re-renders
+const OrderbookRow = memo(function OrderbookRow({
   level,
   side,
   maxSize,
@@ -21,17 +22,21 @@ function OrderbookRow({
   const depthPercent = (level.size / maxSize) * 100
   const isBid = side === 'bid'
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       onClick?.(level.price)
     }
-  }
+  }, [onClick, level.price])
+
+  const handleClick = useCallback(() => {
+    onClick?.(level.price)
+  }, [onClick, level.price])
 
   return (
     <div
       className="relative flex cursor-pointer items-center justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary focus:bg-bg-tertiary focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
-      onClick={() => onClick?.(level.price)}
+      onClick={handleClick}
       onKeyDown={handleKeyDown}
       role="button"
       tabIndex={0}
@@ -59,10 +64,29 @@ function OrderbookRow({
       </div>
     </div>
   )
-}
+})
+
+// Memoized trade row component
+const TradeRow = memo(function TradeRow({ trade }: { trade: { id: string; price: number; size: number; side: 'buy' | 'sell'; timestamp: number } }) {
+  const time = new Date(trade.timestamp)
+  const timeStr = time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const isBuy = trade.side === 'buy'
+
+  return (
+    <div
+      className="flex justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary"
+    >
+      <div className={isBuy ? 'text-green-buy' : 'text-red-sell'}>
+        {trade.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      </div>
+      <div className="text-text-primary">{trade.size.toFixed(4)}</div>
+      <div className="text-text-muted">{timeStr}</div>
+    </div>
+  )
+})
 
 // Trades panel component for the tab
-function TradesPanel() {
+const TradesPanel = memo(function TradesPanel() {
   const { trades } = useTradingStore()
 
   return (
@@ -76,30 +100,15 @@ function TradesPanel() {
 
       {/* Trades list */}
       <div className="flex-1 overflow-y-auto">
-        {trades.map((trade) => {
-          const time = new Date(trade.timestamp)
-          const timeStr = time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-          const isBuy = trade.side === 'buy'
-
-          return (
-            <div
-              key={trade.id}
-              className="flex justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary"
-            >
-              <div className={isBuy ? 'text-green-buy' : 'text-red-sell'}>
-                {trade.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </div>
-              <div className="text-text-primary">{trade.size.toFixed(4)}</div>
-              <div className="text-text-muted">{timeStr}</div>
-            </div>
-          )
-        })}
+        {trades.map((trade) => (
+          <TradeRow key={trade.id} trade={trade} />
+        ))}
       </div>
     </div>
   )
-}
+})
 
-export function Orderbook() {
+function OrderbookInner() {
   const [activeTab, setActiveTab] = useState<OrderbookTab>('orderbook')
   const { orderbook, updateOrderbook, addTrade, isConnected: wsConnected } = useTradingStore()
 
@@ -144,33 +153,44 @@ export function Orderbook() {
     }
   }, [wsConnected, fetchData])
 
-  // Calculate cumulative totals
-  const bidsWithTotal = orderbook.bids.map((bid, i) => ({
-    ...bid,
-    total: orderbook.bids.slice(0, i + 1).reduce((sum, b) => sum + b.size, 0)
-  }))
+  // Calculate cumulative totals - O(N) instead of O(N²)
+  const bidsWithTotal = useMemo(() => {
+    let cumulative = 0
+    return orderbook.bids.map(bid => {
+      cumulative += bid.size
+      return { ...bid, total: cumulative }
+    })
+  }, [orderbook.bids])
 
-  const asksWithTotal = orderbook.asks.map((ask, i) => ({
-    ...ask,
-    total: orderbook.asks.slice(0, i + 1).reduce((sum, a) => sum + a.size, 0)
-  }))
+  const asksWithTotal = useMemo(() => {
+    let cumulative = 0
+    return orderbook.asks.map(ask => {
+      cumulative += ask.size
+      return { ...ask, total: cumulative }
+    })
+  }, [orderbook.asks])
 
-  // Get max size for depth visualization
-  const maxBidSize = Math.max(...bidsWithTotal.map(b => b.size), 1)
-  const maxAskSize = Math.max(...asksWithTotal.map(a => a.size), 1)
-  const maxSize = Math.max(maxBidSize, maxAskSize)
+  // Get max size for depth visualization - memoized
+  const maxSize = useMemo(() => {
+    const maxBidSize = Math.max(...bidsWithTotal.map(b => b.size), 1)
+    const maxAskSize = Math.max(...asksWithTotal.map(a => a.size), 1)
+    return Math.max(maxBidSize, maxAskSize)
+  }, [bidsWithTotal, asksWithTotal])
 
-  // Get spread - safely handle empty orderbook
-  const bestBid = bidsWithTotal[0]?.price ?? null
-  const bestAsk = asksWithTotal[0]?.price ?? null
-  const hasSpread = bestBid !== null && bestAsk !== null && bestBid > 0 && bestAsk > 0
-  const spread = hasSpread ? bestAsk - bestBid : 0
-  const spreadPercent = hasSpread && bestAsk > 0 ? (spread / bestAsk) * 100 : 0
+  // Get spread - safely handle empty orderbook - memoized
+  const spreadInfo = useMemo(() => {
+    const bestBid = bidsWithTotal[0]?.price ?? null
+    const bestAsk = asksWithTotal[0]?.price ?? null
+    const hasSpread = bestBid !== null && bestAsk !== null && bestBid > 0 && bestAsk > 0
+    const spread = hasSpread ? bestAsk - bestBid : 0
+    const spreadPercent = hasSpread && bestAsk > 0 ? (spread / bestAsk) * 100 : 0
+    return { bestBid, bestAsk, hasSpread, spread, spreadPercent }
+  }, [bidsWithTotal, asksWithTotal])
 
-  const handlePriceClick = (price: number) => {
+  const handlePriceClick = useCallback((price: number) => {
     console.log('Selected price:', price)
     // TODO: Set price in trade panel
-  }
+  }, [])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -237,13 +257,13 @@ export function Orderbook() {
 
             {/* Spread indicator */}
             <div className="border-y border-border bg-bg-tertiary px-3 py-1.5 text-center">
-              {hasSpread ? (
+              {spreadInfo.hasSpread ? (
                 <>
                   <div className="text-xs font-mono text-text-primary">
-                    {bestAsk!.toLocaleString()} ↔ {bestBid!.toLocaleString()}
+                    {spreadInfo.bestAsk!.toLocaleString()} ↔ {spreadInfo.bestBid!.toLocaleString()}
                   </div>
                   <div className="text-xs text-text-muted">
-                    Spread: {spread.toFixed(2)} ({spreadPercent.toFixed(3)}%)
+                    Spread: {spreadInfo.spread.toFixed(2)} ({spreadInfo.spreadPercent.toFixed(3)}%)
                   </div>
                 </>
               ) : (
@@ -269,3 +289,6 @@ export function Orderbook() {
     </div>
   )
 }
+
+// Export memoized component to prevent re-renders from parent state changes
+export const Orderbook = memo(OrderbookInner)

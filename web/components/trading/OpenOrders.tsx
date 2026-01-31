@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, memo } from 'react'
 import { useTradingStore, useWalletStore } from '@/lib/store'
 import { cancelOrder, getOrders, convertPrice, convertSize } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 
-export function OpenOrders() {
+function OpenOrdersInner() {
   const { openOrders, setOpenOrders } = useTradingStore()
   const { address, isConnected } = useWalletStore()
 
@@ -51,7 +51,7 @@ export function OpenOrders() {
     return () => clearInterval(interval)
   }, [isConnected, address, fetchOrders])
 
-  const handleCancel = async (orderId: string) => {
+  const handleCancel = useCallback(async (orderId: string) => {
     if (!address) {
       toast.error('Not Connected', 'Please connect your wallet first')
       return
@@ -63,7 +63,7 @@ export function OpenOrders() {
       const message = error instanceof Error ? error.message : 'Unknown error'
       toast.error('Cancel Failed', message)
     }
-  }
+  }, [address])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -144,3 +144,6 @@ export function OpenOrders() {
     </div>
   )
 }
+
+// Export memoized component to prevent re-renders from parent state changes
+export const OpenOrders = memo(OpenOrdersInner)

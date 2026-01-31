@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, memo } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet, type OrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
@@ -21,7 +21,7 @@ interface PositionTriggers {
   sl?: TriggerOrder
 }
 
-export function Positions() {
+function PositionsInner() {
   const { positions, markPrices, triggerOrders, setTriggerOrders } = useTradingStore()
   const wallet = useWallet()
 
@@ -120,7 +120,7 @@ export function Positions() {
     return () => clearInterval(interval)
   }, [wallet.address, fetchTriggerOrders])
 
-  const handleClose = async (symbol: string, size: number, markPrice: number) => {
+  const handleClose = useCallback(async (symbol: string, size: number, markPrice: number) => {
     if (!wallet.address) {
       toast.warning('Not Connected', 'Please connect your wallet first')
       return
@@ -181,9 +181,9 @@ export function Positions() {
       console.error('[position-close] Error:', error)
       toast.error('Close Failed', error.message || 'Unknown error')
     }
-  }
+  }, [wallet.address, wallet.tradingEnabled, wallet.signOrderSmart])
 
-  const handleCancelTrigger = async (triggerOrderId: string, symbol: string, type: 'tp' | 'sl') => {
+  const handleCancelTrigger = useCallback(async (triggerOrderId: string, symbol: string, type: 'tp' | 'sl') => {
     if (!wallet.address) return
 
     try {
@@ -194,7 +194,7 @@ export function Positions() {
     } catch (err: any) {
       toast.error('Cancel Failed', err.message)
     }
-  }
+  }, [wallet.address])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -343,3 +343,6 @@ export function Positions() {
     </div>
   )
 }
+
+// Export memoized component to prevent re-renders from parent state changes
+export const Positions = memo(PositionsInner)

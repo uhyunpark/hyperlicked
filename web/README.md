@@ -113,6 +113,29 @@ const useTradingStore = create<TradingState>((set) => ({
 }))
 ```
 
+## Performance Optimization
+
+Trading UI receives 10+ updates/sec. Key optimizations:
+
+- **React.memo()** - Prevents re-renders from parent state changes
+- **useMemo** - O(N) cumulative totals instead of O(N²)
+- **useCallback** - Stable references for memoized children
+- **Memoized row components** - OrderbookRow, TradeRow
+
+```typescript
+// Example: Orderbook cumulative totals (O(N) not O(N²))
+const bidsWithTotal = useMemo(() => {
+  let cumulative = 0
+  return orderbook.bids.map(bid => {
+    cumulative += bid.size
+    return { ...bid, total: cumulative }
+  })
+}, [orderbook.bids])
+
+// Memoized component export
+export const Orderbook = memo(OrderbookInner)
+```
+
 ## Order Submission
 
 **Phase 1:** Uses mock address (MetaMask integration in Phase 2).
