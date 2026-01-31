@@ -40,6 +40,9 @@ pub struct ConsensusMetrics {
     /// Count of aggregation failures
     aggregation_failures: AtomicU64,
 
+    /// Count of rate-limited votes (CRITICAL-7)
+    rate_limited_votes: AtomicU64,
+
     /// Invalid signatures per validator (for identifying Byzantine nodes)
     /// Note: This is a simple counter map, not thread-safe for concurrent access
     /// In production, use proper metrics library like prometheus
@@ -84,6 +87,13 @@ impl ConsensusMetrics {
         self.aggregation_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a rate-limited vote (CRITICAL-7: vote spam prevention)
+    pub fn record_vote_rate_limited(&self, voter: &NodeId) {
+        self.rate_limited_votes.fetch_add(1, Ordering::Relaxed);
+        // Rate limiting could indicate spam attack from Byzantine node
+        self.increment_byzantine_suspicion(voter);
+    }
+
     /// Increment Byzantine suspicion counter for a node
     fn increment_byzantine_suspicion(&self, node_id: &NodeId) {
         if let Ok(mut map) = self.byzantine_suspicions.write() {
@@ -105,6 +115,7 @@ impl ConsensusMetrics {
             unknown_validators: self.unknown_validators.load(Ordering::Relaxed),
             signature_parse_failures: self.signature_parse_failures.load(Ordering::Relaxed),
             aggregation_failures: self.aggregation_failures.load(Ordering::Relaxed),
+            rate_limited_votes: self.rate_limited_votes.load(Ordering::Relaxed),
             suspicious_validators: byzantine_nodes.len(),
         }
     }
@@ -132,6 +143,7 @@ impl ConsensusMetrics {
         self.unknown_validators.store(0, Ordering::Relaxed);
         self.signature_parse_failures.store(0, Ordering::Relaxed);
         self.aggregation_failures.store(0, Ordering::Relaxed);
+        self.rate_limited_votes.store(0, Ordering::Relaxed);
         if let Ok(mut map) = self.byzantine_suspicions.write() {
             map.clear();
         }
@@ -151,6 +163,8 @@ pub struct MetricsSummary {
     pub signature_parse_failures: u64,
     /// Total aggregation failures
     pub aggregation_failures: u64,
+    /// Total rate-limited votes (CRITICAL-7)
+    pub rate_limited_votes: u64,
     /// Number of validators with Byzantine suspicions
     pub suspicious_validators: usize,
 }

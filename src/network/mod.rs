@@ -5,6 +5,14 @@
 //! - Send votes to leader
 //! - Broadcast prepare certificates
 //!
+//! ## Security (CRITICAL-6)
+//!
+//! The network supports BLS-authenticated handshakes to prevent impersonation:
+//! - In production mode (testnet/mainnet), `require_authenticated_peers = true`
+//! - In dev mode, authentication can be disabled for local testing
+//!
+//! See `HandshakeConfig::authenticated()` for setup.
+//!
 //! ## Architecture
 //!
 //! ```text
@@ -30,11 +38,15 @@ mod mock;
 pub mod sync;
 mod transport;
 
+use std::collections::HashMap;
+
 pub use active_sync::{ActiveSyncClient, ActiveSyncConfig, SyncResult};
 pub use handshake::{HandshakeConfig, HandshakeResult};
 pub use mock::MockNetwork;
 pub use sync::{SyncClient, SyncHandler};
 pub use transport::TcpNetwork;
+
+use crate::crypto::bls::{BlsPublicKey, BlsSecretKey};
 
 use async_trait::async_trait;
 
@@ -74,7 +86,7 @@ pub trait Network: Send + Sync {
 }
 
 /// Network configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NetworkConfig {
     /// Our node ID
     pub node_id: NodeId,
@@ -82,10 +94,30 @@ pub struct NetworkConfig {
     pub listen_addr: String,
     /// Peer addresses: (NodeId, "host:port")
     pub peers: Vec<(NodeId, String)>,
+    /// CRITICAL-6: Whether to require authenticated peers
+    /// Default: true in testnet/mainnet, false in dev mode
+    pub require_authenticated_peers: bool,
+    /// Our BLS secret key for authentication (optional in dev mode)
+    pub bls_secret_key: Option<BlsSecretKey>,
+    /// Known validator BLS public keys for authentication
+    pub validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
+}
+
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkConfig")
+            .field("node_id", &crate::types::hash_short(&self.node_id))
+            .field("listen_addr", &self.listen_addr)
+            .field("peers", &self.peers.len())
+            .field("require_authenticated_peers", &self.require_authenticated_peers)
+            .field("has_bls_key", &self.bls_secret_key.is_some())
+            .field("validator_pubkeys", &self.validator_pubkeys.len())
+            .finish()
+    }
 }
 
 impl NetworkConfig {
-    /// Create config for local 3-node testing
+    /// Create config for local 3-node testing (unauthenticated)
     pub fn local_three_nodes(node_index: usize) -> Self {
         let node_ids: [NodeId; 3] = [
             [1u8; 32], // Node 0
@@ -110,6 +142,43 @@ impl NetworkConfig {
             node_id,
             listen_addr,
             peers,
+            require_authenticated_peers: false, // Dev mode: no auth
+            bls_secret_key: None,
+            validator_pubkeys: HashMap::new(),
+        }
+    }
+
+    /// Create config with BLS authentication enabled (CRITICAL-6)
+    pub fn with_authentication(
+        mut self,
+        bls_sk: BlsSecretKey,
+        validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
+    ) -> Self {
+        self.bls_secret_key = Some(bls_sk);
+        self.validator_pubkeys = validator_pubkeys;
+        self.require_authenticated_peers = true;
+        self
+    }
+
+    /// Create handshake config from network config
+    pub fn handshake_config(&self) -> HandshakeConfig {
+        if self.require_authenticated_peers {
+            if let Some(ref bls_sk) = self.bls_secret_key {
+                HandshakeConfig::authenticated(
+                    self.node_id,
+                    bls_sk.clone(),
+                    self.validator_pubkeys.clone(),
+                )
+            } else {
+                // Authentication required but no key - this is a configuration error
+                // Log warning and fall back to unauthenticated
+                tracing::warn!(
+                    "Authentication required but no BLS key configured - falling back to unauthenticated"
+                );
+                HandshakeConfig::unauthenticated(self.node_id)
+            }
+        } else {
+            HandshakeConfig::unauthenticated(self.node_id)
         }
     }
 }

@@ -13,13 +13,99 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::crypto::bls::{aggregate_signatures, BlsSignature};
 use crate::types::{Certificate, Hash, NodeId, View, Vote};
 
 use super::metrics::ConsensusMetrics;
+use super::MAX_VOTES_PER_VALIDATOR_PER_SECOND;
+
+// =============================================================================
+// Vote Rate Limiter (CRITICAL-7)
+// =============================================================================
+
+/// Rate limiter for votes using sliding window algorithm.
+///
+/// Prevents vote spam DoS attacks by limiting votes per validator per second.
+/// Uses a sliding window of timestamps to track recent votes.
+#[derive(Debug, Default)]
+pub struct VoteRateLimiter {
+    /// Per-validator sliding window of vote timestamps
+    windows: HashMap<NodeId, VecDeque<Instant>>,
+    /// Maximum votes per second per validator
+    max_per_second: usize,
+}
+
+/// Error returned when vote is rate limited
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum RateLimitError {
+    #[error("vote rate limit exceeded: {votes_in_window} votes in last second (max {max})")]
+    RateLimitExceeded { votes_in_window: usize, max: usize },
+}
+
+impl VoteRateLimiter {
+    /// Create a new rate limiter with the given max votes per second
+    pub fn new(max_per_second: usize) -> Self {
+        Self {
+            windows: HashMap::new(),
+            max_per_second,
+        }
+    }
+
+    /// Check if a vote from this validator should be allowed.
+    /// Returns Ok(()) if allowed, Err if rate limited.
+    pub fn check_and_record(&mut self, voter: &NodeId) -> Result<(), RateLimitError> {
+        let now = Instant::now();
+        let window = self.windows.entry(*voter).or_default();
+
+        // Remove votes older than 1 second
+        while let Some(&front) = window.front() {
+            if now.duration_since(front).as_secs_f64() > 1.0 {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Check if under limit
+        if window.len() >= self.max_per_second {
+            return Err(RateLimitError::RateLimitExceeded {
+                votes_in_window: window.len(),
+                max: self.max_per_second,
+            });
+        }
+
+        // Record this vote
+        window.push_back(now);
+        Ok(())
+    }
+
+    /// Prune old entries to prevent memory growth
+    /// Called periodically (e.g., on view change)
+    pub fn prune_stale(&mut self) {
+        let now = Instant::now();
+        self.windows.retain(|_, window| {
+            // Remove votes older than 1 second
+            while let Some(&front) = window.front() {
+                if now.duration_since(front).as_secs_f64() > 1.0 {
+                    window.pop_front();
+                } else {
+                    break;
+                }
+            }
+            // Keep entry only if it has recent votes
+            !window.is_empty()
+        });
+    }
+
+    /// Get current vote count for a validator (for testing/metrics)
+    pub fn vote_count(&self, voter: &NodeId) -> usize {
+        self.windows.get(voter).map(|w| w.len()).unwrap_or(0)
+    }
+}
 
 /// Collects votes and aggregates signatures
 pub struct VoteAggregator {
@@ -37,6 +123,9 @@ pub struct VoteAggregator {
 
     /// Optional metrics for tracking Byzantine events
     metrics: Option<Arc<ConsensusMetrics>>,
+
+    /// Rate limiter for vote spam prevention (CRITICAL-7)
+    rate_limiter: VoteRateLimiter,
 }
 
 impl VoteAggregator {
@@ -48,6 +137,7 @@ impl VoteAggregator {
             use_bls,
             skip_verification: false,
             metrics: None,
+            rate_limiter: VoteRateLimiter::new(MAX_VOTES_PER_VALIDATOR_PER_SECOND),
         }
     }
 
@@ -59,6 +149,7 @@ impl VoteAggregator {
             use_bls,
             skip_verification,
             metrics: None,
+            rate_limiter: VoteRateLimiter::new(MAX_VOTES_PER_VALIDATOR_PER_SECOND),
         }
     }
 
@@ -70,9 +161,24 @@ impl VoteAggregator {
 
     /// Add a vote. Returns Certificate if quorum reached.
     /// Verifies BLS signature unless skip_verification is set.
+    /// Enforces rate limiting (CRITICAL-7).
     pub fn add_vote(&mut self, vote: Vote) -> Option<Certificate> {
         let key = (vote.view, vote.block_hash);
         let voter = vote.voter;
+
+        // CRITICAL-7: Check rate limit before processing
+        if let Err(e) = self.rate_limiter.check_and_record(&voter) {
+            tracing::warn!(
+                view = vote.view,
+                voter = %crate::types::hash_short(&voter),
+                error = %e,
+                "Rejecting vote due to rate limiting - POTENTIAL SPAM ATTACK"
+            );
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_vote_rate_limited(&voter);
+            }
+            return None;
+        }
 
         let vote_map = self.votes.entry(key).or_default();
 
@@ -420,5 +526,97 @@ mod tests {
         assert!(cert.is_none(), "Quorum not reached yet");
         // Vote is stored under tampered_hash (because that's what's in the vote)
         assert_eq!(agg.vote_count(1, &tampered_hash), 1, "Should accept when verification skipped");
+    }
+
+    // ==========================================================================
+    // Rate Limiter Tests (CRITICAL-7)
+    // ==========================================================================
+
+    #[test]
+    fn test_rate_limiter_allows_under_limit() {
+        let mut limiter = VoteRateLimiter::new(10);
+        let voter = [1u8; 32];
+
+        // First 10 votes should be allowed
+        for _ in 0..10 {
+            assert!(limiter.check_and_record(&voter).is_ok());
+        }
+
+        assert_eq!(limiter.vote_count(&voter), 10);
+    }
+
+    #[test]
+    fn test_rate_limiter_blocks_over_limit() {
+        let mut limiter = VoteRateLimiter::new(5);
+        let voter = [1u8; 32];
+
+        // First 5 should succeed
+        for _ in 0..5 {
+            assert!(limiter.check_and_record(&voter).is_ok());
+        }
+
+        // 6th should fail
+        let result = limiter.check_and_record(&voter);
+        assert!(result.is_err());
+        if let Err(RateLimitError::RateLimitExceeded { votes_in_window, max }) = result {
+            assert_eq!(votes_in_window, 5);
+            assert_eq!(max, 5);
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_per_validator() {
+        let mut limiter = VoteRateLimiter::new(3);
+        let voter1 = [1u8; 32];
+        let voter2 = [2u8; 32];
+
+        // Each voter has independent limit
+        for _ in 0..3 {
+            assert!(limiter.check_and_record(&voter1).is_ok());
+            assert!(limiter.check_and_record(&voter2).is_ok());
+        }
+
+        // Both at limit now
+        assert!(limiter.check_and_record(&voter1).is_err());
+        assert!(limiter.check_and_record(&voter2).is_err());
+    }
+
+    #[test]
+    fn test_aggregator_rate_limits_votes() {
+        // Use a low quorum so we can test rate limiting kicks in
+        let mut agg = VoteAggregator::new(100, false);
+
+        let hash = [1u8; 32];
+        let voter = [1u8; 32];
+
+        // Send MAX_VOTES_PER_VALIDATOR_PER_SECOND votes
+        for i in 0..MAX_VOTES_PER_VALIDATOR_PER_SECOND {
+            let vote = Vote {
+                view: i as u64,
+                block_hash: hash,
+                app_hash: [0u8; 32],
+                voter,
+                signature: vec![0u8; 64],
+                bls_pubkey: None,
+            };
+            // Vote for different views to avoid duplicate detection
+            agg.add_vote(vote);
+        }
+
+        // Next vote should be rate limited (returns None, not added)
+        let rate_limited_vote = Vote {
+            view: 1000,
+            block_hash: hash,
+            app_hash: [0u8; 32],
+            voter,
+            signature: vec![0u8; 64],
+            bls_pubkey: None,
+        };
+
+        let result = agg.add_vote(rate_limited_vote);
+        assert!(result.is_none(), "Rate limited vote should return None");
+
+        // Verify the vote wasn't stored
+        assert_eq!(agg.vote_count(1000, &hash), 0, "Rate limited vote should not be stored");
     }
 }

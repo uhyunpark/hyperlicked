@@ -28,7 +28,7 @@ mod safety;
 pub mod timeout;
 pub mod view_change;
 
-pub use aggregator::VoteAggregator;
+pub use aggregator::{RateLimitError, VoteAggregator, VoteRateLimiter};
 pub use engine::Engine;
 pub use equivocation::{EquivocationDetector, EquivocationProof, EquivocationStats, VoteCheckResult};
 pub use metrics::{ConsensusMetrics, MetricsSummary};
