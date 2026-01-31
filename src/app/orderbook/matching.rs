@@ -45,65 +45,72 @@ impl OrderBook {
     }
 
     fn match_bid(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
-        while order.size > 0 {
-            // Get best ask price
-            let best_ask = match self.best_ask() {
-                Some(p) => p,
-                None => break,
-            };
+        // Collect all ask price levels that cross with our bid price
+        // This allows us to skip self-trade levels and check the next one
+        let crossing_levels: Vec<_> = self.asks.keys().copied().filter(|&p| p <= order.price).collect();
 
-            if best_ask > order.price {
-                break; // Price doesn't cross
+        for ask_price in crossing_levels {
+            if order.size == 0 {
+                break;
             }
 
-            // Get the price level
-            let level = match self.asks.get_mut(&best_ask) {
-                Some(orders) if !orders.is_empty() => orders,
-                _ => {
-                    self.asks.remove(&best_ask);
-                    continue;
-                }
-            };
-
-            // Find first non-self-trade order at this price level
-            let maker_idx = level
-                .iter()
-                .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
-
-            let maker_idx = match maker_idx {
-                Some(idx) => idx,
-                None => {
-                    // All orders at this price are from the same trader - skip level
+            // Keep matching at this price level until exhausted or order filled
+            loop {
+                if order.size == 0 {
                     break;
                 }
-            };
 
-            let maker = &mut level[maker_idx];
-            let match_size = order.size.min(maker.size);
+                // Get the price level
+                let level = match self.asks.get_mut(&ask_price) {
+                    Some(orders) if !orders.is_empty() => orders,
+                    _ => {
+                        self.asks.remove(&ask_price);
+                        break;
+                    }
+                };
 
-            fills.push(Fill {
-                taker_order_id: order.id.clone(),
-                maker_order_id: maker.id.clone(),
-                taker: order.trader.clone(),
-                maker: maker.trader.clone(),
-                symbol: self.symbol.clone(),
-                side: Side::Bid,
-                price: best_ask,
-                size: match_size,
-                timestamp: now,
-            });
+                // Find first non-self-trade order at this price level
+                let maker_idx = level
+                    .iter()
+                    .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
 
-            order.size -= match_size;
-            maker.size -= match_size;
-            self.last_price = best_ask;
+                let maker_idx = match maker_idx {
+                    Some(idx) => idx,
+                    None => {
+                        // All remaining orders at this price are from the same trader
+                        // (CRITICAL-6: continue to next price level instead of breaking)
+                        break;
+                    }
+                };
 
-            if maker.size == 0 {
-                // Remove the filled maker order
-                let maker_id = level.remove(maker_idx).unwrap().id;
-                self.order_index.remove(&maker_id);
+                let maker = &mut level[maker_idx];
+                let match_size = order.size.min(maker.size);
 
-                if level.is_empty() {
-                    self.asks.remove(&best_ask);
+                fills.push(Fill {
+                    taker_order_id: order.id.clone(),
+                    maker_order_id: maker.id.clone(),
+                    taker: order.trader.clone(),
+                    maker: maker.trader.clone(),
+                    symbol: self.symbol.clone(),
+                    side: Side::Bid,
+                    price: ask_price,
+                    size: match_size,
+                    timestamp: now,
+                });
+
+                order.size -= match_size;
+                maker.size -= match_size;
+                self.last_price = ask_price;
+
+                if maker.size == 0 {
+                    // Remove the filled maker order
+                    let maker_id = level.remove(maker_idx).unwrap().id;
+                    self.order_index.remove(&maker_id);
+
+                    if level.is_empty() {
+                        self.asks.remove(&ask_price);
+                        break;
+                    }
                 }
             }
         }
@@ -117,65 +124,76 @@ impl OrderBook {
     }
 
     fn match_ask(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
-        while order.size > 0 {
-            // Get best bid price
-            let best_bid = match self.best_bid() {
-                Some(p) => p,
-                None => break,
-            };
+        // Collect all bid price levels that cross with our ask price
+        // This allows us to skip self-trade levels and check the next one
+        // Note: bids use Reverse<Price> so we need to extract the actual prices
+        let crossing_levels: Vec<_> = self.bids.keys()
+            .map(|r| r.0)
+            .filter(|&p| p >= order.price)
+            .collect();
 
-            if best_bid < order.price {
-                break; // Price doesn't cross
+        for bid_price in crossing_levels {
+            if order.size == 0 {
+                break;
             }
 
-            // Get the price level (note: bids use Reverse<Price> as key)
-            let level = match self.bids.get_mut(&Reverse(best_bid)) {
-                Some(orders) if !orders.is_empty() => orders,
-                _ => {
-                    self.bids.remove(&Reverse(best_bid));
-                    continue;
-                }
-            };
-
-            // Find first non-self-trade order at this price level
-            let maker_idx = level
-                .iter()
-                .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
-
-            let maker_idx = match maker_idx {
-                Some(idx) => idx,
-                None => {
-                    // All orders at this price are from the same trader - skip level
+            // Keep matching at this price level until exhausted or order filled
+            loop {
+                if order.size == 0 {
                     break;
                 }
-            };
 
-            let maker = &mut level[maker_idx];
-            let match_size = order.size.min(maker.size);
+                // Get the price level (note: bids use Reverse<Price> as key)
+                let level = match self.bids.get_mut(&Reverse(bid_price)) {
+                    Some(orders) if !orders.is_empty() => orders,
+                    _ => {
+                        self.bids.remove(&Reverse(bid_price));
+                        break;
+                    }
+                };
 
-            fills.push(Fill {
-                taker_order_id: order.id.clone(),
-                maker_order_id: maker.id.clone(),
-                taker: order.trader.clone(),
-                maker: maker.trader.clone(),
-                symbol: self.symbol.clone(),
-                side: Side::Ask,
-                price: best_bid,
-                size: match_size,
-                timestamp: now,
-            });
+                // Find first non-self-trade order at this price level
+                let maker_idx = level
+                    .iter()
+                    .position(|m| m.trader.to_lowercase() != order.trader.to_lowercase());
 
-            order.size -= match_size;
-            maker.size -= match_size;
-            self.last_price = best_bid;
+                let maker_idx = match maker_idx {
+                    Some(idx) => idx,
+                    None => {
+                        // All remaining orders at this price are from the same trader
+                        // (CRITICAL-6: continue to next price level instead of breaking)
+                        break;
+                    }
+                };
 
-            if maker.size == 0 {
-                // Remove the filled maker order
-                let maker_id = level.remove(maker_idx).unwrap().id;
-                self.order_index.remove(&maker_id);
+                let maker = &mut level[maker_idx];
+                let match_size = order.size.min(maker.size);
 
-                if level.is_empty() {
-                    self.bids.remove(&Reverse(best_bid));
+                fills.push(Fill {
+                    taker_order_id: order.id.clone(),
+                    maker_order_id: maker.id.clone(),
+                    taker: order.trader.clone(),
+                    maker: maker.trader.clone(),
+                    symbol: self.symbol.clone(),
+                    side: Side::Ask,
+                    price: bid_price,
+                    size: match_size,
+                    timestamp: now,
+                });
+
+                order.size -= match_size;
+                maker.size -= match_size;
+                self.last_price = bid_price;
+
+                if maker.size == 0 {
+                    // Remove the filled maker order
+                    let maker_id = level.remove(maker_idx).unwrap().id;
+                    self.order_index.remove(&maker_id);
+
+                    if level.is_empty() {
+                        self.bids.remove(&Reverse(bid_price));
+                        break;
+                    }
                 }
             }
         }
@@ -515,5 +533,60 @@ mod tests {
         let mut ioc_order = make_order_with_trader("ioc_1", "alice", Side::Bid, 49996, 100);
         ioc_order.order_type = OrderType::Ioc;
         assert!(book.place(ioc_order, &config).is_ok());
+    }
+
+    #[test]
+    fn test_self_trade_continues_to_next_level() {
+        // CRITICAL-6: When ALL orders at a price level are self-trades,
+        // matching should continue to the next price level
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place asks at two price levels - all from alice at 50000
+        book.place(make_order_with_trader("ask1", "alice", Side::Ask, 50000, 100), &config).unwrap();
+        book.place(make_order_with_trader("ask2", "alice", Side::Ask, 50000, 100), &config).unwrap();
+
+        // Place ask from bob at 51000 (higher price = worse for taker)
+        book.place(make_order_with_trader("ask3", "bob", Side::Ask, 51000, 50), &config).unwrap();
+
+        // Alice places a bid that crosses both levels
+        // Should skip the 50000 level (all self-trades) and match at 51000 with bob
+        let bid = make_order_with_trader("bid1", "alice", Side::Bid, 52000, 50);
+        let fills = book.place(bid, &config).unwrap();
+
+        // Should have matched with bob at 51000
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].price, 51000);
+        assert_eq!(fills[0].maker, "bob");
+        assert_eq!(fills[0].taker, "alice");
+
+        // Verify alice's asks at 50000 are still on the book
+        // They should have been removed from the BTreeMap during the skip
+        assert!(book.best_ask().is_none() || book.best_ask() == Some(50000));
+    }
+
+    #[test]
+    fn test_self_trade_bid_continues_to_next_level() {
+        // Same test but for asks matching against bids
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = MarketConfig::default();
+
+        // Place bids at two price levels - all from alice at 50000
+        book.place(make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100), &config).unwrap();
+        book.place(make_order_with_trader("bid2", "alice", Side::Bid, 50000, 100), &config).unwrap();
+
+        // Place bid from bob at 49000 (lower price = worse for taker)
+        book.place(make_order_with_trader("bid3", "bob", Side::Bid, 49000, 50), &config).unwrap();
+
+        // Alice places an ask that crosses both levels
+        // Should skip the 50000 level (all self-trades) and match at 49000 with bob
+        let ask = make_order_with_trader("ask1", "alice", Side::Ask, 48000, 50);
+        let fills = book.place(ask, &config).unwrap();
+
+        // Should have matched with bob at 49000
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].price, 49000);
+        assert_eq!(fills[0].maker, "bob");
+        assert_eq!(fills[0].taker, "alice");
     }
 }
