@@ -311,6 +311,57 @@ const orderbook = useTradingStore(
 
 ---
 
+## Performance for High-Frequency Updates
+
+Trading UI receives 10+ updates/sec. Combine store selectors with `memo()`:
+
+### Pattern
+
+```typescript
+import { memo, useMemo, useCallback } from 'react'
+import { useTradingStore } from '@/lib/store'
+
+function OrderbookInner() {
+  // Selector - only re-render when orderbook changes
+  const orderbook = useTradingStore(state => state.orderbook)
+
+  // Memoize expensive calculations
+  const bidsWithTotal = useMemo(() => {
+    let cumulative = 0
+    return orderbook.bids.map(bid => {
+      cumulative += bid.size
+      return { ...bid, total: cumulative }
+    })
+  }, [orderbook.bids])
+
+  // Stable callback references
+  const handleClick = useCallback((price: number) => {
+    console.log('clicked:', price)
+  }, [])
+
+  return (
+    <div>
+      {bidsWithTotal.map((bid, i) => (
+        <MemoizedRow key={i} bid={bid} onClick={handleClick} />
+      ))}
+    </div>
+  )
+}
+
+// Wrap with memo to prevent parent re-renders
+export const Orderbook = memo(OrderbookInner)
+```
+
+### Checklist for Trading Components
+
+1. **Use selectors** - `useTradingStore(s => s.orderbook)` not `useTradingStore()`
+2. **Wrap with memo()** - Prevents re-renders from parent state changes
+3. **useMemo derived data** - Totals, max values, groupings
+4. **useCallback handlers** - Stable refs for memoized children
+5. **Extract row components** - Memoize individual list items
+
+---
+
 **Related Files:**
 - [../SKILL.md](../SKILL.md) - Main skill guide
 - [COMPONENTS.md](COMPONENTS.md) - Using stores in components

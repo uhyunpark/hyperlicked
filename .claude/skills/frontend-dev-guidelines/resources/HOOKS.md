@@ -1,13 +1,91 @@
 # React Hook Patterns
 
-Reference for useCallback, useEffect, and useRef patterns.
+Reference for useCallback, useEffect, useMemo, and useRef patterns.
 
 ## Table of Contents
 
+- [useMemo](#usememo)
 - [useCallback](#usecallback)
 - [useEffect](#useeffect)
 - [useRef](#useref)
 - [Custom Hooks](#custom-hooks)
+
+---
+
+## useMemo
+
+### When to Use
+
+- Expensive calculations (O(N) or higher)
+- Derived data from props/state
+- Reference equality for memo() children
+- Data transformations on high-frequency updates
+
+### Expensive Calculations
+
+```typescript
+// Bad: O(N²) runs on every render
+const bidsWithTotal = orderbook.bids.map((bid, i) => ({
+  ...bid,
+  total: orderbook.bids.slice(0, i + 1).reduce((sum, b) => sum + b.size, 0)
+}))
+
+// Good: O(N) single pass, only recalculates when bids change
+const bidsWithTotal = useMemo(() => {
+  let cumulative = 0
+  return orderbook.bids.map(bid => {
+    cumulative += bid.size
+    return { ...bid, total: cumulative }
+  })
+}, [orderbook.bids])
+```
+
+### Derived Values
+
+```typescript
+// Max value for visualization
+const maxSize = useMemo(() => {
+  const maxBid = Math.max(...bids.map(b => b.size), 1)
+  const maxAsk = Math.max(...asks.map(a => a.size), 1)
+  return Math.max(maxBid, maxAsk)
+}, [bids, asks])
+
+// Spread calculation
+const spreadInfo = useMemo(() => {
+  const bestBid = bids[0]?.price ?? null
+  const bestAsk = asks[0]?.price ?? null
+  const hasSpread = bestBid !== null && bestAsk !== null
+  const spread = hasSpread ? bestAsk - bestBid : 0
+  return { bestBid, bestAsk, hasSpread, spread }
+}, [bids, asks])
+```
+
+### Grouping Data
+
+```typescript
+// Group trigger orders by symbol
+const triggersBySymbol = useMemo(() => {
+  const bySymbol: Record<string, Triggers> = {}
+  for (const trigger of triggerOrders) {
+    if (trigger.status !== 'pending') continue
+    if (!bySymbol[trigger.symbol]) {
+      bySymbol[trigger.symbol] = {}
+    }
+    bySymbol[trigger.symbol][trigger.triggerType] = trigger
+  }
+  return bySymbol
+}, [triggerOrders])
+```
+
+### When NOT to Use
+
+```typescript
+// Don't memoize simple values
+const isLong = position.size > 0  // No useMemo needed
+
+// Don't memoize if deps change frequently
+const formatted = useMemo(() => price.toFixed(2), [price])  // Overkill
+```
 
 ---
 

@@ -299,6 +299,7 @@ pub struct Safety {
     last_voted_view: View,
     locked_qc: Option<Certificate>,
     high_qc: Option<Certificate>,
+    voted_views: HashSet<View>,  // PERSISTED - prevents double-voting after crash
 }
 
 impl Safety {
@@ -318,6 +319,68 @@ impl Safety {
 
         true
     }
+}
+```
+
+---
+
+## Security Patterns
+
+### Vote Rate Limiting
+
+Prevents DoS via vote spam:
+
+```rust
+// In aggregator.rs
+pub struct VoteRateLimiter {
+    windows: HashMap<NodeId, VecDeque<Instant>>,
+    max_per_second: usize,  // Default: 10
+}
+
+impl VoteAggregator {
+    pub fn add_vote(&mut self, vote: Vote) -> Option<Certificate> {
+        // Check rate limit BEFORE processing
+        if let Err(e) = self.rate_limiter.check_and_record(&vote.voter) {
+            tracing::warn!("Rate limited vote from {}", hash_short(&vote.voter));
+            return None;
+        }
+        // ... process vote
+    }
+}
+```
+
+### Safety Persistence
+
+**CRITICAL**: voted_views MUST be persisted to prevent double-voting after crash:
+
+```rust
+// In runner.rs - after every vote
+fn on_vote(&mut self, vote: Vote) {
+    self.safety.record_vote(vote.view);
+
+    // Persist immediately - panic on failure to prevent double-vote
+    if let Err(e) = self.persist_consensus_state() {
+        panic!("CRITICAL: Failed to persist voted_views: {}", e);
+    }
+}
+```
+
+### Network Authentication
+
+TCP connections require BLS-authenticated handshakes in production:
+
+```rust
+// In network/mod.rs
+pub struct NetworkConfig {
+    pub require_authenticated_peers: bool,  // false in dev, true otherwise
+    pub bls_secret_key: Option<BlsSecretKey>,
+    pub validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
+}
+
+// In transport.rs - reject unauthenticated connections
+if handshake_config.require_auth && !handshake_result.authenticated {
+    warn!("Rejecting unauthenticated peer");
+    return;
 }
 ```
 

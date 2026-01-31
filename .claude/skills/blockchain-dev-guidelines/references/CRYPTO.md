@@ -380,6 +380,107 @@ impl SignedOrder {
 
 ---
 
+## WebSocket Authentication
+
+WebSocket user subscriptions require signature verification in production:
+
+### Personal_Sign for Subscriptions
+
+```rust
+// In api/websocket.rs
+// Message format: "Subscribe to {address} at {timestamp}"
+
+async fn verify_subscription_auth(
+    address: &str,
+    signature: &Option<String>,
+    timestamp: &Option<u64>,
+    agent: &Option<String>,  // Optional: agent address if using agent key
+    api_state: &ApiState,
+) -> bool {
+    // Dev mode: no auth required
+    if Config::global().mode == Mode::Dev {
+        return true;
+    }
+
+    // Verify timestamp freshness (5 min window)
+    let now = current_timestamp();
+    if now.abs_diff(*timestamp) > 300 {
+        return false;
+    }
+
+    // Create EIP-191 message hash
+    let message = format!("Subscribe to {} at {}", address, timestamp);
+    let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
+    let hash = keccak256(prefixed.as_bytes());
+
+    // Recover signer
+    let recovered = ecrecover(&hash, &signature)?;
+
+    // Case 1: Signed by wallet directly
+    if recovered == address {
+        return true;
+    }
+
+    // Case 2: Signed by delegated agent key
+    if let Some(agent_addr) = agent {
+        if recovered == agent_addr {
+            // Verify agent has valid delegation for this wallet
+            let delegations = api_state.delegations.read().await;
+            if let Some(stored) = delegations.get(&address.to_lowercase()) {
+                if stored.delegation.agent == agent_addr
+                    && !stored.delegation.is_expired() {
+                    return true;  // Valid agent signature
+                }
+            }
+        }
+    }
+
+    false
+}
+```
+
+### Frontend Usage
+
+```typescript
+// Using agent key (no popup)
+const message = `Subscribe to ${address} at ${timestamp}`;
+const signature = await agentSigner.signMessage(message);
+
+ws.send(JSON.stringify({
+  op: 'subscribe',
+  address,
+  signature,
+  timestamp,
+  agent: agentSigner.address  // Tell server to check delegation
+}));
+```
+
+---
+
+## API Rate Limiting
+
+IP-based rate limiting for REST endpoints:
+
+```rust
+// In api/rate_limit.rs
+pub struct RateLimiter {
+    trading_limits: RwLock<HashMap<IpAddr, VecDeque<Instant>>>,
+    read_limits: RwLock<HashMap<IpAddr, VecDeque<Instant>>>,
+}
+
+// Limits by endpoint type:
+// - Trading (orders, cancels): 100 req/min
+// - Read (orderbook, account): 1000 req/min
+// - Heavy (sync, snapshots): 20 req/min
+
+// Response headers:
+// X-RateLimit-Limit: 100
+// X-RateLimit-Remaining: 42
+// Retry-After: 30 (when limited)
+```
+
+---
+
 **Related Files:**
 - [../SKILL.md](../SKILL.md) - Main skill guide
 - [CONSENSUS.md](CONSENSUS.md) - Vote signatures

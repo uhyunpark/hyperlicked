@@ -310,7 +310,79 @@ export default function RootLayout({
 
 ---
 
+## Performance Patterns
+
+### React.memo for High-Frequency Updates
+
+Trading components receive 10+ updates/sec. Use `memo()` to prevent unnecessary re-renders:
+
+```typescript
+import { memo, useCallback, useMemo } from 'react'
+
+// Wrap component to prevent parent re-renders from propagating
+const OrderbookRow = memo(function OrderbookRow({
+  level,
+  side,
+  maxSize,
+  onClick
+}: Props) {
+  // Stable callback references
+  const handleClick = useCallback(() => {
+    onClick?.(level.price)
+  }, [onClick, level.price])
+
+  return (
+    <div onClick={handleClick}>
+      {level.price.toFixed(2)}
+    </div>
+  )
+})
+
+// Export memoized component
+export const Orderbook = memo(OrderbookInner)
+```
+
+### useMemo for Expensive Calculations
+
+```typescript
+// Bad: O(N²) - recalculates every render
+const bidsWithTotal = orderbook.bids.map((bid, i) => ({
+  ...bid,
+  total: orderbook.bids.slice(0, i + 1).reduce((sum, b) => sum + b.size, 0)
+}))
+
+// Good: O(N) - memoized with single pass
+const bidsWithTotal = useMemo(() => {
+  let cumulative = 0
+  return orderbook.bids.map(bid => {
+    cumulative += bid.size
+    return { ...bid, total: cumulative }
+  })
+}, [orderbook.bids])
+```
+
+### When to Use memo()
+
+| Component | Use memo? | Why |
+|-----------|-----------|-----|
+| OrderbookRow | Yes | Renders 30+ times, high frequency |
+| TradeRow | Yes | Renders in list, frequent updates |
+| Positions | Yes | Prevents parent re-renders |
+| OpenOrders | Yes | Prevents parent re-renders |
+| TradePanel | No | User input, needs re-renders |
+| Header | No | Low update frequency |
+
+### Memoization Checklist
+
+1. **Wrap list item components** with `memo()`
+2. **Use `useMemo`** for derived data (totals, max values)
+3. **Use `useCallback`** for handlers passed to memoized children
+4. **Extract sub-components** when only part needs to update
+
+---
+
 **Related Files:**
 - [../SKILL.md](../SKILL.md) - Main skill guide
 - [STATE.md](STATE.md) - Zustand integration
 - [STYLING.md](STYLING.md) - Tailwind patterns
+- [HOOKS.md](HOOKS.md) - Hook patterns including useMemo

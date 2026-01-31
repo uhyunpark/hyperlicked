@@ -57,6 +57,28 @@ Remaining critical issues from comprehensive review:
 
 See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
 
+### Security Hardening for Multi-Node (2026-01-31) ✅
+
+Production security hardening before testnet deployment:
+
+**Consensus Safety:**
+- **Vote rate limiting enforced** - `VoteRateLimiter` in aggregator.rs with sliding window (10 votes/sec/validator)
+- **Safety persistence verified** - voted_views already persisted on every vote with panic on failure
+
+**Network Security:**
+- **TCP authentication** - BLS-authenticated handshakes via `handshake.rs`, rejects unauthenticated peers in non-dev mode
+- **NetworkConfig.require_authenticated_peers** - Default false in dev, true in testnet/mainnet
+
+**API Security:**
+- **REST rate limiting** - IP-based limits: 100 req/min (trading), 1000 req/min (read), 20 req/min (sync)
+- **WebSocket authentication** - User subscriptions require EIP-191 signature in non-dev mode
+- **Agent key support** - WebSocket accepts agent key signatures (no extra MetaMask popup needed)
+
+**Orderbook Fix:**
+- **Self-trade continuation** - When all orders at a price level are self-trades, matching continues to next level
+
+All features disabled in dev mode for seamless local testing.
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints

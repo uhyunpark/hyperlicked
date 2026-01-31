@@ -183,7 +183,14 @@ const signature = await signer.signTypedData(
 
 ## Quick Reference
 
+### Performance Patterns (High-Frequency Updates)
+- `memo()` wrap components receiving 10+ updates/sec
+- `useMemo` for expensive calculations (O(N) cumulative totals)
+- `useCallback` for handlers passed to memoized children
+- Extract list items as separate memoized components
+
 ### Hook Patterns
+- `useMemo` for derived data and expensive calculations
 - `useCallback` for async operations with dependencies
 - `useEffect` for side effects (fetch, subscriptions)
 - `useRef` for WebSocket connections, timeout IDs
@@ -261,6 +268,8 @@ React hook patterns:
 4. **WebSocket cleanup** - Always return cleanup function from useEffect
 5. **Toast spam** - Debounce repeated notifications
 6. **Agent key expiry** - Check and refresh before signing
+7. **O(N²) calculations** - Use useMemo with O(N) algorithms for cumulative totals
+8. **Missing memo()** - High-frequency components need memo() to prevent re-renders
 
 ---
 
