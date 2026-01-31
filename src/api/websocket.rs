@@ -2,7 +2,16 @@
 //!
 //! Real-time streaming of orderbook updates, trades, and blocks.
 //! Supports user-specific subscriptions for fills and position updates.
+//!
+//! ## Authentication (CRITICAL-4)
+//!
+//! User subscriptions (fills, positions, orders) require EIP-712 signature
+//! to prove ownership of the subscribed address. This prevents attackers
+//! from spying on other users' trading activity.
+//!
+//! Public channels (orderbook, trades, blocks) do not require authentication.
 
+use alloy_primitives::{keccak256, Address};
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -10,11 +19,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::state::{Event, SharedState, UserEvent};
+use super::types::ApiState;
+use crate::config::{Config, Mode};
+use crate::crypto::recover_address;
 
 /// WebSocket connection handler
 pub struct WebSocketHandler;
 
-/// Client subscription request
+/// Client subscription request (unauthenticated - for public channels)
 #[derive(Debug, Deserialize)]
 struct SubscribeRequest {
     op: String,
@@ -22,11 +34,152 @@ struct SubscribeRequest {
     _channels: Vec<String>, // Reserved for future channel-specific subscriptions
     #[serde(default)]
     address: Option<String>,
+    /// EIP-712 signature proving ownership (required for user channels in non-dev mode)
+    /// Can be signed by the wallet OR by a delegated agent key
+    #[serde(default)]
+    signature: Option<String>,
+    /// Timestamp for replay protection (must be within 5 minutes)
+    #[serde(default)]
+    timestamp: Option<u64>,
+    /// Optional: agent address if signature is from an agent key
+    /// If provided, we verify the signature is from this agent AND that
+    /// this agent is delegated for the target address
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// CRITICAL-4: Verify subscription authentication.
+///
+/// User subscriptions require a signature to prove ownership.
+/// Signature can be from:
+/// 1. The wallet itself (direct ownership)
+/// 2. A delegated agent key (if agent is registered for this wallet)
+///
+/// The signed message format is: "Subscribe to {address} at {timestamp}"
+///
+/// Returns true if authentication passes or is not required (dev mode).
+async fn verify_subscription_auth(
+    address: &str,
+    signature: &Option<String>,
+    timestamp: &Option<u64>,
+    agent: &Option<String>,
+    api_state: &ApiState,
+) -> bool {
+    // In dev mode, allow unauthenticated subscriptions for testing
+    if Config::global().mode == Mode::Dev {
+        debug!(address, "Dev mode: allowing unauthenticated subscription");
+        return true;
+    }
+
+    // Require signature and timestamp in non-dev mode
+    let (signature, timestamp) = match (signature, timestamp) {
+        (Some(sig), Some(ts)) => (sig, ts),
+        _ => {
+            warn!(address, "Subscription rejected: missing signature or timestamp");
+            return false;
+        }
+    };
+
+    // Verify timestamp is within 5 minutes (replay protection)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    if now.abs_diff(*timestamp) > 300 {
+        warn!(address, timestamp, now, "Subscription rejected: timestamp too old");
+        return false;
+    }
+
+    // Parse the wallet address
+    let wallet_address = match address.parse::<Address>() {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(address, "Subscription rejected: invalid address format");
+            return false;
+        }
+    };
+
+    // Decode signature (hex string to bytes)
+    let sig_bytes = match hex::decode(signature.trim_start_matches("0x")) {
+        Ok(bytes) if bytes.len() == 65 => bytes,
+        _ => {
+            warn!(address, "Subscription rejected: invalid signature format");
+            return false;
+        }
+    };
+
+    // Create the message hash (EIP-191 personal_sign format)
+    // Message: "Subscribe to {address} at {timestamp}"
+    let message = format!("Subscribe to {} at {}", address, timestamp);
+    let prefixed_message = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
+    let message_hash: [u8; 32] = keccak256(prefixed_message.as_bytes()).into();
+
+    // Recover signer address
+    let recovered = match recover_address(&message_hash, &sig_bytes) {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!(address, error = %e, "Subscription rejected: signature recovery failed");
+            return false;
+        }
+    };
+
+    // Case 1: Direct wallet signature
+    if recovered == wallet_address {
+        debug!(address, "Subscription authenticated by wallet");
+        return true;
+    }
+
+    // Case 2: Agent key signature - verify delegation exists
+    if let Some(agent_addr) = agent {
+        if let Ok(expected_agent) = agent_addr.parse::<Address>() {
+            if recovered == expected_agent {
+                // Check if this agent is delegated for this wallet
+                let delegations = api_state.delegations.read().await;
+                let now_ms = now * 1000;
+
+                // Look for a valid delegation from wallet to this agent
+                // Delegations are keyed by "{wallet}-{nonce}", so we need to iterate
+                // to find any valid delegation for this wallet/agent pair
+                let found_valid = delegations.values().any(|stored| {
+                    stored.delegation.wallet == wallet_address
+                        && stored.delegation.agent == expected_agent
+                        && !stored.delegation.is_expired_at(now_ms)
+                });
+
+                if found_valid {
+                    debug!(
+                        address,
+                        agent = %agent_addr,
+                        "Subscription authenticated by agent key"
+                    );
+                    return true;
+                }
+
+                warn!(
+                    address,
+                    agent = %agent_addr,
+                    "Subscription rejected: no valid delegation for agent"
+                );
+                return false;
+            }
+        }
+    }
+
+    warn!(
+        address,
+        recovered = %recovered,
+        "Subscription rejected: signature from unrecognized address"
+    );
+    false
 }
 
 /// Handle WebSocket connection
-pub async fn handle_socket(socket: WebSocket, state: SharedState) {
+pub async fn handle_socket(socket: WebSocket, api_state: ApiState) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Get shared state reference for convenience
+    let state = &api_state.shared;
 
     // Subscribe to public events
     let mut public_rx = state.subscribe();
@@ -93,17 +246,35 @@ pub async fn handle_socket(socket: WebSocket, state: SharedState) {
                             if req.op == "subscribe" {
                                 // Subscribe to user events if address provided
                                 if let Some(addr) = req.address {
-                                    info!(address = %addr, "User subscribing to personal events");
-                                    user_address = Some(addr.clone());
-                                    user_rx = Some(state.subscribe_user(&addr).await);
+                                    // CRITICAL-4: Verify ownership of the address
+                                    // Accepts wallet signature OR agent key signature
+                                    if verify_subscription_auth(
+                                        &addr,
+                                        &req.signature,
+                                        &req.timestamp,
+                                        &req.agent,
+                                        &api_state,
+                                    ).await {
+                                        info!(address = %addr, "User subscribing to personal events");
+                                        user_address = Some(addr.clone());
+                                        user_rx = Some(state.subscribe_user(&addr).await);
 
-                                    // Send confirmation
-                                    let confirm = serde_json::json!({
-                                        "type": "subscribed",
-                                        "channel": "user",
-                                        "address": addr
-                                    });
-                                    let _ = msg_tx_clone.send(confirm.to_string());
+                                        // Send confirmation
+                                        let confirm = serde_json::json!({
+                                            "type": "subscribed",
+                                            "channel": "user",
+                                            "address": addr
+                                        });
+                                        let _ = msg_tx_clone.send(confirm.to_string());
+                                    } else {
+                                        // Send authentication error
+                                        let error = serde_json::json!({
+                                            "type": "error",
+                                            "code": "AUTH_REQUIRED",
+                                            "message": "User subscription requires signature (wallet or agent key)"
+                                        });
+                                        let _ = msg_tx_clone.send(error.to_string());
+                                    }
                                 }
                             } else if req.op == "unsubscribe" {
                                 if req.address.is_some() {
