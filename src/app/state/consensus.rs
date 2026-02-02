@@ -516,9 +516,65 @@ impl AppHook for AppState {
             &self.mark_prices,
             max_liquidations,
         );
-        let liquidations = liquidation_batch.results;
+        self.pending_liquidations = liquidation_batch.results;
 
-        // Process liquidation results with ADL check
+        // Process liquidation results with ADL if needed
+        self.process_liquidations_with_adl();
+
+        // === Funding Rate Logic ===
+        self.process_funding();
+
+        // === Trigger Order Processing ===
+        // Check and execute trigger orders after all transactions are processed
+        let trigger_fills = self.process_triggers();
+        self.pending_fills.extend(trigger_fills);
+
+        // Return state hash for Byzantine detection
+        self.compute_state_hash()
+    }
+}
+
+impl AppState {
+    /// Mark an account as dirty for incremental hashing
+    #[cfg(feature = "incremental_hash")]
+    pub(crate) fn mark_dirty_account(&mut self, address: &str) {
+        self.incremental_hasher.mark_dirty_account(address);
+    }
+
+    /// Mark all accounts as dirty (e.g., after funding)
+    #[cfg(feature = "incremental_hash")]
+    pub(crate) fn mark_all_accounts_dirty(&mut self) {
+        self.incremental_hasher.mark_all_accounts_dirty();
+    }
+
+    /// Mark global state as dirty
+    #[cfg(feature = "incremental_hash")]
+    pub(crate) fn mark_globals_dirty(&mut self) {
+        self.incremental_hasher.mark_globals_dirty();
+    }
+
+    /// No-op when incremental_hash disabled
+    #[cfg(not(feature = "incremental_hash"))]
+    pub(crate) fn mark_dirty_account(&mut self, _address: &str) {}
+
+    #[cfg(not(feature = "incremental_hash"))]
+    pub(crate) fn mark_all_accounts_dirty(&mut self) {}
+
+    #[cfg(not(feature = "incremental_hash"))]
+    pub(crate) fn mark_globals_dirty(&mut self) {}
+
+    /// Process liquidation results with ADL (auto-deleveraging) if needed
+    ///
+    /// For each liquidation:
+    /// 1. Calculate total loss (position PnL + underwater amount)
+    /// 2. If loss, check if ADL is needed (insurance fund insufficient)
+    /// 3. ADL absorbs losses from profitable counter-parties
+    /// 4. Remaining loss goes to insurance fund
+    /// 5. Remaining balance from liquidated account goes to insurance fund
+    fn process_liquidations_with_adl(&mut self) {
+        // Take ownership of pending_liquidations to avoid borrow issues
+        let liquidations = std::mem::take(&mut self.pending_liquidations);
+
         for liq in &liquidations {
             // Calculate total loss for ADL consideration:
             // - Position PnL (negative = loss)
@@ -572,6 +628,8 @@ impl AppHook for AppState {
                 }
             }
         }
+
+        // Restore the liquidations for event emission
         self.pending_liquidations = liquidations;
 
         // CRITICAL-5: Ensure insurance fund never goes negative after ADL processing.
@@ -593,48 +651,7 @@ impl AppHook for AppState {
                 "Insurance fund below warning threshold"
             );
         }
-
-        // === Funding Rate Logic ===
-        self.process_funding();
-
-        // === Trigger Order Processing ===
-        // Check and execute trigger orders after all transactions are processed
-        let trigger_fills = self.process_triggers();
-        self.pending_fills.extend(trigger_fills);
-
-        // Return state hash for Byzantine detection
-        self.compute_state_hash()
     }
-}
-
-impl AppState {
-    /// Mark an account as dirty for incremental hashing
-    #[cfg(feature = "incremental_hash")]
-    pub(crate) fn mark_dirty_account(&mut self, address: &str) {
-        self.incremental_hasher.mark_dirty_account(address);
-    }
-
-    /// Mark all accounts as dirty (e.g., after funding)
-    #[cfg(feature = "incremental_hash")]
-    pub(crate) fn mark_all_accounts_dirty(&mut self) {
-        self.incremental_hasher.mark_all_accounts_dirty();
-    }
-
-    /// Mark global state as dirty
-    #[cfg(feature = "incremental_hash")]
-    pub(crate) fn mark_globals_dirty(&mut self) {
-        self.incremental_hasher.mark_globals_dirty();
-    }
-
-    /// No-op when incremental_hash disabled
-    #[cfg(not(feature = "incremental_hash"))]
-    pub(crate) fn mark_dirty_account(&mut self, _address: &str) {}
-
-    #[cfg(not(feature = "incremental_hash"))]
-    pub(crate) fn mark_all_accounts_dirty(&mut self) {}
-
-    #[cfg(not(feature = "incremental_hash"))]
-    pub(crate) fn mark_globals_dirty(&mut self) {}
 
     /// Process funding rate sampling and application
     fn process_funding(&mut self) {
