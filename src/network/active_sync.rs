@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -237,8 +238,13 @@ pub enum SyncResult {
     SyncedBlocks { from: u64, to: u64 },
     /// Synced via snapshot + blocks
     SyncedSnapshot { snapshot_height: u64, blocks_to: u64 },
-    /// Sync failed
+    /// Sync failed (transient error, will retry)
     Failed(String),
+    /// State corruption detected (app_hash mismatch after valid QC)
+    ///
+    /// This is a critical error requiring operator intervention.
+    /// The node should NOT process further blocks.
+    StateCorrupted(String),
 }
 
 /// Active sync client configuration
@@ -296,10 +302,16 @@ impl ActiveSyncClient {
     /// Run the sync loop
     ///
     /// This function runs forever, polling peers and syncing when behind.
+    ///
+    /// # Arguments
+    /// * `app` - Application state to update
+    /// * `store` - Optional persistent storage
+    /// * `state_corrupted` - Optional flag to set on Byzantine detection (app_hash mismatch)
     pub async fn run(
         &mut self,
         app: Arc<RwLock<AppState>>,
         store: Option<Arc<dyn PersistentStore + Send + Sync>>,
+        state_corrupted: Option<Arc<AtomicBool>>,
     ) {
         if self.config.peers.is_empty() {
             warn!("No peers configured for sync, sync client inactive");
@@ -313,6 +325,20 @@ impl ActiveSyncClient {
         );
 
         loop {
+            // Check if state is corrupted - stop syncing if so
+            if let Some(ref flag) = state_corrupted {
+                if flag.load(Ordering::Relaxed) {
+                    warn!(
+                        "State is corrupted - sync loop halted. \
+                         Operator intervention required: resync from trusted snapshot \
+                         or investigate potential Byzantine network."
+                    );
+                    // Keep sleeping but don't process blocks
+                    tokio::time::sleep(self.config.poll_interval).await;
+                    continue;
+                }
+            }
+
             // Get local height
             let local_height = {
                 let app = app.read().await;
@@ -332,7 +358,7 @@ impl ActiveSyncClient {
 
                         // Perform sync
                         let result = self
-                            .catch_up(&peer, local_height, network_height, &app, &store)
+                            .catch_up(&peer, local_height, network_height, &app, &store, &state_corrupted)
                             .await;
 
                         match result {
@@ -350,6 +376,10 @@ impl ActiveSyncClient {
                             }
                             SyncResult::Failed(err) => {
                                 error!(error = %err, "Sync failed");
+                            }
+                            SyncResult::StateCorrupted(err) => {
+                                error!(error = %err, "State corruption detected - halting sync");
+                                // The flag is already set by catch_up_blocks
                             }
                         }
                     } else {
@@ -680,18 +710,19 @@ impl ActiveSyncClient {
         network_height: u64,
         app: &Arc<RwLock<AppState>>,
         store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
+        state_corrupted: &Option<Arc<AtomicBool>>,
     ) -> SyncResult {
         let behind = network_height.saturating_sub(local_height);
 
         // If far behind, use snapshot
         if behind > self.config.snapshot_threshold {
             return self
-                .catch_up_from_snapshot(peer, network_height, app, store)
+                .catch_up_from_snapshot(peer, network_height, app, store, state_corrupted)
                 .await;
         }
 
         // Otherwise, just replay blocks
-        self.catch_up_blocks(peer, local_height + 1, network_height, app, store)
+        self.catch_up_blocks(peer, local_height + 1, network_height, app, store, state_corrupted)
             .await
     }
 
@@ -703,6 +734,7 @@ impl ActiveSyncClient {
         to: u64,
         app: &Arc<RwLock<AppState>>,
         store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
+        state_corrupted: &Option<Arc<AtomicBool>>,
     ) -> SyncResult {
         // Download blocks
         let blocks = match self.download_blocks(peer, from, to).await {
@@ -716,6 +748,9 @@ impl ActiveSyncClient {
 
         let first_height = blocks.first().map(|b| b.height).unwrap_or(from);
         let last_height = blocks.last().map(|b| b.height).unwrap_or(to);
+
+        // Track whether QC was verified (for Byzantine detection severity)
+        let qc_verified = !Config::global().skip_qc_verify;
 
         // Execute each block
         for block in &blocks {
@@ -733,18 +768,45 @@ impl ActiveSyncClient {
 
             // Verify app hash - reject on mismatch (Byzantine detection)
             if app_hash != block.app_hash {
-                error!(
-                    height = block.height,
-                    expected = %hex::encode(&block.app_hash[..4]),
-                    got = %hex::encode(&app_hash[..4]),
-                    "App hash mismatch during sync - rejecting block"
-                );
-                return SyncResult::Failed(format!(
+                let err_msg = format!(
                     "App hash mismatch at height {}: expected {}, got {}",
                     block.height,
                     hex::encode(&block.app_hash[..4]),
                     hex::encode(&app_hash[..4])
-                ));
+                );
+
+                if qc_verified {
+                    // CRITICAL: QC was valid but app_hash differs
+                    // This indicates either:
+                    // 1. This node's state is corrupt and needs resync
+                    // 2. The validator network is Byzantine (2f+1 colluding)
+                    error!(
+                        height = block.height,
+                        expected = %hex::encode(&block.app_hash[..4]),
+                        got = %hex::encode(&app_hash[..4]),
+                        "CRITICAL: App hash mismatch after valid QC! \
+                         This indicates either: \
+                         (1) This node's state is corrupt - resync from trusted snapshot, or \
+                         (2) The validator network is Byzantine (2f+1 colluding). \
+                         Node is now HALTED - operator intervention required."
+                    );
+
+                    // Set the corruption flag for API exposure
+                    if let Some(ref flag) = state_corrupted {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+
+                    return SyncResult::StateCorrupted(err_msg);
+                } else {
+                    // QC wasn't verified (dev mode), just log warning and fail
+                    warn!(
+                        height = block.height,
+                        expected = %hex::encode(&block.app_hash[..4]),
+                        got = %hex::encode(&app_hash[..4]),
+                        "App hash mismatch during sync (QC not verified - dev mode)"
+                    );
+                    return SyncResult::Failed(err_msg);
+                }
             }
 
             // Store block and consensus state
@@ -781,6 +843,7 @@ impl ActiveSyncClient {
         network_height: u64,
         app: &Arc<RwLock<AppState>>,
         store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
+        state_corrupted: &Option<Arc<AtomicBool>>,
     ) -> SyncResult {
         // Download snapshot
         let (snapshot_height, snapshot) = match self.download_snapshot(peer).await {
@@ -806,7 +869,7 @@ impl ActiveSyncClient {
         // Now replay blocks from snapshot to current
         if snapshot_height < network_height {
             let result = self
-                .catch_up_blocks(peer, snapshot_height + 1, network_height, app, store)
+                .catch_up_blocks(peer, snapshot_height + 1, network_height, app, store, state_corrupted)
                 .await;
 
             match result {
@@ -815,6 +878,7 @@ impl ActiveSyncClient {
                     blocks_to: to,
                 },
                 SyncResult::Failed(e) => SyncResult::Failed(e),
+                SyncResult::StateCorrupted(e) => SyncResult::StateCorrupted(e),
                 _ => SyncResult::SyncedSnapshot {
                     snapshot_height,
                     blocks_to: snapshot_height,
@@ -834,6 +898,16 @@ impl ActiveSyncClient {
         app: &Arc<RwLock<AppState>>,
         store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
     ) -> SyncResult {
+        self.sync_once_with_corruption_flag(app, store, &None).await
+    }
+
+    /// Sync once with corruption flag (non-blocking version)
+    pub async fn sync_once_with_corruption_flag(
+        &mut self,
+        app: &Arc<RwLock<AppState>>,
+        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
+        state_corrupted: &Option<Arc<AtomicBool>>,
+    ) -> SyncResult {
         if self.config.peers.is_empty() {
             return SyncResult::Failed("No peers configured".to_string());
         }
@@ -846,7 +920,7 @@ impl ActiveSyncClient {
         match self.get_network_height().await {
             Ok((peer, network_height)) => {
                 if network_height > local_height {
-                    self.catch_up(&peer, local_height, network_height, app, store)
+                    self.catch_up(&peer, local_height, network_height, app, store, state_corrupted)
                         .await
                 } else {
                     SyncResult::AlreadySynced

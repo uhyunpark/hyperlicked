@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::app::AppState;
@@ -514,6 +515,15 @@ pub struct SharedState {
     pub events: broadcast::Sender<Event>,
     /// User-specific event registry
     pub users: Arc<UserRegistry>,
+    /// State corruption flag (set when app_hash mismatch detected)
+    ///
+    /// When true, the node detected an app_hash mismatch after a valid QC,
+    /// indicating either:
+    /// 1. This node's state is corrupt and needs resync
+    /// 2. The validator network is Byzantine (2f+1 colluding)
+    ///
+    /// The node should NOT process further blocks until operator intervention.
+    pub state_corrupted: Arc<AtomicBool>,
 }
 
 impl SharedState {
@@ -524,7 +534,23 @@ impl SharedState {
             app: Arc::new(RwLock::new(app)),
             events,
             users: Arc::new(UserRegistry::new()),
+            state_corrupted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Check if state is corrupted (Byzantine detection triggered)
+    ///
+    /// When true, the node detected an app_hash mismatch after a valid QC.
+    /// The node should NOT process further blocks until operator intervention.
+    pub fn is_state_corrupted(&self) -> bool {
+        self.state_corrupted.load(Ordering::Relaxed)
+    }
+
+    /// Mark state as corrupted
+    ///
+    /// Called when app_hash mismatch is detected after a valid QC.
+    pub fn set_state_corrupted(&self) {
+        self.state_corrupted.store(true, Ordering::Relaxed);
     }
 
     /// Broadcast an event to all WebSocket clients

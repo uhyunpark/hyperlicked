@@ -22,15 +22,17 @@ pub async fn get_chain_status(State(state): State<ApiState>) -> Json<ChainStatus
 /// Health check endpoint with detailed node status
 ///
 /// Returns:
-/// - status: "healthy" or "degraded"
+/// - status: "healthy", "degraded", or "corrupted"
 /// - height: Current committed block height
 /// - view: Current consensus view
 /// - mempool_size: Pending transactions
 /// - persistence: Whether DATA_DIR is configured
+/// - state_corrupted: Whether Byzantine detection triggered (app_hash mismatch)
 ///
-/// Note: Consensus-level corruption detection is not exposed here
-/// as the API layer doesn't have direct access to the consensus engine.
-/// For full Byzantine detection, monitor the node logs for state corruption warnings.
+/// When state_corrupted is true, operator intervention is required.
+/// The node detected an app_hash mismatch after a valid QC, indicating either:
+/// 1. This node's state is corrupt and needs resync from a trusted snapshot
+/// 2. The validator network is Byzantine (2f+1 colluding)
 pub async fn get_node_health(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let app = state.shared.app.read().await;
     let (b0, b1, b2) = app.mempool_stats();
@@ -39,15 +41,23 @@ pub async fn get_node_health(State(state): State<ApiState>) -> Json<serde_json::
     // Check if persistence is configured
     let is_persistent = crate::config::Config::global().data_dir.is_some();
 
-    // Basic health checks
-    let is_healthy = true; // App layer is always healthy if responding
+    // Check if state is corrupted (Byzantine detection)
+    let state_corrupted = state.shared.is_state_corrupted();
+
+    // Health status: corrupted > degraded > healthy
+    let status = if state_corrupted {
+        "corrupted"
+    } else {
+        "healthy"
+    };
 
     Json(serde_json::json!({
-        "status": if is_healthy { "healthy" } else { "degraded" },
+        "status": status,
         "height": app.committed_height(),
         "view": app.current_view(),
         "mempool_size": mempool_size,
         "persistence": is_persistent,
+        "state_corrupted": state_corrupted,
         "validators": app.staking().validators.len(),
         "active_validators": app.staking().active_validators().len(),
         "insurance_fund": app.insurance_fund_balance(),

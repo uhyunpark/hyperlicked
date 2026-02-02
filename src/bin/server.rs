@@ -1011,5 +1011,6 @@ async fn run_rpc_sync_loop(
     );
 
     let mut sync_client = ActiveSyncClient::new(sync_config);
-    sync_client.run(state.app.clone(), store).await;
+    // Pass the state corruption flag so sync can expose Byzantine detection via API
+    sync_client.run(state.app.clone(), store, Some(state.state_corrupted.clone())).await;
 }
