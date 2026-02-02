@@ -253,11 +253,23 @@ where
         committed
     }
 
-    /// Follower logic: wait for proposal, vote if safe
-    fn run_follower(&mut self, view: View) -> Option<Block> {
-        // In Phase 1 (single node), we're always leader
-        // This is placeholder for Phase 2
-        debug!(view, "Would run as follower (not implemented yet)");
+    /// Follower logic: no-op in tick-based execution
+    ///
+    /// In HotStuff-2, followers don't independently produce blocks. They:
+    /// 1. Wait for proposals from the leader (handled by network layer)
+    /// 2. Vote on valid proposals via `on_propose()` (called by ConsensusRunner)
+    /// 3. Commit when they see QCs (happens when processing leader blocks)
+    ///
+    /// This method intentionally returns None because:
+    /// - Single-node mode: We're always the leader, this path is never taken
+    /// - Multi-node mode: Follower voting is event-driven via `on_propose()`,
+    ///   not poll-based via `tick()`
+    ///
+    /// The `tick()` method exists primarily for leader block production and
+    /// observer block processing, not for follower logic.
+    fn run_follower(&mut self, _view: View) -> Option<Block> {
+        // Followers don't produce blocks in tick()
+        // Voting happens reactively via on_propose()
         None
     }
 
