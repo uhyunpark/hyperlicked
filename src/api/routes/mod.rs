@@ -72,6 +72,7 @@ pub fn create_router_with_store(
         )
         // Chain endpoints
         .route("/chain/status", get(chain::get_chain_status))
+        .route("/chain/health", get(chain::get_node_health))
         .route("/chain/insurance-fund", get(chain::get_insurance_fund))
         // Staking endpoints
         .route("/staking/validators", get(staking::get_validators))
