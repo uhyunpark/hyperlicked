@@ -7,6 +7,20 @@
 | [CLAUDE.md](../CLAUDE.md) | Project constitution and golden rules |
 | [Roadmap](blockchain/ROADMAP.md) | What's implemented, what's next |
 
+## API Reference
+
+| Document | Description |
+|----------|-------------|
+| [REST API](api/REST.md) | HTTP endpoints, request/response formats |
+| [WebSocket](api/WEBSOCKET.md) | Real-time streaming protocol |
+
+## Operations
+
+| Document | Description |
+|----------|-------------|
+| [Configuration](operations/CONFIGURATION.md) | Environment variables, production setup |
+| [Persistence](storage/PERSISTENCE.md) | RocksDB schema, snapshots, recovery |
+
 ## Technical Patterns (for AI)
 
 Technical patterns are in `.claude/skills/`:
