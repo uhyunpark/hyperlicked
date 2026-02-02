@@ -221,6 +221,27 @@ impl Transaction {
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         serde_json::from_slice(data).ok()
     }
+
+    /// Get the trader/operator address for per-address rate limiting
+    pub fn trader_address(&self) -> &Address {
+        match self {
+            Transaction::PlaceOrder { trader, .. } => trader,
+            Transaction::CancelOrder { trader, .. } => trader,
+            Transaction::Deposit { trader, .. } => trader,
+            Transaction::Withdraw { trader, .. } => trader,
+            Transaction::RegisterValidator { operator, .. } => operator,
+            Transaction::Delegate { delegator, .. } => delegator,
+            Transaction::Undelegate { delegator, .. } => delegator,
+            Transaction::ClaimUnstaked { delegator, .. } => delegator,
+            Transaction::ClaimRewards { claimant, .. } => claimant,
+            Transaction::Unjail { operator, .. } => operator,
+            Transaction::SubmitEvidence { submitter, .. } => submitter,
+            Transaction::PlaceTriggerOrder { trader, .. } => trader,
+            Transaction::CancelTriggerOrder { trader, .. } => trader,
+            Transaction::CancelTriggerOrderByCloid { trader, .. } => trader,
+            Transaction::OraclePriceUpdate { operator, .. } => operator,
+        }
+    }
 }
 
 /// Market configuration

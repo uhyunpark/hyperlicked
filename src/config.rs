@@ -148,6 +148,15 @@ pub struct Config {
 
     /// Maximum liquidations per block (circuit breaker)
     pub max_liquidations_per_block: usize,
+
+    /// Maximum pending transactions per bucket in mempool
+    pub mempool_max_per_bucket: usize,
+
+    /// Maximum age of mempool transactions before eviction (ms)
+    pub mempool_max_age_ms: u64,
+
+    /// Maximum pending transactions per address in mempool
+    pub mempool_max_per_address: usize,
 }
 
 impl Config {
@@ -230,6 +239,18 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100), // Default: 100 liquidations per block
+            mempool_max_per_bucket: std::env::var("MEMPOOL_MAX_PER_BUCKET")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10_000), // Default: 10,000 txs per bucket
+            mempool_max_age_ms: std::env::var("MEMPOOL_MAX_AGE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3_600_000), // Default: 1 hour
+            mempool_max_per_address: std::env::var("MEMPOOL_MAX_PER_ADDRESS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100), // Default: 100 pending txs per address
         }
     }
 

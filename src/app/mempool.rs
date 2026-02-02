@@ -12,7 +12,7 @@
 //! 2. `commit_proposal()` - removes committed txs by hash
 //! 3. `rollback_proposal()` - clears pending set on view change
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::Transaction;
 use crate::types::{Hash, View};
@@ -39,10 +39,21 @@ pub struct Mempool {
     pending_proposal: HashSet<Hash>,
     /// View number of the current proposal (for validation)
     proposal_view: View,
+    /// Per-address pending transaction count (anti-spam)
+    per_address_count: HashMap<String, usize>,
+    /// Maximum pending transactions per address
+    max_per_address: usize,
+    /// Maximum transaction age in milliseconds before eviction
+    max_age_ms: u64,
 }
 
 impl Mempool {
     pub fn new(max_per_bucket: usize) -> Self {
+        Self::with_config(max_per_bucket, 100, 3_600_000)
+    }
+
+    /// Create mempool with full configuration
+    pub fn with_config(max_per_bucket: usize, max_per_address: usize, max_age_ms: u64) -> Self {
         Self {
             bucket0: VecDeque::new(),
             bucket1: VecDeque::new(),
@@ -50,13 +61,33 @@ impl Mempool {
             max_per_bucket,
             pending_proposal: HashSet::new(),
             proposal_view: 0,
+            per_address_count: HashMap::new(),
+            max_per_address,
+            max_age_ms,
         }
+    }
+
+    /// Create mempool from global config
+    pub fn from_config() -> Self {
+        let config = crate::config::Config::global();
+        Self::with_config(
+            config.mempool_max_per_bucket,
+            config.mempool_max_per_address,
+            config.mempool_max_age_ms,
+        )
     }
 
     /// Add a transaction to the appropriate bucket
     pub fn add(&mut self, tx: Transaction, timestamp: u64) -> Result<Hash, MempoolError> {
         let hash = crate::types::hash(&tx.to_bytes());
         let bucket = tx.bucket();
+        let trader = tx.trader_address().to_string();
+
+        // Check per-address limit
+        let count = self.per_address_count.get(&trader).copied().unwrap_or(0);
+        if count >= self.max_per_address {
+            return Err(MempoolError::AddressLimitReached);
+        }
 
         let queue = match bucket {
             0 => &mut self.bucket0,
@@ -68,7 +99,15 @@ impl Mempool {
             return Err(MempoolError::BucketFull);
         }
 
-        queue.push_back(PendingTx { tx, hash, timestamp });
+        queue.push_back(PendingTx {
+            tx,
+            hash,
+            timestamp,
+        });
+
+        // Increment per-address count
+        *self.per_address_count.entry(trader).or_insert(0) += 1;
+
         Ok(hash)
     }
 
@@ -203,12 +242,7 @@ impl Mempool {
             return false;
         }
 
-        let hash_set: HashSet<_> = tx_hashes.iter().collect();
-
-        // Remove from all buckets
-        self.bucket0.retain(|p| !hash_set.contains(&p.hash));
-        self.bucket1.retain(|p| !hash_set.contains(&p.hash));
-        self.bucket2.retain(|p| !hash_set.contains(&p.hash));
+        self.remove_by_hashes(tx_hashes);
 
         // Clear pending set
         self.pending_proposal.clear();
@@ -219,15 +253,39 @@ impl Mempool {
     ///
     /// Use `commit_proposal` with view parameter for multi-node safety.
     pub fn commit_proposal_unchecked(&mut self, tx_hashes: &[Hash]) {
-        let hash_set: HashSet<_> = tx_hashes.iter().collect();
-
-        // Remove from all buckets
-        self.bucket0.retain(|p| !hash_set.contains(&p.hash));
-        self.bucket1.retain(|p| !hash_set.contains(&p.hash));
-        self.bucket2.retain(|p| !hash_set.contains(&p.hash));
+        self.remove_by_hashes(tx_hashes);
 
         // Clear pending set
         self.pending_proposal.clear();
+    }
+
+    /// Helper to remove transactions by hash and update per-address counts
+    fn remove_by_hashes(&mut self, tx_hashes: &[Hash]) {
+        let hash_set: HashSet<_> = tx_hashes.iter().collect();
+
+        // Collect addresses to decrement (to avoid borrow issues)
+        let mut to_decrement: Vec<String> = Vec::new();
+
+        for bucket in [&mut self.bucket0, &mut self.bucket1, &mut self.bucket2] {
+            bucket.retain(|p| {
+                if hash_set.contains(&p.hash) {
+                    to_decrement.push(p.tx.trader_address().to_string());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        // Decrement counts
+        for addr in to_decrement {
+            if let Some(count) = self.per_address_count.get_mut(&addr) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.per_address_count.remove(&addr);
+                }
+            }
+        }
     }
 
     /// Rollback a proposal on view change (two-phase: abort)
@@ -293,11 +351,62 @@ impl Mempool {
         // Check each bucket
         for bucket in [&mut self.bucket0, &mut self.bucket1, &mut self.bucket2] {
             if let Some(pos) = bucket.iter().position(|p| &p.hash == hash) {
-                bucket.remove(pos);
+                if let Some(removed) = bucket.remove(pos) {
+                    let addr = removed.tx.trader_address().to_string();
+                    if let Some(count) = self.per_address_count.get_mut(&addr) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            self.per_address_count.remove(&addr);
+                        }
+                    }
+                }
                 return true;
             }
         }
         false
+    }
+
+    /// Prune transactions older than max_age_ms
+    ///
+    /// Should be called at the start of each block to prevent stale tx accumulation.
+    /// Returns the number of transactions pruned.
+    pub fn prune_stale(&mut self, current_time: u64) -> usize {
+        if self.max_age_ms == 0 {
+            return 0; // Age eviction disabled
+        }
+
+        let cutoff = current_time.saturating_sub(self.max_age_ms);
+        let mut pruned = 0;
+        let mut to_decrement: Vec<String> = Vec::new();
+
+        for bucket in [&mut self.bucket0, &mut self.bucket1, &mut self.bucket2] {
+            let before = bucket.len();
+            bucket.retain(|p| {
+                if p.timestamp < cutoff {
+                    to_decrement.push(p.tx.trader_address().to_string());
+                    false
+                } else {
+                    true
+                }
+            });
+            pruned += before - bucket.len();
+        }
+
+        // Decrement counts
+        for addr in to_decrement {
+            if let Some(count) = self.per_address_count.get_mut(&addr) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.per_address_count.remove(&addr);
+                }
+            }
+        }
+
+        if pruned > 0 {
+            tracing::debug!(pruned, "Pruned stale transactions from mempool");
+        }
+
+        pruned
     }
 
     /// Clear all pending transactions
@@ -305,12 +414,13 @@ impl Mempool {
         self.bucket0.clear();
         self.bucket1.clear();
         self.bucket2.clear();
+        self.per_address_count.clear();
     }
 }
 
 impl Default for Mempool {
     fn default() -> Self {
-        Self::new(10000)
+        Self::new(10_000)
     }
 }
 
@@ -321,6 +431,8 @@ pub enum MempoolError {
     BucketFull,
     #[error("transaction already exists")]
     Duplicate,
+    #[error("address has too many pending transactions")]
+    AddressLimitReached,
 }
 
 #[cfg(test)]
@@ -432,5 +544,108 @@ mod tests {
 
         // 7 should remain
         assert_eq!(mempool.len(), 7);
+    }
+
+    #[test]
+    fn test_per_address_limit() {
+        // Max 3 pending txs per address
+        let mut mempool = Mempool::with_config(100, 3, 0);
+
+        // Add 3 txs from alice - should work
+        for i in 0..3 {
+            mempool.add(Transaction::Deposit {
+                trader: "alice".into(),
+                amount: 100 + i,
+            }, i as u64).unwrap();
+        }
+
+        // 4th tx from alice should fail
+        let result = mempool.add(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 200,
+        }, 4);
+        assert!(matches!(result, Err(MempoolError::AddressLimitReached)));
+
+        // But bob can still add
+        mempool.add(Transaction::Deposit {
+            trader: "bob".into(),
+            amount: 100,
+        }, 5).unwrap();
+    }
+
+    #[test]
+    fn test_per_address_count_tracking() {
+        let mut mempool = Mempool::with_config(100, 10, 0);
+
+        // Add 3 txs from alice
+        let mut hashes = Vec::new();
+        for i in 0..3 {
+            let hash = mempool.add(Transaction::Deposit {
+                trader: "alice".into(),
+                amount: 100 + i,
+            }, i as u64).unwrap();
+            hashes.push(hash);
+        }
+
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&3));
+
+        // Commit 2 txs
+        mempool.commit_proposal_unchecked(&hashes[0..2]);
+
+        // Count should decrement to 1
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&1));
+        assert_eq!(mempool.len(), 1);
+
+        // Remove last one
+        mempool.remove(&hashes[2]);
+        assert_eq!(mempool.per_address_count.get("alice"), None);
+    }
+
+    #[test]
+    fn test_age_eviction() {
+        // Max age: 1000ms
+        let mut mempool = Mempool::with_config(100, 100, 1000);
+
+        // Add old tx (timestamp 0)
+        mempool.add(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 100,
+        }, 0).unwrap();
+
+        // Add recent tx (timestamp 900)
+        mempool.add(Transaction::Deposit {
+            trader: "bob".into(),
+            amount: 200,
+        }, 900).unwrap();
+
+        assert_eq!(mempool.len(), 2);
+
+        // Prune at time 1001 (alice's tx is stale)
+        let pruned = mempool.prune_stale(1001);
+        assert_eq!(pruned, 1);
+        assert_eq!(mempool.len(), 1);
+
+        // Bob's tx should remain
+        let block = mempool.prepare_block(10);
+        assert_eq!(block.len(), 1);
+        if let Transaction::Deposit { trader, .. } = &block[0] {
+            assert_eq!(trader, "bob");
+        }
+    }
+
+    #[test]
+    fn test_age_eviction_disabled() {
+        // Max age: 0 = disabled
+        let mut mempool = Mempool::with_config(100, 100, 0);
+
+        mempool.add(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 100,
+        }, 0).unwrap();
+
+        // Should not prune even at very high time
+        let pruned = mempool.prune_stale(1_000_000_000);
+        assert_eq!(pruned, 0);
+        assert_eq!(mempool.len(), 1);
     }
 }

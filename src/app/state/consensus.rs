@@ -425,6 +425,9 @@ impl AppHook for AppState {
         self.current_view = block.view;
         self.committed_height = block.height;
 
+        // Prune stale transactions from mempool (age-based eviction)
+        self.mempool.prune_stale(block.timestamp);
+
         // Clear pending events from previous block
         self.pending_fills.clear();
         self.pending_order_updates.clear();
