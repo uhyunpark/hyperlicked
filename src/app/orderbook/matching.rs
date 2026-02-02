@@ -45,9 +45,13 @@ impl OrderBook {
     }
 
     fn match_bid(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
-        // Collect all ask price levels that cross with our bid price
-        // This allows us to skip self-trade levels and check the next one
-        let crossing_levels: Vec<_> = self.asks.keys().copied().filter(|&p| p <= order.price).collect();
+        // Find crossing ask price levels using take_while for early termination
+        // BTreeMap iterates keys in ascending order, so we take while price <= limit
+        // We must collect because we modify the map during the loop
+        let crossing_levels: Vec<_> = self.asks.keys()
+            .copied()
+            .take_while(|&p| p <= order.price)
+            .collect();
 
         for ask_price in crossing_levels {
             if order.size == 0 {
@@ -124,12 +128,13 @@ impl OrderBook {
     }
 
     fn match_ask(&mut self, order: &mut Order, fills: &mut Vec<Fill>, now: u64) {
-        // Collect all bid price levels that cross with our ask price
-        // This allows us to skip self-trade levels and check the next one
-        // Note: bids use Reverse<Price> so we need to extract the actual prices
+        // Find crossing bid price levels using take_while for early termination
+        // BTreeMap with Reverse<Price> iterates highest price first (descending),
+        // so we take while price >= limit
+        // We must collect because we modify the map during the loop
         let crossing_levels: Vec<_> = self.bids.keys()
             .map(|r| r.0)
-            .filter(|&p| p >= order.price)
+            .take_while(|&p| p >= order.price)
             .collect();
 
         for bid_price in crossing_levels {
