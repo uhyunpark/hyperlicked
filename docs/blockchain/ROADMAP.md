@@ -79,6 +79,25 @@ Production security hardening before testnet deployment:
 
 All features disabled in dev mode for seamless local testing.
 
+### BLS Security Fix (2026-02-02) ✅
+
+- **bls_batch_verify default** - Enabled by default in Cargo.toml features. Without this, rogue key attacks are possible where Byzantine validators could submit invalid signatures that corrupt aggregate signatures.
+- **Fixed signing data mismatch** - `aggregate_bls` now uses `signing_data_common()` to match how `Vote::new_bls` signs votes (excludes voter ID for efficient aggregate verification)
+
+### Mempool Anti-Spam (2026-02-02) ✅
+
+Hardened mempool for gasless trading model:
+- **Per-address limits** - Max 100 pending transactions per address (`MEMPOOL_MAX_PER_ADDRESS`)
+- **Age-based eviction** - Transactions older than 1 hour are pruned (`MEMPOOL_MAX_AGE_MS`)
+- **Configurable bucket size** - Bucket limits are now configurable (`MEMPOOL_MAX_PER_BUCKET`, default 10,000)
+- **Address count tracking** - Per-address counts properly maintained across commit/remove/prune operations
+
+### Documentation & API (2026-02-02) ✅
+
+- **API documentation** - Complete REST API and WebSocket protocol documentation
+- **Operations docs** - Configuration guide and storage persistence docs
+- **Health endpoint** - `GET /api/v1/chain/health` for node monitoring
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
