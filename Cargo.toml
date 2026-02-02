@@ -5,7 +5,7 @@ edition = "2021"
 description = "Hyperlicked - high-performance perpetual futures exchange"
 
 [features]
-default = []
+default = ["bls_batch_verify"]
 parallel_matching = ["rayon"]
 incremental_hash = []
 bls_batch_verify = []

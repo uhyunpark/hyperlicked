@@ -280,8 +280,9 @@ impl VoteAggregator {
                     }
                 };
 
-                // Verify signature
-                let signing_data = vote.signing_data();
+                // Verify signature using common signing data (excludes voter ID)
+                // This matches how Vote::new_bls signs the vote
+                let signing_data = vote.signing_data_common();
                 if pk.verify(&signing_data, sig) {
                     valid_votes.push(vote.clone());
                     valid_sigs.push(sig.clone());
