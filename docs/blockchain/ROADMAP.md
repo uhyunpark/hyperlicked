@@ -98,6 +98,15 @@ Hardened mempool for gasless trading model:
 - **Operations docs** - Configuration guide and storage persistence docs
 - **Health endpoint** - `GET /api/v1/chain/health` for node monitoring
 
+### Architecture Improvements (2026-02-02) ✅
+
+Code clarity and operational improvements from blockchain expert review:
+- **Operator alerting** - `state_corrupted` exposed in `/chain/health` for Byzantine detection
+- **Incremental hash docs** - Migration guide at `docs/operations/INCREMENTAL_HASH_MIGRATION.md`
+- **ADL code extraction** - `process_liquidations_with_adl()` helper for cleaner execute()
+- **Follower documentation** - Clarified intentional no-op in Engine::run_follower
+- **Matching optimization** - `take_while` iterator for early termination in orderbook matching
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
