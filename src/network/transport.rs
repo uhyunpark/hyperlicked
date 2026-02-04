@@ -32,6 +32,7 @@ use tracing::{debug, error, info, warn};
 /// Prevents resource exhaustion from slow/stalled connections
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+use super::gossip::{select_gossip_peers, GossipConfig, GossipMessage, GossipState};
 use super::handshake::{handshake_inbound, handshake_outbound, HandshakeConfig};
 use super::{Network, NetworkConfig};
 use crate::types::{hash_short, Message, NewView, NodeId, Prepare, Propose, ViewChange, Vote};
@@ -55,6 +56,9 @@ pub struct TcpNetwork {
 
     /// Handshake config for BLS authentication (CRITICAL-6)
     handshake_config: HandshakeConfig,
+
+    /// Gossip state for epidemic message propagation
+    gossip_state: Arc<GossipState>,
 }
 
 impl TcpNetwork {
@@ -65,6 +69,10 @@ impl TcpNetwork {
 
         // Create handshake config from network config (CRITICAL-6)
         let handshake_config = config.handshake_config();
+
+        // Create gossip config from environment
+        let gossip_config = GossipConfig::from_env();
+        let gossip_state = Arc::new(GossipState::new(gossip_config.clone()));
 
         if handshake_config.require_auth {
             info!(
@@ -79,6 +87,20 @@ impl TcpNetwork {
             );
         }
 
+        if gossip_state.is_enabled() {
+            info!(
+                node = %hash_short(&config.node_id),
+                fanout = gossip_config.fanout,
+                ttl = gossip_config.ttl,
+                "Gossip protocol ENABLED"
+            );
+        } else {
+            info!(
+                node = %hash_short(&config.node_id),
+                "Gossip protocol DISABLED (direct broadcast)"
+            );
+        }
+
         let network = Self {
             node_id: config.node_id,
             peers,
@@ -86,6 +108,7 @@ impl TcpNetwork {
             incoming_tx,
             config,
             handshake_config,
+            gossip_state,
         };
 
         Ok(network)
@@ -109,6 +132,7 @@ impl TcpNetwork {
         let incoming_tx = self.incoming_tx.clone();
         let peers = self.peers.clone();
         let handshake_config = self.handshake_config.clone();
+        let gossip_state = self.gossip_state.clone();
 
         tokio::spawn(async move {
             loop {
@@ -118,7 +142,8 @@ impl TcpNetwork {
                         let tx = incoming_tx.clone();
                         let peers = peers.clone();
                         let hs_config = handshake_config.clone();
-                        tokio::spawn(handle_connection(stream, tx, peers, hs_config));
+                        let gs = gossip_state.clone();
+                        tokio::spawn(handle_connection(stream, tx, peers, hs_config, gs));
                     }
                     Err(e) => {
                         error!(error = %e, "Accept failed");
@@ -145,9 +170,11 @@ impl TcpNetwork {
             let peer_id = *peer_id;
             let addr = addr.clone();
             let handshake_config = self.handshake_config.clone();
+            let gossip_state = self.gossip_state.clone();
 
             tokio::spawn(async move {
-                connect_to_peer(peer_id, addr, peers, incoming_tx, handshake_config).await;
+                connect_to_peer(peer_id, addr, peers, incoming_tx, handshake_config, gossip_state)
+                    .await;
             });
         }
 
@@ -173,7 +200,19 @@ impl TcpNetwork {
     }
 
     /// Broadcast a message to all connected peers (internal impl)
+    ///
+    /// If gossip is enabled, wraps the message and selects fanout peers.
+    /// Otherwise, broadcasts directly to all peers.
     async fn broadcast_internal(&self, msg: &Message) -> Result<()> {
+        if self.gossip_state.is_enabled() {
+            self.broadcast_gossip(msg).await
+        } else {
+            self.broadcast_direct(msg).await
+        }
+    }
+
+    /// Broadcast directly to all peers (no gossip)
+    async fn broadcast_direct(&self, msg: &Message) -> Result<()> {
         let data = serialize_message(msg)?;
         let peers = self.peers.read().await;
 
@@ -184,6 +223,55 @@ impl TcpNetwork {
         }
 
         Ok(())
+    }
+
+    /// Broadcast using gossip protocol (epidemic propagation)
+    async fn broadcast_gossip(&self, msg: &Message) -> Result<()> {
+        // Wrap message in gossip envelope
+        let gossip_msg = self.gossip_state.wrap_message(msg.clone(), self.node_id);
+
+        // Mark as seen (we originated this message)
+        self.gossip_state.mark_seen(&gossip_msg.msg_id);
+
+        // Get connected peer IDs
+        let peers = self.peers.read().await;
+        let peer_ids: Vec<NodeId> = peers.keys().copied().collect();
+        drop(peers);
+
+        // Select fanout peers
+        let selected = select_gossip_peers(
+            &peer_ids,
+            &gossip_msg.msg_id,
+            self.gossip_state.fanout(),
+            None, // No exclusion for originator
+        );
+
+        debug!(
+            fanout = selected.len(),
+            total_peers = peer_ids.len(),
+            msg_type = ?std::mem::discriminant(msg),
+            "Gossip broadcasting"
+        );
+
+        // Send to selected peers
+        let wrapped_msg = Message::Gossip(Box::new(gossip_msg));
+        let data = serialize_message(&wrapped_msg)?;
+        let peers = self.peers.read().await;
+
+        for peer_id in selected {
+            if let Some(tx) = peers.get(&peer_id) {
+                if let Err(e) = tx.send(data.clone()).await {
+                    warn!(peer = %hash_short(&peer_id), error = %e, "Failed to gossip to peer");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get gossip statistics for monitoring
+    pub fn gossip_stats(&self) -> super::GossipStats {
+        self.gossip_state.stats()
     }
 }
 
@@ -261,6 +349,7 @@ async fn handle_connection(
     incoming_tx: mpsc::Sender<(NodeId, Message)>,
     peers: Arc<RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>>,
     handshake_config: HandshakeConfig,
+    gossip_state: Arc<GossipState>,
 ) {
     let (mut read_half, mut write_half) = stream.into_split();
 
@@ -348,8 +437,36 @@ async fn handle_connection(
         // Deserialize
         match deserialize_message(&msg_buf) {
             Ok(msg) => {
-                if incoming_tx.send((peer_id, msg)).await.is_err() {
-                    break;
+                // Handle gossip-wrapped messages specially
+                let (deliver_msg, should_relay) = match msg {
+                    Message::Gossip(ref gossip_msg) => {
+                        // Check if we've seen this message before
+                        if let Some(inner) = gossip_state.receive(gossip_msg) {
+                            // New message - deliver and maybe relay
+                            let relay = gossip_msg.should_relay();
+                            (Some(inner), if relay { Some(gossip_msg.clone()) } else { None })
+                        } else {
+                            // Duplicate - drop
+                            debug!(
+                                msg_id = %hash_short(&gossip_msg.msg_id),
+                                "Gossip duplicate dropped"
+                            );
+                            (None, None)
+                        }
+                    }
+                    other => (Some(other), None),
+                };
+
+                // Deliver to consensus if not a duplicate
+                if let Some(inner_msg) = deliver_msg {
+                    if incoming_tx.send((peer_id, inner_msg)).await.is_err() {
+                        break;
+                    }
+                }
+
+                // Relay gossip if TTL > 1
+                if let Some(gossip_msg) = should_relay {
+                    relay_gossip_message(&gossip_msg, &peer_id, &peers, &gossip_state).await;
                 }
             }
             Err(e) => {
@@ -363,6 +480,58 @@ async fn handle_connection(
     peers.write().await.remove(&peer_id);
 }
 
+/// Relay a gossip message to fanout peers
+async fn relay_gossip_message(
+    gossip_msg: &GossipMessage,
+    from: &NodeId,
+    peers: &Arc<RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>>,
+    gossip_state: &Arc<GossipState>,
+) {
+    // Decrement TTL for relay
+    let relayed = match gossip_msg.relay() {
+        Some(r) => r,
+        None => return, // TTL exhausted
+    };
+
+    // Get connected peer IDs
+    let peers_guard = peers.read().await;
+    let peer_ids: Vec<NodeId> = peers_guard.keys().copied().collect();
+    drop(peers_guard);
+
+    // Select fanout peers, excluding sender
+    let selected = select_gossip_peers(&peer_ids, &relayed.msg_id, gossip_state.fanout(), Some(from));
+
+    if selected.is_empty() {
+        return;
+    }
+
+    debug!(
+        fanout = selected.len(),
+        ttl = relayed.ttl,
+        "Gossip relaying"
+    );
+
+    // Serialize relay message
+    let wrapped_msg = Message::Gossip(Box::new(relayed));
+    let data = match serialize_message(&wrapped_msg) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize gossip relay");
+            return;
+        }
+    };
+
+    // Send to selected peers
+    let peers_guard = peers.read().await;
+    for peer_id in selected {
+        if let Some(tx) = peers_guard.get(&peer_id) {
+            if let Err(e) = tx.send(data.clone()).await {
+                debug!(peer = %hash_short(&peer_id), error = %e, "Failed to relay gossip");
+            }
+        }
+    }
+}
+
 /// Connect to a peer with retry and BLS authentication (CRITICAL-6)
 async fn connect_to_peer(
     peer_id: NodeId,
@@ -370,6 +539,7 @@ async fn connect_to_peer(
     peers: Arc<RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>>,
     incoming_tx: mpsc::Sender<(NodeId, Message)>,
     handshake_config: HandshakeConfig,
+    gossip_state: Arc<GossipState>,
 ) {
     let mut retry_delay = std::time::Duration::from_millis(100);
     let max_delay = std::time::Duration::from_secs(5);
@@ -447,6 +617,7 @@ async fn connect_to_peer(
                 // Spawn reader task
                 let incoming_tx = incoming_tx.clone();
                 let peers = peers.clone();
+                let gossip_state = gossip_state.clone();
                 tokio::spawn(async move {
                     loop {
                         // Read length prefix with timeout
@@ -475,8 +646,35 @@ async fn connect_to_peer(
 
                         match deserialize_message(&msg_buf) {
                             Ok(msg) => {
-                                if incoming_tx.send((peer_id, msg)).await.is_err() {
-                                    break;
+                                // Handle gossip-wrapped messages specially
+                                let (deliver_msg, should_relay) = match msg {
+                                    Message::Gossip(ref gossip_msg) => {
+                                        if let Some(inner) = gossip_state.receive(gossip_msg) {
+                                            let relay = gossip_msg.should_relay();
+                                            (
+                                                Some(inner),
+                                                if relay { Some(gossip_msg.clone()) } else { None },
+                                            )
+                                        } else {
+                                            debug!(
+                                                msg_id = %hash_short(&gossip_msg.msg_id),
+                                                "Gossip duplicate dropped"
+                                            );
+                                            (None, None)
+                                        }
+                                    }
+                                    other => (Some(other), None),
+                                };
+
+                                if let Some(inner_msg) = deliver_msg {
+                                    if incoming_tx.send((peer_id, inner_msg)).await.is_err() {
+                                        break;
+                                    }
+                                }
+
+                                if let Some(gossip_msg) = should_relay {
+                                    relay_gossip_message(&gossip_msg, &peer_id, &peers, &gossip_state)
+                                        .await;
                                 }
                             }
                             Err(e) => {

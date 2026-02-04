@@ -247,4 +247,6 @@ pub enum Message {
     SyncResponse(SyncResponse),
     SnapshotRequest(SnapshotRequest),
     SnapshotResponse(SnapshotResponse),
+    // Gossip-wrapped message for epidemic propagation
+    Gossip(Box<crate::network::GossipMessage>),
 }
