@@ -128,3 +128,86 @@ pub async fn get_epoch(State(state): State<ApiState>) -> Json<EpochResponse> {
         rounds_per_epoch: crate::app::staking::ROUNDS_PER_EPOCH,
     })
 }
+
+/// Pending unstake info for API response
+#[derive(serde::Serialize)]
+pub struct PendingUnstakeResponse {
+    /// Validator address (None if unstaking self-stake)
+    validator: Option<String>,
+    /// Amount being unstaked (cents)
+    amount: i64,
+    /// Amount in USD
+    amount_usd: f64,
+    /// Time when unstake completes (ms timestamp)
+    completion_time: u64,
+    /// Time remaining until completion (ms), 0 if ready to claim
+    time_remaining_ms: u64,
+}
+
+pub async fn get_pending_unstakes(
+    State(state): State<ApiState>,
+    Path(address): Path<String>,
+) -> Json<Vec<PendingUnstakeResponse>> {
+    let app = state.shared.app.read().await;
+    let staking = app.staking();
+
+    // Use current system time for display purposes
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let unstakes: Vec<PendingUnstakeResponse> = staking
+        .get_pending_unstakes(&address)
+        .into_iter()
+        .map(|r| {
+            let time_remaining = r.completion_time.saturating_sub(current_time);
+            PendingUnstakeResponse {
+                validator: r.validator.clone(),
+                amount: r.amount,
+                amount_usd: r.amount as f64 / 100.0,
+                completion_time: r.completion_time,
+                time_remaining_ms: time_remaining,
+            }
+        })
+        .collect();
+
+    Json(unstakes)
+}
+
+/// Summary of staking info for a delegator
+#[derive(serde::Serialize)]
+pub struct StakingSummaryResponse {
+    /// Total staked across all validators
+    total_staked: i64,
+    total_staked_usd: f64,
+    /// Total amount in unbonding period
+    total_unbonding: i64,
+    total_unbonding_usd: f64,
+    /// Number of active delegations
+    delegation_count: usize,
+    /// Number of pending unstakes
+    pending_unstake_count: usize,
+}
+
+pub async fn get_staking_summary(
+    State(state): State<ApiState>,
+    Path(address): Path<String>,
+) -> Json<StakingSummaryResponse> {
+    let app = state.shared.app.read().await;
+    let staking = app.staking();
+
+    let delegations = staking.delegations_for(&address);
+    let total_staked: i64 = delegations.iter().map(|d| d.amount).sum();
+    let total_unbonding = staking.total_unbonding(&address);
+    let pending_unstakes = staking.get_pending_unstakes(&address);
+
+    Json(StakingSummaryResponse {
+        total_staked,
+        total_staked_usd: total_staked as f64 / 100.0,
+        total_unbonding,
+        total_unbonding_usd: total_unbonding as f64 / 100.0,
+        delegation_count: delegations.len(),
+        pending_unstake_count: pending_unstakes.len(),
+    })
+}

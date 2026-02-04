@@ -78,6 +78,8 @@ pub fn create_router_with_store(
         .route("/staking/validators", get(staking::get_validators))
         .route("/staking/validators/:operator", get(staking::get_validator))
         .route("/staking/delegations/:address", get(staking::get_delegations))
+        .route("/staking/unstakes/:address", get(staking::get_pending_unstakes))
+        .route("/staking/summary/:address", get(staking::get_staking_summary))
         .route("/staking/epoch", get(staking::get_epoch))
         // Oracle read endpoints
         .route("/oracle/status", get(oracle::get_oracle_status))

@@ -310,6 +310,22 @@ impl StakingState {
             .collect()
     }
 
+    /// Get pending unstake requests for a delegator
+    pub fn get_pending_unstakes(&self, delegator: &Address) -> Vec<&UnstakeRequest> {
+        self.unstake_queue
+            .get(delegator)
+            .map(|requests| requests.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get total amount in unbonding for a delegator
+    pub fn total_unbonding(&self, delegator: &Address) -> i64 {
+        self.unstake_queue
+            .get(delegator)
+            .map(|requests| requests.iter().map(|r| r.amount).sum())
+            .unwrap_or(0)
+    }
+
     /// Rebuild node_to_operator mapping after deserialization
     pub fn rebuild_index(&mut self) {
         self.node_to_operator.clear();
