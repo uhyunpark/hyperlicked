@@ -236,7 +236,10 @@ fn liquidate_account_partial(
             .collect();
 
         // Sort by notional descending (close largest positions first)
-        pos_with_notional.sort_by(|a, b| b.3.cmp(&a.3));
+        // CRITICAL: Add secondary sort by symbol for deterministic ordering.
+        // If two positions have identical notional, HashMap iteration order
+        // would be non-deterministic across validators, causing consensus failures.
+        pos_with_notional.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
         pos_with_notional
     };
 

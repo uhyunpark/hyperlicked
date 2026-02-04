@@ -72,6 +72,18 @@ pub trait AppHook: Send + Sync {
     fn take_validator_update(&mut self) -> Option<crate::app::staking::ValidatorSetUpdate> {
         None // Default implementation - no staking
     }
+
+    /// Submit equivocation evidence for slashing.
+    ///
+    /// Called by consensus when double-voting is detected. The evidence includes
+    /// the two conflicting votes (same view, different block hashes) and their
+    /// BLS signatures, proving the validator misbehaved.
+    ///
+    /// Returns true if evidence was accepted for processing, false if rejected
+    /// (e.g., invalid signatures, validator not found, already tombstoned).
+    fn submit_equivocation_evidence(&mut self, _proof: EquivocationProof) -> bool {
+        false // Default implementation - no slashing
+    }
 }
 
 /// Block storage abstraction

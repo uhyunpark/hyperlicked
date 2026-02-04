@@ -468,9 +468,9 @@ impl AppState {
     ) -> Result<Vec<Fill>, AppError> {
         // Check operator authorization (must be registered validator)
         // Skip check if signature verification is disabled (dev mode)
-        let skip_verify = std::env::var("SKIP_SIG_VERIFY")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // SECURITY: Use Config::global() instead of env var directly to ensure
+        // consistent validation with other security flags and mode-based checks.
+        let skip_verify = crate::config::Config::global().skip_signature_verification;
 
         // Get validator (required even if skipping sig verify, for authorization)
         let validator = self.staking.get_validator(&operator);

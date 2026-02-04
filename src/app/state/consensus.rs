@@ -407,6 +407,59 @@ impl AppHook for AppState {
         self.pending_validator_update.take()
     }
 
+    fn submit_equivocation_evidence(&mut self, proof: crate::consensus::EquivocationProof) -> bool {
+        use crate::app::staking::{Evidence, EvidenceType};
+
+        // Convert consensus EquivocationProof to staking Evidence
+        let evidence = Evidence {
+            evidence_type: EvidenceType::DoubleVote,
+            offender: proof.offender,
+            height: proof.view,
+            timestamp: self.timestamp,
+            hash_a: proof.hash_a,
+            hash_b: proof.hash_b,
+            signature_a: proof.signature_a,
+            signature_b: proof.signature_b,
+        };
+
+        // Submit to staking system for validation and processing
+        match self.staking.submit_evidence(evidence) {
+            Ok(()) => {
+                tracing::info!(
+                    offender = %hex::encode(&proof.offender[..4]),
+                    view = proof.view,
+                    "Equivocation evidence submitted for slashing"
+                );
+                // Process pending evidence immediately (within same block)
+                let results = self.staking.process_pending_evidence();
+                for result in &results {
+                    tracing::warn!(
+                        offender = %hex::encode(&result.offender[..4]),
+                        total_slashed = result.total_slashed,
+                        "Validator slashed for equivocation"
+                    );
+                    self.pending_staking_events.push(
+                        crate::app::staking::StakingTxResult::EvidenceProcessed {
+                            offender: result.offender,
+                            slashed_amount: result.total_slashed,
+                        },
+                    );
+                }
+                self.mark_globals_dirty();
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    offender = %hex::encode(&proof.offender[..4]),
+                    view = proof.view,
+                    error = %e,
+                    "Failed to submit equivocation evidence"
+                );
+                false
+            }
+        }
+    }
+
     fn prepare_payload(&self, _parent: &Block) -> Vec<u8> {
         // Peek pending transactions (without removing them yet)
         // They get drained after block commit via commit_proposal()

@@ -917,9 +917,8 @@ impl ConsensusRunner {
     /// Handle detected equivocation (Byzantine fault).
     ///
     /// This is called when a validator is caught voting for two different blocks
-    /// in the same view. The evidence can be submitted to the staking system
-    /// for slashing.
-    fn handle_equivocation(&self, proof: EquivocationProof) {
+    /// in the same view. The evidence is submitted to the staking system for slashing.
+    fn handle_equivocation(&mut self, proof: EquivocationProof) {
         // Log the equivocation - this is a CRITICAL security event
         warn!(
             view = proof.view,
@@ -929,23 +928,23 @@ impl ConsensusRunner {
             "BYZANTINE FAULT: Equivocation detected! Validator voted for conflicting blocks."
         );
 
-        // TODO: Submit evidence to app layer for slashing
-        // The app layer (AppState) should have a method to receive equivocation evidence:
-        //
-        // let evidence = Evidence {
-        //     evidence_type: EvidenceType::DoubleVote,
-        //     offender: proof.offender,
-        //     height: proof.view,
-        //     timestamp: current_timestamp(),
-        //     hash_a: proof.hash_a,
-        //     hash_b: proof.hash_b,
-        //     signature_a: proof.signature_a,
-        //     signature_b: proof.signature_b,
-        // };
-        // self.app.submit_evidence(evidence);
-        //
-        // For now, we just log. Integration with AppState/StakingState
-        // requires passing the evidence through the consensus boundary.
+        // Submit evidence to app layer for slashing via AppHook trait
+        let accepted = self.app.submit_equivocation_evidence(proof.clone());
+        if accepted {
+            info!(
+                view = proof.view,
+                offender = %hash_short(&proof.offender),
+                "Equivocation evidence accepted for slashing"
+            );
+        } else {
+            // Evidence rejected - could be invalid signatures, validator not found, etc.
+            // This is logged as warning since equivocation was detected but couldn't be slashed
+            warn!(
+                view = proof.view,
+                offender = %hash_short(&proof.offender),
+                "Equivocation evidence rejected by app layer"
+            );
+        }
     }
 
     /// Get equivocation statistics for monitoring
