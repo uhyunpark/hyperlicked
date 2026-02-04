@@ -107,6 +107,15 @@ Code clarity and operational improvements from blockchain expert review:
 - **Follower documentation** - Clarified intentional no-op in Engine::run_follower
 - **Matching optimization** - `take_while` iterator for early termination in orderbook matching
 
+### Architecture Improvements Phase 2 (2026-02-03) ✅
+
+Additional improvements from comprehensive blockchain expert review:
+- **Orderbook depth limits** - `max_price_levels` in MarketConfig (default: 1000) prevents memory exhaustion from unbounded orderbook growth
+- **Staking API exposure** - REST endpoints for pending unstakes visibility (`/api/v1/staking/unstakes/:address`, `/api/v1/staking/summary/:address`)
+- **Gossip protocol** - Epidemic message propagation module for multi-node resilience (`src/network/gossip.rs`)
+  - Configurable fanout (default: 3 peers), TTL (default: 5 hops), seen cache (default: 10k messages)
+  - Environment variables: `GOSSIP_FANOUT`, `GOSSIP_TTL`, `GOSSIP_CACHE_SIZE`, `GOSSIP_ENABLED`
+
 ### Recently Completed
 
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints

@@ -68,8 +68,9 @@ hyperlicked/
 │   ├── types.rs           # Core types (Block, Vote, Order)
 │   ├── config.rs          # Runtime config (mode, faucet, etc.)
 │   ├── consensus/         # HotStuff-2 engine + BLS vote aggregation
-│   ├── network/           # TCP transport, RPC sync client
-│   │   └── active_sync.rs # RPC node sync with QC verification
+│   ├── network/           # TCP transport, RPC sync client, gossip
+│   │   ├── active_sync.rs # RPC node sync with QC verification
+│   │   └── gossip.rs      # Epidemic gossip protocol for message propagation
 │   ├── app/               # Orderbook, accounts, mempool, staking
 │   │   ├── mod.rs         # Transaction types, MarketConfig
 │   │   ├── state/         # AppState (implements AppHook)
@@ -163,6 +164,10 @@ cargo build --release
 | `MEMPOOL_MAX_PER_BUCKET` | 10000 | Maximum transactions per mempool bucket |
 | `MEMPOOL_MAX_AGE_MS` | 3600000 | Maximum transaction age before eviction (1 hour) |
 | `MEMPOOL_MAX_PER_ADDRESS` | 100 | Maximum pending transactions per address |
+| `GOSSIP_FANOUT` | 3 | Number of peers to forward each gossip message to |
+| `GOSSIP_TTL` | 5 | Initial TTL for gossip messages (hops) |
+| `GOSSIP_CACHE_SIZE` | 10000 | Maximum message IDs to track in gossip seen cache |
+| `GOSSIP_ENABLED` | true | Whether gossip protocol is enabled |
 
 ## MarketConfig
 
@@ -182,6 +187,7 @@ Per-market configuration set in `src/app/mod.rs`:
 | `max_order_size` | 1e12 | Max single order (10,000 BTC in satoshis) |
 | `max_position_size` | 1e13 | Max position per account (100,000 BTC in satoshis) |
 | `max_open_orders` | 100 | Max open orders per account |
+| `max_price_levels` | 1000 | Max price levels per side (OOM prevention) |
 
 ## Golden Rules
 
