@@ -16,7 +16,7 @@ use anyhow::Result;
 use hyperlicked::app::AppState;
 use hyperlicked::consensus::ConsensusRunner;
 use hyperlicked::crypto::bls::BlsSecretKey;
-use hyperlicked::network::{NetworkConfig, TcpNetwork};
+use hyperlicked::network::{GossipConfig, NetworkConfig, TcpNetwork};
 use hyperlicked::types::{hash_short, ConsensusConfig};
 
 /// Generate deterministic BLS keypair from node index
@@ -116,6 +116,24 @@ async fn main() -> Result<()> {
             "disabled"
         }
     );
+    println!();
+
+    // Load gossip config from environment
+    let gossip_config = GossipConfig::from_env();
+    println!("Gossip Configuration:");
+    println!(
+        "  Status: {}",
+        if gossip_config.enabled {
+            "ENABLED"
+        } else {
+            "disabled"
+        }
+    );
+    if gossip_config.enabled {
+        println!("  Fanout: {}", gossip_config.fanout);
+        println!("  TTL: {} hops", gossip_config.ttl);
+        println!("  Cache size: {}", gossip_config.cache_size);
+    }
     println!();
 
     // Create and start network
