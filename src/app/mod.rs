@@ -261,6 +261,7 @@ pub struct MarketConfig {
     pub max_order_size: Size,      // Max single order size (satoshis)
     pub max_position_size: Size,   // Max position per account (satoshis)
     pub max_open_orders: usize,    // Max open orders per account
+    pub max_price_levels: usize,   // Max price levels per side (OOM prevention)
 }
 
 impl Default for MarketConfig {
@@ -279,6 +280,7 @@ impl Default for MarketConfig {
             max_order_size: 1_000_000_000_000,    // 10,000 BTC (1e12 satoshis)
             max_position_size: 10_000_000_000_000, // 100,000 BTC (1e13 satoshis)
             max_open_orders: 100,                  // 100 open orders per account
+            max_price_levels: 1000,                // 1000 price levels per side
         }
     }
 }

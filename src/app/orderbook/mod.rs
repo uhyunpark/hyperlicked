@@ -234,6 +234,28 @@ impl OrderBook {
 
     // --- Internal helpers ---
 
+    /// Count price levels on a given side
+    pub fn price_level_count(&self, side: Side) -> usize {
+        match side {
+            Side::Bid => self.bids.len(),
+            Side::Ask => self.asks.len(),
+        }
+    }
+
+    /// Check if adding a new price level on given side would exceed depth limit
+    pub(crate) fn would_exceed_depth_limit(&self, side: Side, price: Price, max_levels: usize) -> bool {
+        let existing = match side {
+            Side::Bid => self.bids.contains_key(&Reverse(price)),
+            Side::Ask => self.asks.contains_key(&price),
+        };
+        // If the price level already exists, we're not adding a new one
+        if existing {
+            return false;
+        }
+        // Check if we're at the limit
+        self.price_level_count(side) >= max_levels
+    }
+
     pub(crate) fn validate_order(
         &self,
         order: &Order,
@@ -318,4 +340,6 @@ pub enum OrderBookError {
     OrderSizeTooLarge { max: i64, got: i64 },
     #[error("too many open orders (max: {max})")]
     TooManyOpenOrders { max: usize },
+    #[error("orderbook depth limit reached (max: {max} price levels)")]
+    DepthLimitReached { max: usize },
 }

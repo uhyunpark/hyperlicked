@@ -28,6 +28,16 @@ impl OrderBook {
             }
         }
 
+        // Check orderbook depth limit for orders that may rest on the book
+        // We check before matching because IOC orders never rest
+        if order.order_type != OrderType::Ioc
+            && self.would_exceed_depth_limit(order.side, order.price, config.max_price_levels)
+        {
+            return Err(OrderBookError::DepthLimitReached {
+                max: config.max_price_levels,
+            });
+        }
+
         // ALO check: reject if would match immediately
         if order.order_type == OrderType::Alo && self.would_match(&order) {
             return Err(OrderBookError::AloWouldMatch);
@@ -120,6 +130,7 @@ impl OrderBook {
         }
 
         // Rest on book if GTC/ALO and remaining size
+        // Note: depth limit is checked in place() before matching
         if order.size > 0
             && (order.order_type == OrderType::Gtc || order.order_type == OrderType::Alo)
         {
@@ -593,5 +604,55 @@ mod tests {
         assert_eq!(fills[0].price, 49000);
         assert_eq!(fills[0].maker, "bob");
         assert_eq!(fills[0].taker, "alice");
+    }
+
+    #[test]
+    fn test_depth_limit_rejected() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let mut config = MarketConfig::default();
+        config.max_price_levels = 3; // Small limit for testing
+
+        // Place orders at different price levels until we hit the limit
+        for i in 0..3 {
+            let order = make_order_with_trader(&format!("bid_{}", i), "maker", Side::Bid, 50000 - i as i64, 100);
+            assert!(book.place(order, &config).is_ok());
+        }
+
+        // Verify we have 3 price levels
+        assert_eq!(book.price_level_count(Side::Bid), 3);
+
+        // Next order at a NEW price level should fail
+        let excess_order = make_order_with_trader("bid_excess", "maker", Side::Bid, 49996, 100);
+        let result = book.place(excess_order, &config);
+        assert!(matches!(result, Err(OrderBookError::DepthLimitReached { max: 3 })));
+
+        // But an order at an EXISTING price level should succeed
+        let same_price_order = make_order_with_trader("bid_same", "maker2", Side::Bid, 50000, 100);
+        assert!(book.place(same_price_order, &config).is_ok());
+
+        // IOC orders should always be allowed (they don't rest)
+        let mut ioc_order = make_order_with_trader("ioc_new", "taker", Side::Bid, 40000, 100);
+        ioc_order.order_type = OrderType::Ioc;
+        assert!(book.place(ioc_order, &config).is_ok());
+    }
+
+    #[test]
+    fn test_depth_limit_ask_side() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let mut config = MarketConfig::default();
+        config.max_price_levels = 2;
+
+        // Place asks at different price levels
+        book.place(make_order_with_trader("ask1", "maker", Side::Ask, 51000, 100), &config).unwrap();
+        book.place(make_order_with_trader("ask2", "maker", Side::Ask, 52000, 100), &config).unwrap();
+
+        // Next ask at a new price should fail
+        let excess_ask = make_order_with_trader("ask3", "maker", Side::Ask, 53000, 100);
+        let result = book.place(excess_ask, &config);
+        assert!(matches!(result, Err(OrderBookError::DepthLimitReached { max: 2 })));
+
+        // Bid side should still have room
+        let bid = make_order_with_trader("bid1", "maker", Side::Bid, 50000, 100);
+        assert!(book.place(bid, &config).is_ok());
     }
 }

@@ -157,6 +157,19 @@ pub struct Config {
 
     /// Maximum pending transactions per address in mempool
     pub mempool_max_per_address: usize,
+
+    // Gossip protocol settings
+    /// Number of peers to forward each gossip message to
+    pub gossip_fanout: usize,
+
+    /// Initial TTL for gossip messages (hops)
+    pub gossip_ttl: u8,
+
+    /// Maximum message IDs to track in gossip seen cache
+    pub gossip_cache_size: usize,
+
+    /// Whether gossip protocol is enabled
+    pub gossip_enabled: bool,
 }
 
 impl Config {
@@ -251,6 +264,22 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100), // Default: 100 pending txs per address
+            // Gossip protocol settings
+            gossip_fanout: std::env::var("GOSSIP_FANOUT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3), // Default: forward to 3 peers
+            gossip_ttl: std::env::var("GOSSIP_TTL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5), // Default: 5 hops
+            gossip_cache_size: std::env::var("GOSSIP_CACHE_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10_000), // Default: 10k message IDs
+            gossip_enabled: std::env::var("GOSSIP_ENABLED")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(true), // Default: enabled
         }
     }
 
