@@ -240,7 +240,9 @@ async fn main() -> Result<()> {
     println!();
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Use into_make_service_with_connect_info to provide ConnectInfo<SocketAddr>
+    // to the rate limiter middleware which needs client IP addresses
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }
