@@ -1,6 +1,6 @@
 ---
 name: blockchain-dev-guidelines
-description: Rust blockchain development patterns for hyperlicked. Covers HotStuff-2 consensus, orderbook matching engine, BLS signatures, integer math, AppHook trait, BlockStore trait, mempool ordering, Position/Account types, error handling with thiserror, and module organization. Use when working on consensus, blocks, votes, certificates, matching, liquidation, funding, or any src/*.rs files.
+description: Rust blockchain development patterns for hyperlicked. Covers HotStuff-2 consensus, orderbook matching engine, BLS signatures, integer math, AppHook trait, BlockStore trait, mempool ordering, Position/Account types, error handling with thiserror, and module organization. Activates when working on consensus, blocks, votes, certificates, matching, liquidation, funding, pacemaker, safety, perpetual futures, perpdex, or any src/*.rs files.
 ---
 
 # Blockchain Development Guidelines
@@ -8,20 +8,6 @@ description: Rust blockchain development patterns for hyperlicked. Covers HotStu
 ## Purpose
 
 Comprehensive patterns and conventions for the hyperlicked Rust blockchain codebase. This is a Hyperliquid clone implementing HotStuff-2 BFT consensus with a heap-based orderbook matching engine.
-
-## When to Use This Skill
-
-Automatically activates when you mention:
-- Consensus, HotStuff, pacemaker, safety
-- Blocks, votes, certificates, QC
-- Orderbook, matching engine, fills
-- Mempool, transaction ordering
-- BLS signatures, EIP-712
-- AppHook, BlockStore traits
-- Positions, accounts, margin
-- Liquidation, funding rates
-
----
 
 ## Project Structure
 
@@ -218,41 +204,41 @@ pub type Size = i64;    // satoshis
 
 For detailed information on specific topics, see:
 
-### [CONSENSUS.md](resources/CONSENSUS.md)
+### [CONSENSUS.md](references/CONSENSUS.md)
 HotStuff-2 implementation details:
 - Engine tick loop
 - Leader/follower logic
 - Block/Vote/Certificate structures
 - 2-chain commit rule
 
-### [ORDERBOOK.md](resources/ORDERBOOK.md)
+### [ORDERBOOK.md](references/ORDERBOOK.md)
 Matching engine patterns:
 - Heap-based order storage
 - FIFO within price levels
 - Fill/Order types
 - ALO, IOC, GTC handling
 
-### [TYPES.md](resources/TYPES.md)
+### [TYPES.md](references/TYPES.md)
 Core type definitions:
 - Integer math patterns
 - Position/Account structures
 - MarketConfig
 - Type aliases
 
-### [CRYPTO.md](resources/CRYPTO.md)
+### [CRYPTO.md](references/CRYPTO.md)
 Cryptographic operations:
 - BLS12-381 signatures
 - Signature aggregation
 - EIP-712 signing
 - Agent key delegation
 
-### [TESTING.md](resources/TESTING.md)
+### [TESTING.md](references/TESTING.md)
 Testing patterns:
 - Integration tests with AppState
 - Single-node engine tests
 - Determinism verification
 
-### [PATTERNS.md](resources/PATTERNS.md)
+### [PATTERNS.md](references/PATTERNS.md)
 Code organization:
 - Module structure
 - Error enum patterns

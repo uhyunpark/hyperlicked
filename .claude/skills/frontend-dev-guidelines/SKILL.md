@@ -1,6 +1,6 @@
 ---
 name: frontend-dev-guidelines
-description: Next.js 15 / Tailwind / Zustand frontend development patterns for hyperlicked trading UI. Covers component patterns, state management with Zustand stores, Tailwind styling, WebSocket integration, wallet connection with EIP-712 signing, agent keys, useCallback/useEffect patterns, and API integration. Use when working on components, pages, hooks, wallet, toast, or any web/*.tsx files.
+description: Next.js 15 / Tailwind / Zustand frontend development patterns for hyperlicked trading UI. Covers component patterns, state management with Zustand stores, Tailwind styling, WebSocket integration, wallet connection with EIP-712 signing, agent keys, useCallback/useEffect patterns, and API integration. Activates when working on components, pages, hooks, wallet, toast, trading UI, orderbook UI, useWallet, useWebSocket, or any web/*.tsx files.
 ---
 
 # Frontend Development Guidelines
@@ -8,20 +8,6 @@ description: Next.js 15 / Tailwind / Zustand frontend development patterns for h
 ## Purpose
 
 Comprehensive patterns and conventions for the hyperlicked Next.js frontend. This is a trading UI built with Next.js 15, Tailwind CSS, and Zustand for state management.
-
-## When to Use This Skill
-
-Automatically activates when you mention:
-- Components, pages, hooks
-- Zustand stores, state management
-- Tailwind styling, theme colors
-- WebSocket integration
-- Wallet connection, EIP-712
-- Agent keys, signing
-- Trading UI, orderbook UI
-- Toast notifications
-
----
 
 ## Project Structure
 
@@ -216,42 +202,42 @@ toast.error('Error', 'Failed to place order')
 
 For detailed information on specific topics, see:
 
-### [COMPONENTS.md](resources/COMPONENTS.md)
+### [COMPONENTS.md](references/COMPONENTS.md)
 Component patterns:
 - Client directive usage
 - Component structure
 - Prop patterns
 - Conditional rendering
 
-### [STATE.md](resources/STATE.md)
+### [STATE.md](references/STATE.md)
 State management:
 - Zustand store setup
 - WalletStore patterns
 - TradingStore patterns
 - Store subscriptions
 
-### [STYLING.md](resources/STYLING.md)
+### [STYLING.md](references/STYLING.md)
 Tailwind conventions:
 - Theme colors
 - cn() utility
 - Component styling
 - Responsive patterns
 
-### [API.md](resources/API.md)
+### [API.md](references/API.md)
 API integration:
 - REST client patterns
 - Unit conversion
 - WebSocket messages
 - Error handling
 
-### [WALLET.md](resources/WALLET.md)
+### [WALLET.md](references/WALLET.md)
 Wallet integration:
 - useWallet hook
 - Agent key system
 - EIP-712 signing
 - Connection flow
 
-### [HOOKS.md](resources/HOOKS.md)
+### [HOOKS.md](references/HOOKS.md)
 React hook patterns:
 - useCallback usage
 - useEffect patterns

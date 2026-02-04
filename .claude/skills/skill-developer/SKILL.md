@@ -1,6 +1,6 @@
 ---
 name: skill-developer
-description: Create and manage Claude Code skills following best practices. Use when creating new skills, modifying skill-rules.json, understanding trigger patterns, working with hooks, debugging skill activation, or implementing progressive disclosure. Covers skill structure, YAML frontmatter, trigger types (keywords, intent patterns, file paths), enforcement levels, hook mechanisms, and the 500-line rule.
+description: Creates and manages Claude Code skills following Anthropic best practices. Covers skill structure, YAML frontmatter, progressive disclosure, bundled resources (references, scripts, assets), testing, and the 500-line rule. Activates when creating, modifying, or debugging skills, working with skill-rules.json, understanding trigger patterns, or implementing progressive disclosure.
 ---
 
 # Skill Developer Guide
@@ -8,21 +8,6 @@ description: Create and manage Claude Code skills following best practices. Use 
 ## Purpose
 
 Comprehensive guide for creating and managing skills in Claude Code with auto-activation system, following best practices including the 500-line rule and progressive disclosure pattern.
-
-## When to Use This Skill
-
-Automatically activates when you mention:
-- Creating or adding skills
-- Modifying skill triggers or rules
-- Understanding how skill activation works
-- Debugging skill activation issues
-- Working with skill-rules.json
-- Hook system mechanics
-- Progressive disclosure
-- YAML frontmatter
-- 500-line rule
-
----
 
 ## System Overview
 
