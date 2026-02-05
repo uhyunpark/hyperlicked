@@ -11,7 +11,7 @@ Clone Hyperliquid's user-facing behavior, features, and performance. HotStuff-2 
 | Layer | Technology |
 |-------|------------|
 | Consensus | Rust (HotStuff-2, 2-chain commit, BLS signatures) |
-| Matching Engine | Heap-based orderbook O(log N) |
+| Matching Engine | BTreeMap-based orderbook O(log N) |
 | API | axum (REST + WebSocket) |
 | Frontend | Next.js 15 + Tailwind + Zustand |
 | Signing | EIP-712 (customers), BLS12-381 (validators) |
@@ -77,7 +77,7 @@ hyperlicked/
 │   │   │   ├── mod.rs     # Struct + accessors
 │   │   │   ├── execution.rs # Transaction execution
 │   │   │   └── consensus.rs # AppHook impl
-│   │   ├── orderbook/     # Heap-based matching engine
+│   │   ├── orderbook/     # BTreeMap-based matching engine
 │   │   │   ├── mod.rs     # OrderBook struct
 │   │   │   └── matching.rs # Matching logic
 │   │   ├── oracle/        # External price feeds for funding

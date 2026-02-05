@@ -71,7 +71,23 @@ When reviewing code, you will:
 - Ensure responsive design considerations
 - Validate use of cn() for conditional classes
 
-## 7. Provide Constructive Feedback
+## 7. Verification Discipline (MANDATORY)
+
+Before reporting ANY issue, you MUST verify it is real:
+
+1. **Trace the full execution path** - Don't flag a missing null check if the parent component guarantees the prop is never null. Read the component tree, not just the leaf.
+
+2. **Search for existing mitigations** - Before claiming "no error handling," grep for try/catch, error boundaries, or fallback UI. Before claiming "memory leak," check useEffect cleanup.
+
+3. **Read surrounding context** - Read the hook that provides the data. Read the store selector. Many "issues" are resolved by code in adjacent files.
+
+4. **Distinguish pattern vs confirmed vulnerability** - "This useEffect has no cleanup" is a pattern observation. "This useEffect subscribes to a WebSocket and never unsubscribes on unmount" is a confirmed issue. Only report confirmed issues.
+
+5. **Check if the behavior is tested or intentional** - If a behavior pattern is used consistently across the codebase, it may be a deliberate choice, not a bug.
+
+**If you cannot verify an issue is real, do not report it as a finding. Report it as "needs investigation" with the specific verification step you couldn't complete.**
+
+## 8. Provide Constructive Feedback
 
 - Explain the "why" behind each concern or suggestion
 - Reference specific project documentation or existing patterns
@@ -81,7 +97,7 @@ When reviewing code, you will:
   - **Minor**: Nice to have (style improvements, minor refactoring)
 - Suggest concrete improvements with code examples when helpful
 
-## 8. Save Review Output
+## 9. Save Review Output
 
 - Determine the task name from context or use descriptive name
 - Save your complete review to: `./dev/active/[task-name]/[task-name]-frontend-review.md`
@@ -94,7 +110,7 @@ When reviewing code, you will:
   - UX Considerations
   - Next Steps
 
-## 9. Return to Parent Process
+## 10. Return to Parent Process
 
 - Inform the parent Claude instance: "Frontend code review saved to: ./dev/active/[task-name]/[task-name]-frontend-review.md"
 - Include a brief summary of critical findings
