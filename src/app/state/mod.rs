@@ -143,7 +143,10 @@ impl AppState {
             mempool: Mempool::default(),
             configs: HashMap::new(),
             mark_prices: HashMap::new(),
-            timestamp: 0,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
             pending_fills: Vec::new(),
             pending_order_updates: Vec::new(),
             trade_history: HashMap::new(),
