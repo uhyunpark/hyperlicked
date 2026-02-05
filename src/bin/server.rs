@@ -29,7 +29,7 @@ use hyperlicked::api::{create_router_with_store, AssetCtxData, SharedState, WebS
 use hyperlicked::api::state::PriceLevel;
 use hyperlicked::app::market_maker::{MarketMakerConfig, MarketMakerState};
 use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
-use hyperlicked::app::AppState;
+use hyperlicked::app::{AppState, Transaction};
 use hyperlicked::config::Config;
 use hyperlicked::consensus::AppHook;
 use hyperlicked::network::{ActiveSyncClient, ActiveSyncConfig};
@@ -941,8 +941,31 @@ async fn run_market_maker_loop(state: SharedState) {
     }
     info!(accounts = mm.config().total_accounts(), "MM deposits queued");
 
-    // Wait for deposits to be processed (a few blocks)
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for deposits to be processed - verify at least one account has balance
+    let sample_address = mm.addresses()[0].to_string();
+    let expected_balance = mm.config().initial_deposit;
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attempts += 1;
+
+        let has_balance = {
+            let app = state.app.read().await;
+            app.account(&sample_address)
+                .map(|a| a.balance >= expected_balance)
+                .unwrap_or(false)
+        };
+
+        if has_balance {
+            info!(attempts, "MM deposits confirmed");
+            break;
+        }
+
+        if attempts > 50 {
+            tracing::error!("MM deposits not processed after 5 seconds - check mempool/execution");
+            break;
+        }
+    }
 
     info!("🤖 Market maker started");
 
@@ -965,14 +988,54 @@ async fn run_market_maker_loop(state: SharedState) {
         let transactions = mm.tick(oracle_price, best_bid, best_ask, timestamp);
 
         if !transactions.is_empty() {
+            // Identify accounts placing new orders this tick (repositioning)
+            let repositioning: std::collections::HashSet<&str> = transactions
+                .iter()
+                .filter_map(|tx| match tx {
+                    Transaction::PlaceOrder { trader, .. } => Some(trader.as_str()),
+                    _ => None,
+                })
+                .collect();
+
             let tx_count = transactions.len();
 
-            // Submit transactions to mempool
+            // Cancel existing orders only for repositioning accounts
+            // Non-repositioning accounts keep their orders on the book for depth
+            let cancel_txs: Vec<Transaction> = if !repositioning.is_empty() {
+                let app = state.app.read().await;
+                let book = app.orderbook(&mm_config.symbol);
+                if let Some(book) = book {
+                    repositioning
+                        .iter()
+                        .flat_map(|addr| {
+                            book.orders_by_trader(addr)
+                                .iter()
+                                .map(|order| Transaction::CancelOrder {
+                                    trader: addr.to_string(),
+                                    order_id: order.id.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            // Submit cancels then new orders
             let mut app = state.app.write().await;
+            for tx in cancel_txs {
+                let _ = app.submit_tx(tx);
+            }
             let mut submitted = 0;
             for tx in transactions {
-                if app.submit_tx(tx).is_ok() {
-                    submitted += 1;
+                match app.submit_tx(tx) {
+                    Ok(_) => submitted += 1,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "MM order submission failed");
+                    }
                 }
             }
 
