@@ -27,8 +27,8 @@ export function Chart() {
       aggregatorRef.current = new CandlestickAggregator(interval as Interval)
       lastProcessedTradeRef.current = null
 
-      if (candleSeriesRef.current && candles.length > 0) {
-        // Convert API candles to chart format
+      if (candleSeriesRef.current) {
+        // Convert API candles to chart format (can be empty array)
         const chartData: CandlestickData[] = candles.map(c => ({
           time: Math.floor(c.t / 1000) as Time, // Convert ms to seconds
           open: convertPrice(c.o),
@@ -37,6 +37,7 @@ export function Chart() {
           close: convertPrice(c.c),
         }))
 
+        // Always call setData to initialize series (even empty)
         candleSeriesRef.current.setData(chartData)
       }
     } catch (error) {
@@ -138,14 +139,38 @@ export function Chart() {
     const candle = aggregatorRef.current.addTrade(apiTrade)
 
     if (candle) {
-      // Update the chart with the properly aggregated candle
-      candleSeriesRef.current.update({
-        time: candle.time,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-      })
+      try {
+        const series = candleSeriesRef.current
+        const data = series.data()
+
+        // update() only works for last candle or newer
+        // If series is empty or candle time >= last time, safe to update
+        if (data.length === 0) {
+          series.setData([{
+            time: candle.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          }])
+        } else {
+          const lastTime = data[data.length - 1].time as number
+          const candleTime = candle.time as number
+          if (candleTime >= lastTime) {
+            series.update({
+              time: candle.time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+            })
+          }
+          // Skip if candle time is older than last - historical data already has it
+        }
+      } catch (e) {
+        // Silently ignore chart update errors
+        console.debug('[chart] update error:', e)
+      }
     }
   }, [trades])
 
