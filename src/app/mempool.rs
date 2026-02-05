@@ -114,10 +114,12 @@ impl Mempool {
     /// Get transactions for a block (ordered by bucket)
     pub fn prepare_block(&mut self, max_txs: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(max_txs);
+        let mut to_decrement: Vec<String> = Vec::new();
 
         // Drain from bucket 0 first (highest priority)
         while result.len() < max_txs {
             if let Some(pending) = self.bucket0.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
                 result.push(pending.tx);
             } else {
                 break;
@@ -127,6 +129,7 @@ impl Mempool {
         // Then bucket 1
         while result.len() < max_txs {
             if let Some(pending) = self.bucket1.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
                 result.push(pending.tx);
             } else {
                 break;
@@ -136,9 +139,20 @@ impl Mempool {
         // Finally bucket 2
         while result.len() < max_txs {
             if let Some(pending) = self.bucket2.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
                 result.push(pending.tx);
             } else {
                 break;
+            }
+        }
+
+        // Decrement per-address counts
+        for addr in to_decrement {
+            if let Some(count) = self.per_address_count.get_mut(&addr) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.per_address_count.remove(&addr);
+                }
             }
         }
 
@@ -312,23 +326,46 @@ impl Mempool {
     /// Drain transactions that were previously peeked (legacy, for single-node)
     pub fn drain_block(&mut self, count: usize) {
         let mut remaining = count;
+        let mut to_decrement: Vec<String> = Vec::new();
 
         // Drain from bucket 0 first
-        while remaining > 0 && !self.bucket0.is_empty() {
-            self.bucket0.pop_front();
-            remaining -= 1;
+        while remaining > 0 {
+            if let Some(pending) = self.bucket0.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
+                remaining -= 1;
+            } else {
+                break;
+            }
         }
 
         // Then bucket 1
-        while remaining > 0 && !self.bucket1.is_empty() {
-            self.bucket1.pop_front();
-            remaining -= 1;
+        while remaining > 0 {
+            if let Some(pending) = self.bucket1.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
+                remaining -= 1;
+            } else {
+                break;
+            }
         }
 
         // Finally bucket 2
-        while remaining > 0 && !self.bucket2.is_empty() {
-            self.bucket2.pop_front();
-            remaining -= 1;
+        while remaining > 0 {
+            if let Some(pending) = self.bucket2.pop_front() {
+                to_decrement.push(pending.tx.trader_address().to_string());
+                remaining -= 1;
+            } else {
+                break;
+            }
+        }
+
+        // Decrement per-address counts
+        for addr in to_decrement {
+            if let Some(count) = self.per_address_count.get_mut(&addr) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.per_address_count.remove(&addr);
+                }
+            }
         }
     }
 
@@ -647,5 +684,85 @@ mod tests {
         let pruned = mempool.prune_stale(1_000_000_000);
         assert_eq!(pruned, 0);
         assert_eq!(mempool.len(), 1);
+    }
+
+    #[test]
+    fn test_prepare_block_decrements_address_count() {
+        let mut mempool = Mempool::with_config(100, 10, 0);
+
+        // Add 5 txs from alice
+        for i in 0..5 {
+            mempool.add(Transaction::Deposit {
+                trader: "alice".into(),
+                amount: 100 + i,
+            }, i as u64).unwrap();
+        }
+
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&5));
+
+        // prepare_block should drain and decrement counts
+        let block = mempool.prepare_block(3);
+        assert_eq!(block.len(), 3);
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&2));
+
+        // Drain remaining
+        let block = mempool.prepare_block(10);
+        assert_eq!(block.len(), 2);
+        assert_eq!(mempool.per_address_count.get("alice"), None); // Removed when 0
+    }
+
+    #[test]
+    fn test_prepare_block_allows_resubmission() {
+        // Regression: prepare_block must decrement counts so new txs can be submitted
+        let mut mempool = Mempool::with_config(100, 3, 0);
+
+        // Fill to address limit
+        for i in 0..3 {
+            mempool.add(Transaction::Deposit {
+                trader: "alice".into(),
+                amount: 100 + i,
+            }, i as u64).unwrap();
+        }
+
+        // Should be at limit
+        let result = mempool.add(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 999,
+        }, 10);
+        assert!(matches!(result, Err(MempoolError::AddressLimitReached)));
+
+        // Drain all via prepare_block
+        let block = mempool.prepare_block(10);
+        assert_eq!(block.len(), 3);
+
+        // Should be able to submit again
+        mempool.add(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 200,
+        }, 11).unwrap();
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&1));
+    }
+
+    #[test]
+    fn test_drain_block_decrements_address_count() {
+        let mut mempool = Mempool::with_config(100, 10, 0);
+
+        for i in 0..4 {
+            mempool.add(Transaction::Deposit {
+                trader: "alice".into(),
+                amount: 100 + i,
+            }, i as u64).unwrap();
+        }
+
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&4));
+
+        // drain_block should also decrement counts
+        mempool.drain_block(2);
+        assert_eq!(mempool.per_address_count.get("alice"), Some(&2));
+        assert_eq!(mempool.len(), 2);
+
+        mempool.drain_block(2);
+        assert_eq!(mempool.per_address_count.get("alice"), None);
+        assert_eq!(mempool.len(), 0);
     }
 }
