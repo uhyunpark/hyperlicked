@@ -39,6 +39,10 @@ export function useWallet() {
     signOrderSmart: signing.signOrderSmart,
     signCancel: signing.signCancel,
     signCancelSmart: signing.signCancelSmart,
+    signTriggerOrder: signing.signTriggerOrder,
+    signTriggerOrderSmart: signing.signTriggerOrderSmart,
+    signCancelTriggerOrder: signing.signCancelTriggerOrder,
+    signCancelTriggerOrderSmart: signing.signCancelTriggerOrderSmart,
     // Agent key state
     tradingEnabled: agentKey.tradingEnabled,
     agentAddress: agentKey.agentAddress,

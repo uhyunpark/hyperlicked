@@ -387,13 +387,32 @@ export interface ApiTriggerOrder {
 }
 
 export interface PlaceTriggerOrderRequest {
-  trader: string
-  symbol: string
-  triggerType: 'sl' | 'tp'
-  triggerPrice: number  // cents
-  size: number          // satoshis
-  limitPrice?: number   // cents (optional)
-  cloid?: string
+  trigger: {
+    symbol: string
+    triggerType: number   // 1=StopLoss, 2=TakeProfit
+    triggerPrice: string  // BigInt as string
+    size: string          // BigInt as string
+    limitPrice: string    // BigInt as string (0 = no limit)
+    nonce: string         // BigInt as string
+    owner: string         // Address
+    cloid?: string
+  }
+  signature: string
+  agent_mode?: boolean
+  delegation_id?: string
+}
+
+export interface CancelTriggerOrderRequest {
+  cancel: {
+    triggerOrderId?: string
+    symbol?: string
+    nonce: string  // BigInt as string
+    owner: string  // Address
+    cloid?: string
+  }
+  signature: string
+  agent_mode?: boolean
+  delegation_id?: string
 }
 
 export interface PlaceTriggerOrderResponse {
@@ -422,31 +441,11 @@ export async function placeTriggerOrder(req: PlaceTriggerOrderRequest): Promise<
   return res.json()
 }
 
-export async function cancelTriggerOrder(
-  triggerOrderId: string,
-  trader: string
-): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/trigger-orders/${triggerOrderId}?trader=${encodeURIComponent(trader)}`, {
-    method: 'DELETE'
-  })
-
-  if (!res.ok) {
-    const errorText = await res.text()
-    throw new Error(errorText || res.statusText)
-  }
-
-  return res.json()
-}
-
-export async function cancelTriggerOrderByCloid(
-  trader: string,
-  symbol: string,
-  cloid: string
-): Promise<{ status: string }> {
+export async function cancelTriggerOrder(req: CancelTriggerOrderRequest): Promise<{ status: string }> {
   const res = await fetch(`${API_BASE}/trigger-orders/cancel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ trader, symbol, cloid })
+    body: JSON.stringify(req)
   })
 
   if (!res.ok) {

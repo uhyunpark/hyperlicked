@@ -100,10 +100,6 @@ pub fn create_router_with_store(
         .route("/orders/cancel", post(order::cancel_order))
         // Trigger orders (Stop Loss / Take Profit)
         .route("/trigger-orders", post(trigger::place_trigger_order))
-        .route(
-            "/trigger-orders/:id",
-            axum::routing::delete(trigger::cancel_trigger_order_by_id),
-        )
         .route("/trigger-orders/cancel", post(trigger::cancel_trigger_order))
         // Agent delegation
         .route("/delegations", post(register_delegation))

@@ -39,6 +39,29 @@ export const EIP712_CANCEL_TYPES = {
   ]
 }
 
+// EIP-712 Types for Trigger Order
+export const EIP712_TRIGGER_ORDER_TYPES = {
+  TriggerOrder: [
+    { name: 'symbol', type: 'string' },
+    { name: 'triggerType', type: 'uint8' },
+    { name: 'triggerPrice', type: 'uint256' },
+    { name: 'size', type: 'uint256' },
+    { name: 'limitPrice', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'owner', type: 'address' }
+  ]
+}
+
+// EIP-712 Types for Cancel Trigger Order
+export const EIP712_CANCEL_TRIGGER_ORDER_TYPES = {
+  CancelTriggerOrder: [
+    { name: 'triggerOrderId', type: 'string' },
+    { name: 'symbol', type: 'string' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'owner', type: 'address' }
+  ]
+}
+
 export interface WalletState {
   isConnected: boolean
   address: string | null
@@ -70,6 +93,23 @@ export interface OrderToSign {
 
 export interface CancelToSign {
   orderId: string
+  symbol: string
+  nonce: string // BigInt as string
+  owner: string // Address
+}
+
+export interface TriggerOrderToSign {
+  symbol: string
+  triggerType: number   // 1=StopLoss, 2=TakeProfit
+  triggerPrice: string  // BigInt as string
+  size: string          // BigInt as string
+  limitPrice: string    // BigInt as string (0 = no limit)
+  nonce: string         // BigInt as string
+  owner: string         // Address
+}
+
+export interface CancelTriggerOrderToSign {
+  triggerOrderId: string
   symbol: string
   nonce: string // BigInt as string
   owner: string // Address

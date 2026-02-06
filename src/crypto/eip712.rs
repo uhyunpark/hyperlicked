@@ -124,6 +124,74 @@ impl CancelEIP712 {
     }
 }
 
+/// Trigger order for EIP-712 signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerOrderEIP712 {
+    pub symbol: String,
+    pub trigger_type: u8, // 1 = StopLoss, 2 = TakeProfit
+    pub trigger_price: U256,
+    pub size: U256,
+    pub limit_price: U256, // 0 if no limit price (market order on trigger)
+    pub nonce: U256,
+    pub owner: Address,
+}
+
+impl TriggerOrderEIP712 {
+    /// Compute the struct hash for this trigger order
+    pub fn struct_hash(&self) -> B256 {
+        let type_hash = keccak256(
+            b"TriggerOrder(string symbol,uint8 triggerType,uint256 triggerPrice,uint256 size,uint256 limitPrice,uint256 nonce,address owner)"
+        );
+
+        let symbol_hash = keccak256(self.symbol.as_bytes());
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(type_hash.as_slice());
+        encoded.extend_from_slice(symbol_hash.as_slice());
+        encoded.extend_from_slice(&[0u8; 31]); // padding for uint8
+        encoded.push(self.trigger_type);
+        encoded.extend_from_slice(&self.trigger_price.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.size.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.limit_price.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.nonce.to_be_bytes::<32>());
+        encoded.extend_from_slice(&[0u8; 12]); // address padding
+        encoded.extend_from_slice(self.owner.as_slice());
+
+        keccak256(&encoded)
+    }
+}
+
+/// Cancel trigger order for EIP-712 signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelTriggerOrderEIP712 {
+    pub trigger_order_id: String,
+    pub symbol: String,
+    pub nonce: U256,
+    pub owner: Address,
+}
+
+impl CancelTriggerOrderEIP712 {
+    /// Compute the struct hash for this cancel trigger order
+    pub fn struct_hash(&self) -> B256 {
+        let type_hash = keccak256(
+            b"CancelTriggerOrder(string triggerOrderId,string symbol,uint256 nonce,address owner)"
+        );
+
+        let trigger_order_id_hash = keccak256(self.trigger_order_id.as_bytes());
+        let symbol_hash = keccak256(self.symbol.as_bytes());
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(type_hash.as_slice());
+        encoded.extend_from_slice(trigger_order_id_hash.as_slice());
+        encoded.extend_from_slice(symbol_hash.as_slice());
+        encoded.extend_from_slice(&self.nonce.to_be_bytes::<32>());
+        encoded.extend_from_slice(&[0u8; 12]);
+        encoded.extend_from_slice(self.owner.as_slice());
+
+        keccak256(&encoded)
+    }
+}
+
 /// EIP-712 signer for orders and cancels
 pub struct EIP712Signer {
     domain: EIP712Domain,
@@ -204,6 +272,68 @@ impl EIP712Signer {
         signature: &[u8],
     ) -> Result<bool, SignerError> {
         let hash = self.hash_cancel(cancel);
+        let recovered = recover_address(&hash.into(), signature)?;
+        Ok(recovered == cancel.owner)
+    }
+
+    /// Hash a trigger order according to EIP-712
+    pub fn hash_trigger_order(&self, trigger: &TriggerOrderEIP712) -> B256 {
+        let domain_separator = self.domain.separator();
+        let struct_hash = trigger.struct_hash();
+
+        let mut message = vec![0x19, 0x01];
+        message.extend_from_slice(domain_separator.as_slice());
+        message.extend_from_slice(struct_hash.as_slice());
+
+        keccak256(&message)
+    }
+
+    /// Sign a trigger order
+    pub fn sign_trigger_order(&self, signer: &Signer, trigger: &TriggerOrderEIP712) -> [u8; 65] {
+        let hash = self.hash_trigger_order(trigger);
+        signer.sign(&hash.into())
+    }
+
+    /// Verify a trigger order signature
+    pub fn verify_trigger_order_signature(
+        &self,
+        trigger: &TriggerOrderEIP712,
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let hash = self.hash_trigger_order(trigger);
+        let recovered = recover_address(&hash.into(), signature)?;
+        Ok(recovered == trigger.owner)
+    }
+
+    /// Recover signer address from trigger order signature
+    pub fn recover_trigger_order_signer(
+        &self,
+        trigger: &TriggerOrderEIP712,
+        signature: &[u8],
+    ) -> Result<Address, SignerError> {
+        let hash = self.hash_trigger_order(trigger);
+        recover_address(&hash.into(), signature)
+    }
+
+    /// Hash a cancel trigger order according to EIP-712
+    pub fn hash_cancel_trigger_order(&self, cancel: &CancelTriggerOrderEIP712) -> B256 {
+        let domain_separator = self.domain.separator();
+        let struct_hash = cancel.struct_hash();
+
+        let mut message = vec![0x19, 0x01];
+        message.extend_from_slice(domain_separator.as_slice());
+        message.extend_from_slice(struct_hash.as_slice());
+
+        keccak256(&message)
+    }
+
+    /// Verify a cancel trigger order signature
+    pub fn verify_cancel_trigger_order_signature(
+        &self,
+        cancel: &CancelTriggerOrderEIP712,
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let hash = self.hash_cancel_trigger_order(cancel);
         let recovered = recover_address(&hash.into(), signature)?;
         Ok(recovered == cancel.owner)
     }
@@ -316,6 +446,47 @@ mod tests {
         // Should fail verification
         let valid = eip712.verify_order_signature(&order, &signature).unwrap();
         assert!(!valid);
+    }
+
+    #[test]
+    fn test_sign_and_verify_trigger_order() {
+        let signer = Signer::generate();
+        let eip712 = EIP712Signer::default_domain();
+
+        let trigger = TriggerOrderEIP712 {
+            symbol: "BTC-USDT".to_string(),
+            trigger_type: 1, // StopLoss
+            trigger_price: U256::from(45000_00u64), // $45,000
+            size: U256::from(100_000_000u64), // 1 BTC
+            limit_price: U256::ZERO, // Market order on trigger
+            nonce: U256::from(1),
+            owner: signer.address(),
+        };
+
+        let signature = eip712.sign_trigger_order(&signer, &trigger);
+        assert_eq!(signature.len(), 65);
+
+        let valid = eip712.verify_trigger_order_signature(&trigger, &signature).unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_sign_and_verify_cancel_trigger_order() {
+        let signer = Signer::generate();
+        let eip712 = EIP712Signer::default_domain();
+
+        let cancel = CancelTriggerOrderEIP712 {
+            trigger_order_id: "T12345678".to_string(),
+            symbol: "BTC-USDT".to_string(),
+            nonce: U256::from(2),
+            owner: signer.address(),
+        };
+
+        let hash = eip712.hash_cancel_trigger_order(&cancel);
+        let sig = signer.sign(&hash.into());
+
+        let valid = eip712.verify_cancel_trigger_order_signature(&cancel, &sig).unwrap();
+        assert!(valid);
     }
 
     #[test]

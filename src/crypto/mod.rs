@@ -19,5 +19,8 @@ pub use bls::{
     aggregate_public_keys, aggregate_signatures, verify_aggregate, BlsError, BlsPublicKey,
     BlsSecretKey, BlsSignature,
 };
-pub use eip712::{CancelEIP712, EIP712Domain, EIP712Signer, OrderEIP712};
+pub use eip712::{
+    CancelEIP712, CancelTriggerOrderEIP712, EIP712Domain, EIP712Signer, OrderEIP712,
+    TriggerOrderEIP712,
+};
 pub use signer::{recover_address, Signer};

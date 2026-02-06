@@ -342,19 +342,40 @@ pub struct TriggerOrderInfo {
     pub timestamp: u64,
 }
 
-/// Request to place a trigger order
+/// Trigger order details within signed request
 #[derive(Debug, Deserialize)]
-pub struct PlaceTriggerOrderRequest {
-    pub trader: String,
+pub struct TriggerOrderDetails {
     pub symbol: String,
     #[serde(rename = "triggerType")]
-    pub trigger_type: String,  // "sl" or "tp"
+    pub trigger_type: u8, // 1 = StopLoss, 2 = TakeProfit
     #[serde(rename = "triggerPrice")]
-    pub trigger_price: i64,
-    pub size: i64,
+    pub trigger_price: String, // BigInt as string
+    pub size: String,          // BigInt as string
     #[serde(rename = "limitPrice")]
-    pub limit_price: Option<i64>,
+    pub limit_price: String,   // BigInt as string (0 = no limit)
+    pub nonce: String,         // BigInt as string
+    pub owner: String,         // Address
     pub cloid: Option<String>,
+}
+
+/// Cancel trigger order details within signed request
+#[derive(Debug, Deserialize)]
+pub struct CancelTriggerOrderDetails {
+    #[serde(rename = "triggerOrderId")]
+    pub trigger_order_id: Option<String>,
+    pub symbol: Option<String>,
+    pub nonce: String,  // BigInt as string
+    pub owner: String,  // Address
+    pub cloid: Option<String>,
+}
+
+/// Request to place a trigger order (signed)
+#[derive(Debug, Deserialize)]
+pub struct PlaceTriggerOrderRequest {
+    pub trigger: TriggerOrderDetails,
+    pub signature: String,
+    pub agent_mode: Option<bool>,
+    pub delegation_id: Option<String>,
 }
 
 /// Response after placing a trigger order
@@ -365,14 +386,13 @@ pub struct PlaceTriggerOrderResponse {
     pub trigger_order_id: String,
 }
 
-/// Request to cancel a trigger order
+/// Request to cancel a trigger order (signed)
 #[derive(Debug, Deserialize)]
 pub struct CancelTriggerOrderRequest {
-    pub trader: String,
-    #[serde(rename = "triggerOrderId")]
-    pub trigger_order_id: Option<String>,
-    pub symbol: Option<String>,
-    pub cloid: Option<String>,
+    pub cancel: CancelTriggerOrderDetails,
+    pub signature: String,
+    pub agent_mode: Option<bool>,
+    pub delegation_id: Option<String>,
 }
 
 // =============================================================================

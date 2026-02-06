@@ -1,18 +1,21 @@
 //! Trigger Order Endpoints
 //!
 //! Stop Loss and Take Profit order management.
+//! All mutations require EIP-712 signatures.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use std::collections::HashMap;
 
 use crate::api::types::{
     ApiState, CancelTriggerOrderRequest, PlaceTriggerOrderRequest, PlaceTriggerOrderResponse,
     TriggerOrderInfo,
 };
+use crate::api::verify::{verify_cancel_trigger_order, verify_trigger_order};
 use crate::app::Transaction;
 
 pub async fn get_trigger_orders(
@@ -61,31 +64,59 @@ pub async fn place_trigger_order(
     State(state): State<ApiState>,
     Json(req): Json<PlaceTriggerOrderRequest>,
 ) -> Result<Json<PlaceTriggerOrderResponse>, (StatusCode, String)> {
-    let trigger_type = match req.trigger_type.as_str() {
-        "sl" | "stop_loss" => crate::app::TriggerType::StopLoss,
-        "tp" | "take_profit" => crate::app::TriggerType::TakeProfit,
+    // Look up delegation if agent mode
+    let delegation = if req.agent_mode.unwrap_or(false) {
+        if let Some(ref id) = req.delegation_id {
+            let delegations = state.delegations.read().await;
+            delegations.get(id).cloned()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Use current time for API-level validation (consensus uses block timestamp)
+    let block_timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    // Verify signature
+    let verified = verify_trigger_order(
+        &req,
+        &state.eip712_signer,
+        &state.agent_signer,
+        delegation.as_ref(),
+        block_timestamp_ms,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Map trigger type from u8 to enum
+    let trigger_type = match verified.trigger_type {
+        1 => crate::app::TriggerType::StopLoss,
+        2 => crate::app::TriggerType::TakeProfit,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "Invalid trigger type. Use 'sl' or 'tp'".to_string(),
+                "Invalid trigger type. Use 1 (StopLoss) or 2 (TakeProfit)".to_string(),
             ))
         }
     };
 
     let tx = Transaction::PlaceTriggerOrder {
-        trader: req.trader,
-        symbol: req.symbol,
+        trader: format!("{:?}", verified.owner),
+        symbol: verified.symbol,
         trigger_type,
-        trigger_price: req.trigger_price,
-        size: req.size,
-        limit_price: req.limit_price,
-        cloid: req.cloid,
+        trigger_price: verified.trigger_price,
+        size: verified.size,
+        limit_price: verified.limit_price,
+        cloid: verified.cloid,
     };
 
     let mut app = state.shared.app.write().await;
     match app.submit_tx(tx) {
         Ok(hash) => {
-            // The hash is used to generate a pseudo-ID until the block commits
             let trigger_order_id = format!("T{}", hex::encode(&hash[..4]));
             Ok(Json(PlaceTriggerOrderResponse {
                 status: "submitted".to_string(),
@@ -100,14 +131,20 @@ pub async fn cancel_trigger_order(
     State(state): State<ApiState>,
     Json(req): Json<CancelTriggerOrderRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tx = if let Some(trigger_order_id) = req.trigger_order_id {
+    // Verify signature
+    let verified = verify_cancel_trigger_order(&req, &state.eip712_signer)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let trader = format!("{:?}", verified.owner);
+
+    let tx = if let Some(trigger_order_id) = verified.trigger_order_id {
         Transaction::CancelTriggerOrder {
-            trader: req.trader,
+            trader,
             trigger_order_id,
         }
-    } else if let (Some(symbol), Some(cloid)) = (req.symbol, req.cloid) {
+    } else if let (Some(symbol), Some(cloid)) = (verified.symbol, verified.cloid) {
         Transaction::CancelTriggerOrderByCloid {
-            trader: req.trader,
+            trader,
             symbol,
             cloid,
         }
@@ -116,27 +153,6 @@ pub async fn cancel_trigger_order(
             StatusCode::BAD_REQUEST,
             "Must provide either triggerOrderId or (symbol + cloid)".to_string(),
         ));
-    };
-
-    let mut app = state.shared.app.write().await;
-    let _ = app.submit_tx(tx);
-
-    Ok(Json(serde_json::json!({ "status": "submitted" })))
-}
-
-pub async fn cancel_trigger_order_by_id(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let trader = params
-        .get("trader")
-        .or(params.get("address"))
-        .ok_or((StatusCode::BAD_REQUEST, "Missing trader/address parameter".to_string()))?;
-
-    let tx = Transaction::CancelTriggerOrder {
-        trader: trader.clone(),
-        trigger_order_id: id,
     };
 
     let mut app = state.shared.app.write().await;

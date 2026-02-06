@@ -7,10 +7,14 @@ use alloy_primitives::{Address, U256};
 
 use crate::config::Config;
 use crate::crypto::{
-    verify_agent_order, AgentSigner, CancelEIP712, EIP712Signer, OrderEIP712,
+    verify_agent_order, AgentSigner, CancelEIP712, CancelTriggerOrderEIP712, EIP712Signer,
+    OrderEIP712, TriggerOrderEIP712,
 };
 
-use super::types::{OrderDetails, SignedTransaction, StoredDelegation};
+use super::types::{
+    CancelTriggerOrderRequest, OrderDetails, PlaceTriggerOrderRequest, SignedTransaction,
+    StoredDelegation,
+};
 
 /// Result of successful order verification
 pub struct VerifiedOrder {
@@ -31,6 +35,27 @@ pub struct VerifiedCancel {
     pub nonce: u64,
 }
 
+/// Result of successful trigger order verification
+pub struct VerifiedTriggerOrder {
+    pub owner: Address,
+    pub symbol: String,
+    pub trigger_type: u8, // 1 = StopLoss, 2 = TakeProfit
+    pub trigger_price: i64,
+    pub size: i64,
+    pub limit_price: Option<i64>,
+    pub nonce: u64,
+    pub cloid: Option<String>,
+}
+
+/// Result of successful cancel trigger order verification
+pub struct VerifiedCancelTriggerOrder {
+    pub owner: Address,
+    pub trigger_order_id: Option<String>,
+    pub symbol: Option<String>,
+    pub cloid: Option<String>,
+    pub nonce: u64,
+}
+
 /// Verification errors
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -42,10 +67,14 @@ pub enum VerifyError {
     MissingOrder,
     #[error("missing cancel details")]
     MissingCancel,
+    #[error("invalid trigger price format")]
+    InvalidTriggerPrice,
     #[error("invalid price format")]
     InvalidPrice,
     #[error("invalid quantity format")]
     InvalidQuantity,
+    #[error("invalid size format")]
+    InvalidSize,
     #[error("invalid nonce format")]
     InvalidNonce,
     #[error("invalid owner address")]
@@ -165,6 +194,168 @@ fn build_order_eip712(order: &OrderDetails, owner: Address) -> Result<OrderEIP71
         leverage: order.leverage,
         owner,
     })
+}
+
+/// Verify a trigger order signature and extract verified data
+pub fn verify_trigger_order(
+    req: &PlaceTriggerOrderRequest,
+    eip712: &EIP712Signer,
+    agent_signer: &AgentSigner,
+    delegation: Option<&StoredDelegation>,
+    block_timestamp_ms: u64,
+) -> Result<VerifiedTriggerOrder, VerifyError> {
+    let trigger = &req.trigger;
+
+    // Parse signature
+    let sig_hex = req.signature.strip_prefix("0x").unwrap_or(&req.signature);
+    let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
+
+    // Parse owner address
+    let owner: Address = trigger.owner.parse().map_err(|_| VerifyError::InvalidOwner)?;
+
+    // Build TriggerOrderEIP712 for verification
+    let trigger_eip712 = TriggerOrderEIP712 {
+        symbol: trigger.symbol.clone(),
+        trigger_type: trigger.trigger_type,
+        trigger_price: U256::from_str_radix(&trigger.trigger_price, 10)
+            .map_err(|_| VerifyError::InvalidTriggerPrice)?,
+        size: U256::from_str_radix(&trigger.size, 10)
+            .map_err(|_| VerifyError::InvalidSize)?,
+        limit_price: U256::from_str_radix(&trigger.limit_price, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        nonce: U256::from_str_radix(&trigger.nonce, 10)
+            .map_err(|_| VerifyError::InvalidNonce)?,
+        owner,
+    };
+
+    // Verify based on mode (direct or agent)
+    if req.agent_mode.unwrap_or(false) {
+        verify_agent_trigger_order_sig(
+            &trigger_eip712, &signature, delegation, eip712, agent_signer, block_timestamp_ms,
+        )?;
+    } else if !Config::global().skip_signature_verification {
+        let valid = eip712
+            .verify_trigger_order_signature(&trigger_eip712, &signature)
+            .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
+        if !valid {
+            return Err(VerifyError::InvalidSignature);
+        }
+    }
+
+    // Parse numeric fields
+    let trigger_price: i64 = trigger.trigger_price.parse().map_err(|_| VerifyError::InvalidTriggerPrice)?;
+    let size: i64 = trigger.size.parse().map_err(|_| VerifyError::InvalidSize)?;
+    let limit_price_raw: i64 = trigger.limit_price.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let limit_price = if limit_price_raw == 0 { None } else { Some(limit_price_raw) };
+    let nonce: u64 = trigger.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+
+    Ok(VerifiedTriggerOrder {
+        owner,
+        symbol: trigger.symbol.clone(),
+        trigger_type: trigger.trigger_type,
+        trigger_price,
+        size,
+        limit_price,
+        nonce,
+        cloid: trigger.cloid.clone(),
+    })
+}
+
+/// Verify a cancel trigger order signature and extract verified data
+pub fn verify_cancel_trigger_order(
+    req: &CancelTriggerOrderRequest,
+    eip712: &EIP712Signer,
+) -> Result<VerifiedCancelTriggerOrder, VerifyError> {
+    let cancel = &req.cancel;
+
+    // Parse signature
+    let sig_hex = req.signature.strip_prefix("0x").unwrap_or(&req.signature);
+    let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
+
+    // Parse owner address
+    let owner: Address = cancel.owner.parse().map_err(|_| VerifyError::InvalidOwner)?;
+
+    // Build CancelTriggerOrderEIP712 — use trigger_order_id if present, else cloid
+    let id_for_signing = cancel.trigger_order_id.clone().unwrap_or_default();
+    let symbol_for_signing = cancel.symbol.clone().unwrap_or_default();
+
+    let cancel_eip712 = CancelTriggerOrderEIP712 {
+        trigger_order_id: id_for_signing,
+        symbol: symbol_for_signing,
+        nonce: U256::from_str_radix(&cancel.nonce, 10).map_err(|_| VerifyError::InvalidNonce)?,
+        owner,
+    };
+
+    // Skip verification in dev mode if configured
+    if !Config::global().skip_signature_verification {
+        let valid = eip712
+            .verify_cancel_trigger_order_signature(&cancel_eip712, &signature)
+            .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
+        if !valid {
+            return Err(VerifyError::InvalidSignature);
+        }
+    }
+
+    let nonce: u64 = cancel.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+
+    Ok(VerifiedCancelTriggerOrder {
+        owner,
+        trigger_order_id: cancel.trigger_order_id.clone(),
+        symbol: cancel.symbol.clone(),
+        cloid: cancel.cloid.clone(),
+        nonce,
+    })
+}
+
+/// Verify trigger order with agent delegation
+fn verify_agent_trigger_order_sig(
+    trigger: &TriggerOrderEIP712,
+    agent_signature: &[u8],
+    delegation: Option<&StoredDelegation>,
+    eip712: &EIP712Signer,
+    agent_signer: &AgentSigner,
+    block_timestamp_ms: u64,
+) -> Result<(), VerifyError> {
+    let stored = delegation.ok_or(VerifyError::DelegationNotFound)?;
+
+    // Recover agent address from trigger order signature
+    let order_hash = eip712.hash_trigger_order(trigger);
+    let agent_addr = crate::crypto::recover_address(&order_hash.into(), agent_signature)
+        .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
+
+    // Verify the agent matches the delegation
+    if agent_addr != stored.delegation.agent {
+        return Err(VerifyError::AgentError(format!(
+            "agent mismatch: expected {}, got {}",
+            stored.delegation.agent, agent_addr
+        )));
+    }
+
+    // Verify delegation is not expired
+    if stored.delegation.is_expired_at(block_timestamp_ms) {
+        return Err(VerifyError::AgentError(format!(
+            "delegation expired at {}",
+            stored.delegation.expiration
+        )));
+    }
+
+    // Verify wallet signed the delegation
+    let valid = agent_signer
+        .verify_delegation(&stored.delegation, &stored.signature)
+        .map_err(|e| VerifyError::AgentError(e.to_string()))?;
+    if !valid {
+        return Err(VerifyError::AgentError("invalid delegation signature".to_string()));
+    }
+
+    // Verify trigger order owner matches delegation wallet
+    if trigger.owner != stored.delegation.wallet {
+        return Err(VerifyError::AgentError(format!(
+            "owner mismatch: trigger owner {} != delegation wallet {}",
+            trigger.owner, stored.delegation.wallet
+        )));
+    }
+
+    Ok(())
 }
 
 /// Verify order with agent delegation

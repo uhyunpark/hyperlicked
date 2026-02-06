@@ -2,12 +2,13 @@
 
 import { useState, useEffect, useCallback, useMemo, memo } from 'react'
 import { useTradingStore } from '@/lib/store'
-import { useWallet, type OrderToSign } from '@/lib/useWallet'
+import { useWallet, type OrderToSign, type CancelTriggerOrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
 import {
   getTriggerOrders,
   cancelTriggerOrder,
   convertPrice,
+  convertSize,
   convertToApiPrice,
   convertToApiSize,
   submitSignedTransaction,
@@ -101,7 +102,7 @@ function PositionsInner() {
           triggerType: t.triggerType as 'sl' | 'tp',
           side: t.side as 'buy' | 'sell',
           triggerPrice: convertPrice(t.triggerPrice),
-          size: convertPrice(t.size),
+          size: convertSize(t.size),
           limitPrice: t.limitPrice ? convertPrice(t.limitPrice) : undefined,
           status: t.status as 'pending' | 'triggered' | 'cancelled' | 'failed',
           timestamp: t.timestamp,
@@ -187,14 +188,33 @@ function PositionsInner() {
     if (!wallet.address) return
 
     try {
-      await cancelTriggerOrder(triggerOrderId, wallet.address)
+      // Get fresh nonce for signature
+      const nonceData = await getNonce(wallet.address)
+      const cancelToSign: CancelTriggerOrderToSign = {
+        triggerOrderId,
+        symbol,
+        nonce: nonceData.nonce.toString(),
+        owner: wallet.address,
+      }
+      const { signature, agentMode, delegationId } = await wallet.signCancelTriggerOrderSmart(cancelToSign)
+      await cancelTriggerOrder({
+        cancel: {
+          triggerOrderId,
+          symbol,
+          nonce: nonceData.nonce.toString(),
+          owner: wallet.address,
+        },
+        signature,
+        agent_mode: agentMode,
+        delegation_id: delegationId,
+      })
       toast.success(`${type.toUpperCase()} Cancelled`, `Cancelled ${type === 'tp' ? 'Take Profit' : 'Stop Loss'} for ${symbol}`)
       // WebSocket will handle the removal, but also update local state immediately
       useTradingStore.getState().removeTriggerOrder(triggerOrderId)
     } catch (err: any) {
       toast.error('Cancel Failed', err.message)
     }
-  }, [wallet.address])
+  }, [wallet.address, wallet.signCancelTriggerOrderSmart])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">

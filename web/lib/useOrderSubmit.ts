@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react'
 import { useTradingStore } from '@/lib/store'
-import { useWallet, type OrderToSign } from '@/lib/useWallet'
+import { useWallet, type OrderToSign, type TriggerOrderToSign } from '@/lib/useWallet'
 import { toast } from '@/components/ui/Toast'
 import type { Side, OrderType, TimeInForce } from '@/lib/types'
 import { TIF_CODES } from '@/lib/types'
@@ -112,7 +112,7 @@ export function useOrderSubmit() {
         // Place TP/SL orders if enabled and this is not a reduce-only order
         if (tpSlEnabled && !reduceOnly) {
           const orderSizeApi = convertToApiSize(parseFloat(size))
-          await placeTpSlOrders(wallet.address!, selectedSymbol, orderSizeApi, tpPrice, slPrice)
+          await placeTpSlOrders(wallet, selectedSymbol, orderSizeApi, tpPrice, slPrice)
         }
 
         callbacks.onSuccess()
@@ -131,23 +131,35 @@ export function useOrderSubmit() {
   return { submitOrder }
 }
 
-// Helper to place TP/SL orders
+// Helper to place TP/SL orders with signed requests
 async function placeTpSlOrders(
-  address: string,
+  wallet: ReturnType<typeof useWallet>,
   symbol: string,
   size: number,
   tpPrice: string,
   slPrice: string
 ) {
+  if (!wallet.address) return
+
   // Place Take Profit if set
   if (tpPrice && parseFloat(tpPrice) > 0) {
     try {
-      await placeTriggerOrder({
-        trader: address,
+      const nonceData = await getNonce(wallet.address)
+      const triggerToSign: TriggerOrderToSign = {
         symbol,
-        triggerType: 'tp',
-        triggerPrice: convertToApiPrice(parseFloat(tpPrice)),
-        size,
+        triggerType: 2, // TakeProfit
+        triggerPrice: convertToApiPrice(parseFloat(tpPrice)).toString(),
+        size: size.toString(),
+        limitPrice: '0',
+        nonce: nonceData.nonce.toString(),
+        owner: wallet.address,
+      }
+      const { signature, agentMode, delegationId } = await wallet.signTriggerOrderSmart(triggerToSign)
+      await placeTriggerOrder({
+        trigger: triggerToSign,
+        signature,
+        agent_mode: agentMode,
+        delegation_id: delegationId,
       })
       toast.success('Take Profit Set', `TP at $${parseFloat(tpPrice).toLocaleString()}`)
     } catch (err: any) {
@@ -158,12 +170,22 @@ async function placeTpSlOrders(
   // Place Stop Loss if set
   if (slPrice && parseFloat(slPrice) > 0) {
     try {
-      await placeTriggerOrder({
-        trader: address,
+      const nonceData = await getNonce(wallet.address)
+      const triggerToSign: TriggerOrderToSign = {
         symbol,
-        triggerType: 'sl',
-        triggerPrice: convertToApiPrice(parseFloat(slPrice)),
-        size,
+        triggerType: 1, // StopLoss
+        triggerPrice: convertToApiPrice(parseFloat(slPrice)).toString(),
+        size: size.toString(),
+        limitPrice: '0',
+        nonce: nonceData.nonce.toString(),
+        owner: wallet.address,
+      }
+      const { signature, agentMode, delegationId } = await wallet.signTriggerOrderSmart(triggerToSign)
+      await placeTriggerOrder({
+        trigger: triggerToSign,
+        signature,
+        agent_mode: agentMode,
+        delegation_id: delegationId,
       })
       toast.success('Stop Loss Set', `SL at $${parseFloat(slPrice).toLocaleString()}`)
     } catch (err: any) {

@@ -10,8 +10,12 @@ import {
   EIP712_DOMAIN,
   EIP712_ORDER_TYPES,
   EIP712_CANCEL_TYPES,
+  EIP712_TRIGGER_ORDER_TYPES,
+  EIP712_CANCEL_TRIGGER_ORDER_TYPES,
   type OrderToSign,
   type CancelToSign,
+  type TriggerOrderToSign,
+  type CancelTriggerOrderToSign,
 } from './types'
 
 interface SigningResult {
@@ -106,10 +110,96 @@ export function useWalletSigning(signer: JsonRpcSigner | null) {
     }
   }, [signCancel])
 
+  // Sign a trigger order using EIP-712 (MetaMask)
+  const signTriggerOrder = useCallback(async (trigger: TriggerOrderToSign): Promise<string> => {
+    if (!signer) {
+      throw new Error('Wallet not connected')
+    }
+
+    const signature = await signer.signTypedData(
+      EIP712_DOMAIN,
+      EIP712_TRIGGER_ORDER_TYPES,
+      trigger
+    )
+
+    return signature
+  }, [signer])
+
+  // Sign trigger order with agent key (if available) or MetaMask
+  const signTriggerOrderSmart = useCallback(async (trigger: TriggerOrderToSign): Promise<SigningResult> => {
+    const agent = loadAgentKey()
+    const delegation = getStoredDelegation()
+
+    if (agent && delegation) {
+      const signature = await agent.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_TRIGGER_ORDER_TYPES,
+        trigger
+      )
+
+      return {
+        signature,
+        agentMode: true,
+        delegationId: `${delegation.wallet.toLowerCase()}-${delegation.nonce}`
+      }
+    }
+
+    const signature = await signTriggerOrder(trigger)
+    return {
+      signature,
+      agentMode: false
+    }
+  }, [signTriggerOrder])
+
+  // Sign cancel trigger order using EIP-712 (MetaMask)
+  const signCancelTriggerOrder = useCallback(async (cancel: CancelTriggerOrderToSign): Promise<string> => {
+    if (!signer) {
+      throw new Error('Wallet not connected')
+    }
+
+    const signature = await signer.signTypedData(
+      EIP712_DOMAIN,
+      EIP712_CANCEL_TRIGGER_ORDER_TYPES,
+      cancel
+    )
+
+    return signature
+  }, [signer])
+
+  // Sign cancel trigger order with agent key (if available) or MetaMask
+  const signCancelTriggerOrderSmart = useCallback(async (cancel: CancelTriggerOrderToSign): Promise<SigningResult> => {
+    const agent = loadAgentKey()
+    const delegation = getStoredDelegation()
+
+    if (agent && delegation) {
+      const signature = await agent.signTypedData(
+        EIP712_DOMAIN,
+        EIP712_CANCEL_TRIGGER_ORDER_TYPES,
+        cancel
+      )
+
+      return {
+        signature,
+        agentMode: true,
+        delegationId: `${delegation.wallet.toLowerCase()}-${delegation.nonce}`
+      }
+    }
+
+    const signature = await signCancelTriggerOrder(cancel)
+    return {
+      signature,
+      agentMode: false
+    }
+  }, [signCancelTriggerOrder])
+
   return {
     signOrder,
     signOrderSmart,
     signCancel,
     signCancelSmart,
+    signTriggerOrder,
+    signTriggerOrderSmart,
+    signCancelTriggerOrder,
+    signCancelTriggerOrderSmart,
   }
 }

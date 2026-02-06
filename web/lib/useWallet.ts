@@ -15,10 +15,19 @@
 
 // Re-export the composed hook and types from the wallet module
 export { useWallet } from './wallet'
-export type { OrderToSign, CancelToSign, WalletState, LocalWalletState } from './wallet'
+export type {
+  OrderToSign,
+  CancelToSign,
+  TriggerOrderToSign,
+  CancelTriggerOrderToSign,
+  WalletState,
+  LocalWalletState
+} from './wallet'
 export {
   EIP712_DOMAIN,
   EIP712_ORDER_TYPES,
   EIP712_CANCEL_TYPES,
-  EIP712_DELEGATION_TYPES
+  EIP712_DELEGATION_TYPES,
+  EIP712_TRIGGER_ORDER_TYPES,
+  EIP712_CANCEL_TRIGGER_ORDER_TYPES,
 } from './wallet'
