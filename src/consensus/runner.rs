@@ -704,9 +704,12 @@ impl ConsensusRunner {
             block.justify = propose.justify.clone();
         }
 
-        // Record vote and store block with justify
-        self.safety.record_vote(view);
+        // Store block BEFORE recording vote
+        // CRITICAL: Block must be persisted before vote is recorded.
+        // If we crash between record_vote and store.save, the voted_views
+        // could be lost, allowing a double-vote on recovery.
         self.store.save(&block);
+        self.safety.record_vote(view);
         self.pending.insert(block.hash(), block.clone());
 
         // CRITICAL: Persist voted_views immediately after recording vote.
@@ -714,14 +717,8 @@ impl ConsensusRunner {
         // SAFETY: If persistence fails, we MUST halt to prevent Byzantine failure.
         // A validator that continues without persisting voted_views could double-vote
         // after a crash, violating BFT safety assumptions.
-        if let Err(e) = self.persist_consensus_state() {
-            // This is a CRITICAL safety violation - panic to halt the validator
-            panic!(
-                "CRITICAL: Failed to persist consensus state after vote in view {}: {}. \
-                Halting to prevent potential double-voting after crash recovery.",
-                view, e
-            );
-        }
+        // Retry with backoff to handle transient I/O errors before halting.
+        self.persist_with_retry("vote", view);
 
         // Update high_qc if proposal includes one
         if let Some(justify) = propose.justify {
@@ -824,16 +821,9 @@ impl ConsensusRunner {
         self.committed_height = block.height;
         self.committed_hash = *block_hash;
 
-        // Persist state if we have a persistent store
-        // Note: Commit persistence is less critical than vote persistence,
-        // but we still halt on failure to ensure consistent recovery.
-        if let Err(e) = self.persist_consensus_state() {
-            panic!(
-                "CRITICAL: Failed to persist consensus state after commit at height {}: {}. \
-                Halting to prevent inconsistent state recovery.",
-                block.height, e
-            );
-        }
+        // Persist state if we have a persistent store.
+        // Retry with backoff to handle transient I/O errors before halting.
+        self.persist_with_retry("commit", block.view);
 
         // Check for validator set update from epoch transition
         if let Some(update) = self.app.take_validator_update() {
@@ -912,6 +902,41 @@ impl ConsensusRunner {
             store.save_consensus_state(&state)?;
         }
         Ok(())
+    }
+
+    /// Persist consensus state with retry and backoff.
+    ///
+    /// Retries up to 3 times with exponential backoff (10ms, 100ms, 1000ms).
+    /// Panics after all retries are exhausted — safety requires persisted state.
+    fn persist_with_retry(&self, context: &str, view: View) {
+        const MAX_RETRIES: u32 = 3;
+        const BASE_DELAY_MS: u64 = 10;
+
+        for attempt in 0..MAX_RETRIES {
+            match self.persist_consensus_state() {
+                Ok(()) => return,
+                Err(e) => {
+                    let delay_ms = BASE_DELAY_MS * 10u64.pow(attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        delay_ms,
+                        error = %e,
+                        context,
+                        view,
+                        "Persist consensus state failed, retrying"
+                    );
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                }
+            }
+        }
+
+        // All retries exhausted — halt to prevent Byzantine failure
+        panic!(
+            "CRITICAL: Failed to persist consensus state after {} retries ({} in view {}). \
+             Halting to prevent potential double-voting after crash recovery.",
+            MAX_RETRIES, context, view
+        );
     }
 
     /// Handle detected equivocation (Byzantine fault).

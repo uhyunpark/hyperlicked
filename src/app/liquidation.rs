@@ -335,18 +335,24 @@ fn liquidate_account(
     let mut results = Vec::new();
 
     // Get positions to liquidate
+    // CRITICAL: Sort by symbol for deterministic ordering across validators.
+    // HashMap iteration order is non-deterministic, which would cause
+    // consensus failures if different validators process liquidations
+    // in different orders. DO NOT remove this sort.
     let positions: Vec<(String, i64, i64)> = {
         let account = match accounts.get(address) {
             Some(a) => a,
             None => return results,
         };
 
-        account
+        let mut pos: Vec<_> = account
             .positions
             .iter()
             .filter(|(_, pos)| pos.size != 0)
             .map(|(symbol, pos)| (symbol.clone(), pos.size, pos.entry_price))
-            .collect()
+            .collect();
+        pos.sort_by(|a, b| a.0.cmp(&b.0));
+        pos
     };
 
     // Liquidate each position

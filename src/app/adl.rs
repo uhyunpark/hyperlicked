@@ -148,7 +148,11 @@ pub fn find_adl_candidates(
     // Sort by profit percentage descending (highest return % first)
     // This is fairer than absolute PnL: someone with 10% return on small position
     // should be hit before someone with 0.1% return on large position
-    candidates.sort_by(|a, b| b.profit_pct_bps.cmp(&a.profit_pct_bps));
+    candidates.sort_by(|a, b| {
+        b.profit_pct_bps
+            .cmp(&a.profit_pct_bps)
+            .then_with(|| a.address.cmp(&b.address))
+    });
 
     candidates
 }
@@ -329,7 +333,7 @@ pub fn process_adl_if_needed(
 
     let total_absorbed: i64 = events
         .iter()
-        .map(|e| e.size_reduced * e.close_price / 100_000_000)
+        .map(|e| (e.size_reduced as i128 * e.close_price as i128 / 100_000_000) as i64)
         .sum();
 
     tracing::info!(

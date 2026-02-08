@@ -567,9 +567,12 @@ where
             return None;
         }
 
-        // 3. Record vote and store block
-        self.safety.record_vote(view);
+        // 3. Store block BEFORE recording vote
+        // CRITICAL: Block must be persisted before vote is recorded.
+        // If we crash between record_vote and store.save, the voted_views
+        // could be lost, allowing a double-vote on recovery.
         self.store.save(block);
+        self.safety.record_vote(view);
         self.pending.insert(block.hash(), block.clone());
 
         // 4. Create vote (with BLS signature if enabled)
