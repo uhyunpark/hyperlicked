@@ -367,10 +367,10 @@ impl AccountManager {
         maker_fee: i64,
         taker_fee: i64,
     ) {
-        // Calculate fees (in cents)
-        let notional = (size * price) / 100_000_000;
-        let maker_fee_amount = (notional * maker_fee) / 10000; // basis points
-        let taker_fee_amount = (notional * taker_fee) / 10000;
+        // Calculate fees (in cents) — use i128 to avoid overflow for large orders
+        let notional = ((size as i128) * (price as i128) / 100_000_000) as i64;
+        let maker_fee_amount = ((notional as i128) * (maker_fee as i128) / 10000) as i64;
+        let taker_fee_amount = ((notional as i128) * (taker_fee as i128) / 10000) as i64;
 
         // Apply to maker (opposite side of taker)
         let maker_account = self.get_or_create(maker);

@@ -1,7 +1,7 @@
 ---
 name: backend-architecture-reviewer
 description: Use this agent when you need to review recently written Rust code for adherence to best practices, architectural consistency, and system integration. This agent examines code quality, questions implementation decisions, and ensures alignment with HotStuff-2 consensus patterns, orderbook matching engine design, and the broader blockchain system architecture.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

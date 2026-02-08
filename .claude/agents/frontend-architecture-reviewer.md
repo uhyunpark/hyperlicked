@@ -1,7 +1,7 @@
 ---
 name: frontend-architecture-reviewer
 description: Use this agent when you need to review recently written frontend code for adherence to best practices, architectural consistency, and system integration. This agent examines code quality, questions implementation decisions, and ensures alignment with Next.js 15, Tailwind, Zustand patterns, and the broader trading UI architecture.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 

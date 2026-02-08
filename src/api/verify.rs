@@ -43,6 +43,7 @@ pub struct VerifiedTriggerOrder {
     pub trigger_price: i64,
     pub size: i64,
     pub limit_price: Option<i64>,
+    #[allow(dead_code)] // Used for verification only, not consumed by route
     pub nonce: u64,
     pub cloid: Option<String>,
 }
@@ -53,6 +54,7 @@ pub struct VerifiedCancelTriggerOrder {
     pub trigger_order_id: Option<String>,
     pub symbol: Option<String>,
     pub cloid: Option<String>,
+    #[allow(dead_code)] // Used for verification only, not consumed by route
     pub nonce: u64,
 }
 
