@@ -190,6 +190,9 @@ function handleMessage(
     case 'liquidated':
       handlers.handleLiquidated(data, deps)
       break
+    case 'adl':
+      handlers.handleADL(data, deps)
+      break
     case 'markPrice':
       handlers.handleMarkPrice(data)
       break

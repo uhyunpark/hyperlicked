@@ -82,6 +82,16 @@ export interface WSLiquidated {
   timestamp: number
 }
 
+export interface WSAutoDeleveraged {
+  type: 'adl'
+  symbol: string
+  size_reduced: number
+  close_price: number
+  realized_pnl: number
+  triggering_liquidation: string
+  timestamp: number
+}
+
 // Trigger order events
 export interface WSTriggerOrderPlaced {
   type: 'triggerOrderPlaced'
@@ -159,6 +169,7 @@ export type WSMessage =
   | WSBalanceUpdate
   | WSFundingPayment
   | WSLiquidated
+  | WSAutoDeleveraged
   | WSTriggerOrderPlaced
   | WSTriggerOrderTriggered
   | WSTriggerOrderCancelled

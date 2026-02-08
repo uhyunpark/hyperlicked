@@ -9,6 +9,7 @@ import type {
   WSPositionUpdate,
   WSFundingPayment,
   WSLiquidated,
+  WSAutoDeleveraged,
   WSMarkPriceUpdate,
   WSAssetCtx,
   WSTriggerOrderPlaced,
@@ -132,6 +133,23 @@ export function handleLiquidated(
 
   toast.error('Position Liquidated',
     `${data.symbol} ${data.wasLong ? 'long' : 'short'} liquidated. PnL: $${pnlUsd.toFixed(2)}`)
+
+  useTradingStore.getState().triggerBalanceRefresh()
+  if (deps.subscribedAddressRef.current) {
+    deps.fetchUserData(deps.subscribedAddressRef.current)
+  }
+}
+
+export function handleADL(
+  data: WSAutoDeleveraged,
+  deps: HandlerDependencies
+) {
+  const sizeReduced = convertSize(data.size_reduced)
+  const realizedPnlUsd = convertPrice(data.realized_pnl)
+  console.log(`[ws] ADL: ${data.symbol} position reduced by ${sizeReduced}`)
+
+  toast.warning('Position Auto-Deleveraged',
+    `${data.symbol} reduced by ${sizeReduced.toFixed(4)}. PnL: $${realizedPnlUsd.toFixed(2)}`)
 
   useTradingStore.getState().triggerBalanceRefresh()
   if (deps.subscribedAddressRef.current) {
