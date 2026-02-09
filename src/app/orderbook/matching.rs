@@ -110,6 +110,8 @@ impl OrderBook {
                     price: ask_price,
                     size: match_size,
                     timestamp: now,
+                    maker_locked_margin: maker.locked_margin,
+                    maker_original_size: maker.original_size,
                 });
 
                 order.size -= match_size;
@@ -118,8 +120,12 @@ impl OrderBook {
 
                 if maker.size == 0 {
                     // Remove the filled maker order
-                    let maker_id = level.remove(maker_idx).unwrap().id;
-                    self.order_index.remove(&maker_id);
+                    let removed = level.remove(maker_idx).unwrap();
+                    let trader_lower = removed.trader.to_lowercase();
+                    self.order_index.remove(&removed.id);
+                    if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
+                        *count = count.saturating_sub(1);
+                    }
 
                     if level.is_empty() {
                         self.asks.remove(&ask_price);
@@ -195,6 +201,8 @@ impl OrderBook {
                     price: bid_price,
                     size: match_size,
                     timestamp: now,
+                    maker_locked_margin: maker.locked_margin,
+                    maker_original_size: maker.original_size,
                 });
 
                 order.size -= match_size;
@@ -203,8 +211,12 @@ impl OrderBook {
 
                 if maker.size == 0 {
                     // Remove the filled maker order
-                    let maker_id = level.remove(maker_idx).unwrap().id;
-                    self.order_index.remove(&maker_id);
+                    let removed = level.remove(maker_idx).unwrap();
+                    let trader_lower = removed.trader.to_lowercase();
+                    self.order_index.remove(&removed.id);
+                    if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
+                        *count = count.saturating_sub(1);
+                    }
 
                     if level.is_empty() {
                         self.bids.remove(&Reverse(bid_price));
@@ -228,6 +240,12 @@ mod tests {
     use super::*;
     use crate::types::Price;
 
+    fn test_config() -> MarketConfig {
+        let mut config = MarketConfig::default();
+        config.min_notional = 0;
+        config
+    }
+
     fn make_order(id: &str, side: Side, price: Price, size: i64) -> Order {
         // Use different traders for bid/ask to test matching (non-self-trade)
         let trader = if side == Side::Bid { "alice" } else { "bob" };
@@ -242,6 +260,7 @@ mod tests {
             order_type: OrderType::Gtc,
             reduce_only: false,
             timestamp: 0,
+            locked_margin: 0,
         }
     }
 
@@ -263,13 +282,14 @@ mod tests {
             order_type: OrderType::Gtc,
             reduce_only: false,
             timestamp: 0,
+            locked_margin: 0,
         }
     }
 
     #[test]
     fn test_basic_matching() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bid
         let bid = make_order("bid1", Side::Bid, 50000, 100);
@@ -288,7 +308,7 @@ mod tests {
     #[test]
     fn test_price_time_priority() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Two bids at same price
         book.place(make_order("bid1", Side::Bid, 50000, 100), &config)
@@ -306,7 +326,7 @@ mod tests {
     #[test]
     fn test_cancel() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         book.place(make_order("bid1", Side::Bid, 50000, 100), &config)
             .unwrap();
@@ -321,7 +341,7 @@ mod tests {
     #[test]
     fn test_ioc_no_rest() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         let mut ioc = make_order("ioc1", Side::Bid, 50000, 100);
         ioc.order_type = OrderType::Ioc;
@@ -333,7 +353,7 @@ mod tests {
     #[test]
     fn test_self_trade_prevention() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bid from alice
         let bid = make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100);
@@ -360,7 +380,7 @@ mod tests {
     #[test]
     fn test_self_trade_case_insensitive() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bid with lowercase address
         let bid = make_order_with_trader("bid1", "0xabcd", Side::Bid, 50000, 100);
@@ -377,7 +397,7 @@ mod tests {
     #[test]
     fn test_alo_rejection() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bid
         let bid = make_order("bid1", Side::Bid, 50000, 100);
@@ -394,7 +414,7 @@ mod tests {
     #[test]
     fn test_partial_fill() {
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place small bid
         let bid = make_order("bid1", Side::Bid, 50000, 50);
@@ -417,7 +437,7 @@ mod tests {
         // This test verifies O(log n) cancel behavior
         let mut book = OrderBook::new("BTC-USDT");
         // Use a config with high order limit for this performance test
-        let mut config = MarketConfig::default();
+        let mut config = test_config();
         config.max_open_orders = 10000;
 
         // Place many orders at different prices
@@ -433,6 +453,7 @@ mod tests {
                 order_type: OrderType::Gtc,
                 reduce_only: false,
                 timestamp: i as u64,
+                locked_margin: 0,
             };
             book.place(order, &config).unwrap();
         }
@@ -452,7 +473,7 @@ mod tests {
         // Use separate books for bids and asks to test ordering without matching
         let mut bid_book = OrderBook::new("BTC-USDT");
         let mut ask_book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bids at different prices (out of order)
         bid_book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
@@ -488,7 +509,7 @@ mod tests {
     fn test_crossing_orders_match() {
         // Verify orders that cross get matched correctly
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bids
         book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
@@ -512,7 +533,7 @@ mod tests {
     #[test]
     fn test_max_order_size_rejected() {
         let mut book = OrderBook::new("BTC-USDT");
-        let mut config = MarketConfig::default();
+        let mut config = test_config();
         config.max_order_size = 1000; // Small limit for testing
 
         // Order within limit should succeed
@@ -531,7 +552,7 @@ mod tests {
     #[test]
     fn test_max_open_orders_rejected() {
         let mut book = OrderBook::new("BTC-USDT");
-        let mut config = MarketConfig::default();
+        let mut config = test_config();
         config.max_open_orders = 3; // Small limit for testing
 
         // Place orders up to the limit
@@ -556,7 +577,7 @@ mod tests {
         // CRITICAL-6: When ALL orders at a price level are self-trades,
         // matching should continue to the next price level
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place asks at two price levels - all from alice at 50000
         book.place(make_order_with_trader("ask1", "alice", Side::Ask, 50000, 100), &config).unwrap();
@@ -585,7 +606,7 @@ mod tests {
     fn test_self_trade_bid_continues_to_next_level() {
         // Same test but for asks matching against bids
         let mut book = OrderBook::new("BTC-USDT");
-        let config = MarketConfig::default();
+        let config = test_config();
 
         // Place bids at two price levels - all from alice at 50000
         book.place(make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100), &config).unwrap();
@@ -609,7 +630,7 @@ mod tests {
     #[test]
     fn test_depth_limit_rejected() {
         let mut book = OrderBook::new("BTC-USDT");
-        let mut config = MarketConfig::default();
+        let mut config = test_config();
         config.max_price_levels = 3; // Small limit for testing
 
         // Place orders at different price levels until we hit the limit
@@ -637,9 +658,30 @@ mod tests {
     }
 
     #[test]
-    fn test_depth_limit_ask_side() {
+    fn test_min_notional_rejected() {
         let mut book = OrderBook::new("BTC-USDT");
         let mut config = MarketConfig::default();
+        // Default min_notional is 1000 ($10)
+
+        // Order with sufficient notional should succeed
+        // price=50000 cents ($500), size=100 sats => notional = (100 * 50000) / 100_000_000 = 0
+        // That's too small. Use larger values.
+        // price=50000 ($500), size=200_000 sats => notional = (200000*50000)/100_000_000 = 100 cents ($1) -- too small
+        // price=50000 ($500), size=10_000_000 => notional = (10_000_000*50000)/100_000_000 = 5000 cents ($50) -- ok
+        let big_order = make_order("bid1", Side::Bid, 50000, 10_000_000);
+        assert!(book.place(big_order, &config).is_ok());
+
+        // Order with notional below minimum should fail
+        // price=50000, size=100 => notional = 0 < 1000
+        let small_order = make_order("bid2", Side::Bid, 50000, 100);
+        let result = book.place(small_order, &config);
+        assert!(matches!(result, Err(OrderBookError::BelowMinNotional { min: 1000, .. })));
+    }
+
+    #[test]
+    fn test_depth_limit_ask_side() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let mut config = test_config();
         config.max_price_levels = 2;
 
         // Place asks at different price levels

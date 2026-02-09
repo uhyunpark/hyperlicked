@@ -69,6 +69,8 @@ pub struct AppState {
     pub(crate) configs: HashMap<Symbol, MarketConfig>,
     /// Oracle prices (mark prices for liquidation)
     pub(crate) mark_prices: HashMap<Symbol, Price>,
+    /// Mark price EMA (resists manipulation)
+    pub(crate) mark_price_ema: HashMap<Symbol, Price>,
     /// Current timestamp
     pub(crate) timestamp: u64,
     /// Fills from the last block execution (for event emission)
@@ -143,6 +145,7 @@ impl AppState {
             mempool: Mempool::default(),
             configs: HashMap::new(),
             mark_prices: HashMap::new(),
+            mark_price_ema: HashMap::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -509,7 +512,7 @@ impl AppState {
     /// Record volume from a fill
     pub fn record_fill_volume(&mut self, symbol: &str, size: Size, price: Price) {
         *self.day_volume.entry(symbol.to_string()).or_insert(0) += size.abs();
-        let notional = (size.abs() * price) / 100_000_000; // Convert to cents
+        let notional = (size.abs() as i128 * price as i128 / 100_000_000) as i64; // Convert to cents
         *self.day_notional_volume.entry(symbol.to_string()).or_insert(0) += notional;
     }
 

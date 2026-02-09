@@ -16,7 +16,7 @@
 //! processes sequentially to maintain correctness.
 
 #[cfg(feature = "parallel_matching")]
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::app::{orderbook::Fill, Transaction};
 
@@ -48,7 +48,7 @@ impl AppState {
 
         // Phase 1: Execute symbol-scoped transactions
         // Group by symbol for better cache locality
-        let mut by_symbol: HashMap<Symbol, Vec<Transaction>> = HashMap::new();
+        let mut by_symbol: BTreeMap<Symbol, Vec<Transaction>> = BTreeMap::new();
         for tx in symbol_txs {
             if let Some(symbol) = tx.symbol() {
                 by_symbol.entry(symbol.clone()).or_default().push(tx);

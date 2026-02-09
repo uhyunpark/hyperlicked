@@ -59,7 +59,7 @@ impl TightQuoter {
 
     fn calculate_quote_price(&self, oracle: Price, side: Side, rng: &mut StdRng) -> Price {
         let spread_bps = rng.gen_range(self.spread_min_bps..=self.spread_max_bps);
-        let offset = (oracle * spread_bps) / 10000;
+        let offset = ((oracle as i128 * spread_bps as i128) / 10000) as i64;
 
         match side {
             Side::Bid => oracle - offset,
@@ -148,7 +148,7 @@ impl Strategy for WideQuoter {
         let size = rng.gen_range(10_000_000..50_000_000);
 
         let spread_bps = rng.gen_range(self.spread_min_bps..=self.spread_max_bps);
-        let offset = (oracle * spread_bps) / 10000;
+        let offset = ((oracle as i128 * spread_bps as i128) / 10000) as i64;
 
         let bid_price = oracle - offset;
         let ask_price = oracle + offset;
@@ -227,7 +227,7 @@ impl Strategy for TrendFollower {
             } else {
                 // Passive bid below oracle
                 let offset = rng.gen_range(5..15);
-                (Side::Bid, oracle - (oracle * offset) / 10000)
+                (Side::Bid, oracle - ((oracle as i128 * offset as i128) / 10000) as i64)
             }
         } else {
             // Downtrend - sell
@@ -239,7 +239,7 @@ impl Strategy for TrendFollower {
             } else {
                 // Passive ask above oracle
                 let offset = rng.gen_range(5..15);
-                (Side::Ask, oracle + (oracle * offset) / 10000)
+                (Side::Ask, oracle + ((oracle as i128 * offset as i128) / 10000) as i64)
             }
         };
 
@@ -309,7 +309,7 @@ impl Strategy for MeanReverter {
         };
 
         // Calculate deviation from MA in bps
-        let deviation_bps = ((oracle - ma) * 10000) / ma;
+        let deviation_bps = (((oracle - ma) as i128 * 10000) / ma as i128) as i64;
 
         // Need at least 20 bps deviation to act
         if deviation_bps.abs() < 20 {
@@ -319,17 +319,17 @@ impl Strategy for MeanReverter {
         // Larger size when deviation is higher
         let base_size = 10_000_000i64;
         let size_multiplier = (deviation_bps.abs() / 10).min(5);
-        let size = base_size + base_size * size_multiplier / 2;
+        let size = base_size + ((base_size as i128 * size_multiplier as i128) / 2) as i64;
 
         // Trade against the deviation
         let (side, price) = if deviation_bps > 0 {
             // Price above MA - sell
             let offset = rng.gen_range(5..20);
-            (Side::Ask, oracle + (oracle * offset) / 10000)
+            (Side::Ask, oracle + ((oracle as i128 * offset as i128) / 10000) as i64)
         } else {
             // Price below MA - buy
             let offset = rng.gen_range(5..20);
-            (Side::Bid, oracle - (oracle * offset) / 10000)
+            (Side::Bid, oracle - ((oracle as i128 * offset as i128) / 10000) as i64)
         };
 
         MarketMakerAction::PlaceOrder {
@@ -388,7 +388,7 @@ impl Strategy for NoiseTrader {
         } else {
             // Passive: random price within range
             let offset_bps = rng.gen_range(1..=self.range_bps);
-            let offset = (oracle * offset_bps) / 10000;
+            let offset = ((oracle as i128 * offset_bps as i128) / 10000) as i64;
             let passive_price = match side {
                 Side::Bid => oracle - offset,
                 Side::Ask => oracle + offset,

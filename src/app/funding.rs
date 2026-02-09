@@ -214,23 +214,30 @@ pub fn apply_funding(
             let position_size = position.size;
             let payment = position.apply_funding(funding_rate_bps, index_price, timestamp);
 
-            // Track totals
+            // Cap negative payments at available balance (can't pay more than you have)
+            let actual_payment = if payment < 0 {
+                payment.max(-account.balance)
+            } else {
+                payment
+            };
+
+            // Track totals using actual payment
             if position_size > 0 {
                 // Long position
-                longs_paid += -payment; // payment is negative for longs
+                longs_paid += -actual_payment;
             } else {
                 // Short position
-                shorts_received += payment; // payment is positive for shorts
+                shorts_received += actual_payment;
             }
 
             // Apply to balance
-            account.balance += payment;
+            account.balance += actual_payment;
 
             // Record per-user payment for WebSocket notification
             user_payments.push(UserFundingPayment {
                 address: address.clone(),
                 symbol: symbol.to_string(),
-                payment,
+                payment: actual_payment,
                 position_size,
                 funding_rate_bps,
                 timestamp,
@@ -290,6 +297,7 @@ mod tests {
             order_type: OrderType::Gtc,
             reduce_only: false,
             timestamp: 0,
+            locked_margin: 0,
         };
         let _ = book.place(bid_order, &config);
 
@@ -305,6 +313,7 @@ mod tests {
             order_type: OrderType::Gtc,
             reduce_only: false,
             timestamp: 0,
+            locked_margin: 0,
         };
         let _ = book.place(ask_order, &config);
 
@@ -399,6 +408,32 @@ mod tests {
 
         let empty: Vec<i64> = vec![];
         assert_eq!(average_premium(&empty), 0);
+    }
+
+    #[test]
+    fn test_funding_cap_at_balance() {
+        let mut accounts = AccountManager::new();
+
+        // Long trader with very little balance
+        let long = accounts.get_or_create("poor_long");
+        long.balance = 100; // Only $1
+        long.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+
+        // Short trader with plenty of balance
+        let short = accounts.get_or_create("short_trader");
+        short.balance = 1_000_000;
+        short.apply_fill("BTC-USDT", false, 100_000_000, 5_000_000);
+
+        // Apply 1% funding rate - longs pay shorts
+        // Long would owe $500 but only has $1
+        let result = apply_funding(&mut accounts, "BTC-USDT", 100, 5_000_000, 1000);
+
+        // Long should only pay what they have
+        let long = accounts.get("poor_long").unwrap();
+        assert!(long.balance >= 0, "Balance should not go negative, got {}", long.balance);
+
+        // Total paid by longs should be capped
+        assert!(result.longs_paid <= 100, "Longs paid {} should be capped at balance 100", result.longs_paid);
     }
 
     #[test]

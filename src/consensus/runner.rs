@@ -678,17 +678,120 @@ impl ConsensusRunner {
         self.votes.remove(&block_hash).unwrap_or_default()
     }
 
+    /// Verify a proposal's QC (justify certificate)
+    ///
+    /// Mirrors the verification logic from engine.rs.
+    /// Returns Ok(()) if:
+    /// - Block is genesis/early (height <= 1, no QC needed)
+    /// - QC is present and structurally + cryptographically valid
+    fn verify_proposal_qc(&self, propose: &Propose) -> Result<(), String> {
+        let block = &propose.block;
+
+        // Genesis and first blocks don't need QC verification
+        if block.height <= 1 {
+            return Ok(());
+        }
+
+        // Check justify from proposal or block
+        let justify = propose
+            .justify
+            .as_ref()
+            .or(block.justify.as_ref())
+            .ok_or_else(|| format!("Proposal at height {} missing QC", block.height))?;
+
+        // QC must certify the parent block
+        if justify.block_hash != block.parent {
+            return Err(format!(
+                "QC block_hash {} doesn't match parent {}",
+                hash_short(&justify.block_hash),
+                hash_short(&block.parent)
+            ));
+        }
+
+        // Verify BLS signature if present
+        if justify.is_bls() {
+            self.verify_bls_certificate_structure(justify)?;
+
+            if !Config::global().skip_qc_verify {
+                justify.verify_bls().map_err(|e| {
+                    format!(
+                        "QC BLS verification failed for block {}: {}",
+                        block.height, e
+                    )
+                })?;
+            }
+        } else if justify.voters.is_empty() && justify.votes.is_empty() {
+            return Err(format!(
+                "QC for block {} has no voters or votes",
+                block.height
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify BLS certificate has valid structure
+    fn verify_bls_certificate_structure(&self, cert: &Certificate) -> Result<(), String> {
+        use crate::crypto::bls::{BlsPublicKey, BlsSignature};
+
+        if cert.voters.is_empty() {
+            return Err("Certificate has no voters".to_string());
+        }
+
+        if cert.voters.len() != cert.bls_pubkeys.len() {
+            return Err(format!(
+                "Certificate voter/pubkey count mismatch: {} vs {}",
+                cert.voters.len(),
+                cert.bls_pubkeys.len()
+            ));
+        }
+
+        if cert.agg_signature.len() != 96 {
+            return Err(format!(
+                "Invalid aggregate signature length: {} (expected 96)",
+                cert.agg_signature.len()
+            ));
+        }
+
+        BlsSignature::from_slice(&cert.agg_signature)
+            .map_err(|_| "Failed to parse aggregate signature".to_string())?;
+
+        for (i, pk_bytes) in cert.bls_pubkeys.iter().enumerate() {
+            if pk_bytes.len() != 48 {
+                return Err(format!(
+                    "Invalid BLS pubkey length at index {}: {} (expected 48)",
+                    i,
+                    pk_bytes.len()
+                ));
+            }
+            let mut pk_arr = [0u8; 48];
+            pk_arr.copy_from_slice(pk_bytes);
+            BlsPublicKey::from_bytes(&pk_arr)
+                .map_err(|_| format!("Failed to parse BLS pubkey at index {}", i))?;
+        }
+
+        Ok(())
+    }
+
     /// Process a proposal
     fn process_proposal(&mut self, propose: Propose) -> Option<Vote> {
-        let mut block = propose.block;
-        let view = block.view;
+        let view = propose.block.view;
+        let height = propose.block.height;
 
         debug!(
             view,
-            height = block.height,
-            hash = %hash_short(&block.hash()),
+            height,
+            hash = %hash_short(&propose.block.hash()),
             "Processing proposal"
         );
+
+        // SECURITY: Verify QC before any state mutation
+        if let Err(e) = self.verify_proposal_qc(&propose) {
+            warn!(view, error = %e, "Rejecting proposal: invalid QC");
+            return None;
+        }
+
+        let mut block = propose.block;
 
         // Execute block
         let local_app_hash = self.app.execute(&block);
@@ -749,7 +852,15 @@ impl ConsensusRunner {
     fn process_prepare(&mut self, prepare: Prepare) {
         debug!(view = prepare.view, "Processing prepare");
 
-        // Update high_qc
+        // SECURITY: Verify QC in prepare message before accepting
+        if prepare.qc.is_bls() && !Config::global().skip_qc_verify {
+            if let Err(e) = prepare.qc.verify_bls() {
+                warn!(view = prepare.view, error = %e, "Rejecting prepare: invalid QC");
+                return;
+            }
+        }
+
+        // Update high_qc (now verified)
         self.safety.update_high_qc(prepare.qc.clone());
 
         // Try to commit

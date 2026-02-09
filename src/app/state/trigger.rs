@@ -22,6 +22,24 @@ impl AppState {
         format!("T{}", self.trigger_seq)
     }
 
+    /// Remove a trigger order from all indexes
+    fn cleanup_trigger_order(&mut self, id: &str) -> Option<TriggerOrder> {
+        let order = self.trigger_orders.remove(id)?;
+
+        if let Some(ids) = self.trigger_orders_by_trader.get_mut(&order.trader) {
+            ids.retain(|i| i != id);
+        }
+        if let Some(ids) = self.trigger_orders_by_symbol.get_mut(&order.symbol) {
+            ids.retain(|i| i != id);
+        }
+        if let Some(ref cloid) = order.cloid {
+            let key = (order.trader.clone(), order.symbol.clone(), cloid.clone());
+            self.trigger_orders_by_cloid.remove(&key);
+        }
+
+        Some(order)
+    }
+
     /// Place a new trigger order (Stop Loss or Take Profit)
     pub(crate) fn execute_place_trigger_order(
         &mut self,
@@ -144,14 +162,21 @@ impl AppState {
         // Mark as cancelled
         order.status = TriggerOrderStatus::Cancelled;
 
+        // Save fields for event before cleanup removes the order
+        let order_trader = order.trader.clone();
+        let order_symbol = order.symbol.clone();
+
         // Emit cancelled event
         self.pending_trigger_events.push(TriggerEvent {
-            id: trigger_order_id,
-            trader: order.trader.clone(),
-            symbol: order.symbol.clone(),
+            id: trigger_order_id.clone(),
+            trader: order_trader,
+            symbol: order_symbol,
             event_type: TriggerEventType::Cancelled,
             timestamp: self.timestamp,
         });
+
+        // Clean up indexes
+        self.cleanup_trigger_order(&trigger_order_id);
 
         Ok(())
     }
@@ -253,6 +278,7 @@ impl AppState {
                 },
                 timestamp: self.timestamp,
             });
+            self.cleanup_trigger_order(trigger_id);
             return None;
         }
 
@@ -297,6 +323,7 @@ impl AppState {
                     },
                     timestamp: self.timestamp,
                 });
+                self.cleanup_trigger_order(trigger_id);
                 return None;
             }
         };
@@ -317,6 +344,9 @@ impl AppState {
             event_type: TriggerEventType::Triggered { order_id },
             timestamp: self.timestamp,
         });
+
+        // Clean up indexes
+        self.cleanup_trigger_order(trigger_id);
 
         Some(fills)
     }

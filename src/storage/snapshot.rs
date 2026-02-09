@@ -57,6 +57,9 @@ pub struct AppSnapshot {
     /// Trigger order sequence number
     #[serde(default)]
     pub trigger_seq: u64,
+    /// Mark price EMA per symbol
+    #[serde(default)]
+    pub mark_price_ema: Vec<(Symbol, Price)>,
 }
 
 impl AppSnapshot {
@@ -76,6 +79,7 @@ impl AppSnapshot {
             trigger_orders: Vec::new(),
             premium_samples: Vec::new(),
             trigger_seq: 0,
+            mark_price_ema: Vec::new(),
         }
     }
 

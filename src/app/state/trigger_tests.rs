@@ -144,9 +144,8 @@ fn test_cancel_trigger_order() {
     let result = state.execute_cancel_trigger_order("alice".into(), id.clone());
     assert!(result.is_ok());
 
-    // Verify status is cancelled
-    let trigger = state.trigger_order(&id).unwrap();
-    assert_eq!(trigger.status, TriggerOrderStatus::Cancelled);
+    // Verify order has been cleaned up from indexes
+    assert!(state.trigger_order(&id).is_none());
 }
 
 #[test]
@@ -198,10 +197,9 @@ fn test_trigger_executes_on_price_drop() {
 
     // Should have executed
     assert!(!fills.is_empty());
-    assert_eq!(
-        state.trigger_order(&id).unwrap().status,
-        TriggerOrderStatus::Triggered
-    );
+
+    // Verify order has been cleaned up from indexes after trigger
+    assert!(state.trigger_order(&id).is_none());
 
     // Alice's position should be reduced/closed
     let new_pos = state.account("alice").unwrap().position("BTC-USDT");

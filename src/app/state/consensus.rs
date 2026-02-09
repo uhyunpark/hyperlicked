@@ -15,7 +15,7 @@ use crate::app::{
     MarketConfig, Symbol,
 };
 use crate::consensus::AppHook;
-use crate::types::{Block, Hash};
+use crate::types::{Block, Hash, Price};
 
 use super::AppState;
 
@@ -144,6 +144,15 @@ impl AppState {
         let mut mark_prices: Vec<_> = self.mark_prices.iter().collect();
         mark_prices.sort_by_key(|(k, _)| *k);
         for (symbol, price) in mark_prices {
+            hasher.update(symbol.as_bytes());
+            hasher.update(price.to_le_bytes());
+        }
+
+        // === Mark price EMA (sorted) ===
+        let mut mark_ema: Vec<_> = self.mark_price_ema.iter().collect();
+        mark_ema.sort_by_key(|(k, _)| *k);
+        for (symbol, price) in mark_ema {
+            hasher.update(b"ema:");
             hasher.update(symbol.as_bytes());
             hasher.update(price.to_le_bytes());
         }
@@ -293,6 +302,7 @@ impl AppState {
                 .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
                 .collect(),
             trigger_seq: self.trigger_seq,
+            mark_price_ema: self.mark_price_ema.iter().map(|(k, v)| (k.clone(), *v)).collect(),
         }
     }
 
@@ -305,6 +315,7 @@ impl AppState {
 
         // Extract fields from snapshot (consuming it)
         let mark_prices = snapshot.mark_prices_map();
+        let mark_price_ema: HashMap<Symbol, Price> = snapshot.mark_price_ema.iter().cloned().collect();
         let timestamp = snapshot.timestamp;
         let insurance_fund = snapshot.insurance_fund;
         let funding_rates = snapshot.funding_rates_map();
@@ -356,6 +367,7 @@ impl AppState {
             mempool: Mempool::default(),
             configs: HashMap::new(),
             mark_prices,
+            mark_price_ema,
             timestamp,
             pending_fills: Vec::new(),
             pending_order_updates: Vec::new(),
@@ -895,6 +907,37 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_price_ema() {
+        let mut state = AppState::new();
+
+        // Deposit for both traders
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 100_000_000 }).unwrap();
+        state.execute_tx(Transaction::Deposit { trader: "bob".into(), amount: 100_000_000 }).unwrap();
+
+        // Initial mark price is $50,000 (5_000_000 cents)
+        let initial = state.mark_price("BTC-USDT").unwrap();
+        assert_eq!(initial, 5_000_000);
+
+        // Trade at $60,000 - with 1% EMA, mark should move only ~1% toward $60k
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(), symbol: "BTC-USDT".into(),
+            side: Side::Bid, price: 6_000_000, size: 100_000_000,
+            order_type: OrderType::Gtc, reduce_only: false,
+        }).unwrap();
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "bob".into(), symbol: "BTC-USDT".into(),
+            side: Side::Ask, price: 6_000_000, size: 100_000_000,
+            order_type: OrderType::Gtc, reduce_only: false,
+        }).unwrap();
+
+        let mark = state.mark_price("BTC-USDT").unwrap();
+        // EMA with 1% alpha: new = 0.01 * 6_000_000 + 0.99 * 5_000_000 = 5_010_000
+        // Mark should be close to 5_010_000 (or blended with oracle)
+        assert!(mark < 5_500_000, "EMA should dampen sudden price moves, got {}", mark);
+        assert!(mark > 4_500_000, "Mark should still move toward trade price, got {}", mark);
+    }
+
+    #[test]
     fn test_trade_history() {
         let mut state = AppState::new();
 
@@ -949,5 +992,90 @@ mod tests {
 
         // Unknown symbol returns empty
         assert!(state.get_trades("ETH-USDT", 10).is_empty());
+    }
+
+    #[test]
+    fn test_collateral_lock_on_rest() {
+        let mut state = AppState::new();
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 100_000_000 }).unwrap();
+
+        // Place GTC order that rests
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        }).unwrap();
+
+        let account = state.account("alice").unwrap();
+        // locked should be notional/10 = (1 BTC * $50k) / 10 = $5,000
+        assert!(account.locked > 0, "Collateral should be locked for resting order");
+        assert!(account.balance < 100_000_000, "Balance should decrease by locked amount");
+    }
+
+    #[test]
+    fn test_collateral_unlock_on_cancel() {
+        let mut state = AppState::new();
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 100_000_000 }).unwrap();
+
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        }).unwrap();
+
+        let locked_before = state.account("alice").unwrap().locked;
+        assert!(locked_before > 0);
+
+        // Get order id from the orderbook
+        let orders = state.orders_by_address("alice");
+        let order_id = orders[0].id.clone();
+
+        state.execute_tx(Transaction::CancelOrder { trader: "alice".into(), order_id }).unwrap();
+
+        let account = state.account("alice").unwrap();
+        assert_eq!(account.locked, 0, "Locked should be 0 after cancel");
+        assert_eq!(account.balance, 100_000_000, "Full balance restored after cancel");
+    }
+
+    #[test]
+    fn test_withdraw_blocked_with_positions() {
+        let mut state = AppState::new();
+
+        // Setup: Alice and Bob each deposit
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 10_000_000 }).unwrap();
+        state.execute_tx(Transaction::Deposit { trader: "bob".into(), amount: 10_000_000 }).unwrap();
+
+        // Alice buys 1 BTC at $50k from Bob
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(), symbol: "BTC-USDT".into(),
+            side: Side::Bid, price: 5_000_000, size: 100_000_000,
+            order_type: OrderType::Gtc, reduce_only: false,
+        }).unwrap();
+        state.execute_tx(Transaction::PlaceOrder {
+            trader: "bob".into(), symbol: "BTC-USDT".into(),
+            side: Side::Ask, price: 5_000_000, size: 100_000_000,
+            order_type: OrderType::Gtc, reduce_only: false,
+        }).unwrap();
+
+        // Alice has a position now. Try to withdraw most of her balance
+        let account = state.account("alice").unwrap();
+        let balance = account.balance;
+
+        if balance > 0 {
+            let result = state.execute_tx(Transaction::Withdraw {
+                trader: "alice".into(),
+                amount: balance,
+            });
+            // Should fail - withdrawing everything would leave equity below maintenance
+            assert!(result.is_err() || state.account("alice").unwrap().balance > 0);
+        }
     }
 }

@@ -170,7 +170,7 @@ impl Account {
                     .copied()
                     .unwrap_or(pos.entry_price);
                 let notional = pos.notional(mark);
-                (notional * maintenance_rate_bps) / 10000
+                ((notional as i128 * maintenance_rate_bps as i128) / 10000) as i64
             })
             .sum()
     }
@@ -239,10 +239,11 @@ impl Account {
             pos.realized_pnl = pos.realized_pnl.saturating_add(realized);
             self.balance = self.balance.saturating_add(realized);
 
+            let old_size = pos.size;
             pos.size = pos.size.saturating_add(fill_size_signed);
 
             // If flipped sides
-            if (pos.size > 0) != (pos.size.saturating_sub(fill_size_signed) > 0) && pos.size != 0 {
+            if (old_size > 0) != (pos.size > 0) && pos.size != 0 {
                 pos.entry_price = fill_price;
             }
         }
@@ -639,6 +640,25 @@ mod tests {
 
         // Try to use 7 again - should be AlreadyUsed
         assert_eq!(account.validate_nonce_with_gap(7), NonceResult::AlreadyUsed);
+    }
+
+    #[test]
+    fn test_position_flip_detection() {
+        let mut account = Account::new("trader");
+        account.balance = 100_000_000; // $1M
+
+        // Open long 1 BTC at $50,000
+        account.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+        let pos = account.position("BTC-USDT");
+        assert_eq!(pos.size, 100_000_000);
+        assert_eq!(pos.entry_price, 5_000_000);
+
+        // Sell 2 BTC at $51,000 -> flips from long to short
+        // Should realize PnL on the 1 BTC close, then entry_price = fill_price for new short
+        account.apply_fill("BTC-USDT", false, 200_000_000, 5_100_000);
+        let pos = account.position("BTC-USDT");
+        assert_eq!(pos.size, -100_000_000); // Now short 1 BTC
+        assert_eq!(pos.entry_price, 5_100_000); // Entry price updated to flip price
     }
 
     #[test]

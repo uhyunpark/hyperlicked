@@ -117,6 +117,21 @@ impl AppState {
 
     fn execute_withdraw(&mut self, trader: String, amount: i64) -> Result<Vec<Fill>, AppError> {
         self.accounts.withdraw(&trader, amount)?;
+
+        // Check if withdrawal would leave account under-margined
+        if let Some(account) = self.accounts.get(&trader.to_lowercase()) {
+            let has_positions = account.positions.values().any(|p| p.size != 0);
+            if has_positions {
+                let equity = account.equity(&self.mark_prices);
+                let maint = account.maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
+                if equity < maint {
+                    // Rollback withdrawal
+                    self.accounts.deposit(&trader, amount).ok();
+                    return Err(AppError::InsufficientMargin);
+                }
+            }
+        }
+
         self.mark_dirty_account(&trader);
         Ok(vec![])
     }
@@ -124,6 +139,10 @@ impl AppState {
     fn execute_cancel(&mut self, order_id: String) -> Result<Vec<Fill>, AppError> {
         for book in self.orderbooks.values_mut() {
             if let Some(cancelled) = book.cancel(&order_id) {
+                // Unlock collateral for cancelled order
+                if cancelled.locked_margin > 0 {
+                    self.accounts.unlock_collateral(&cancelled.trader, cancelled.locked_margin);
+                }
                 // Emit order update with cancelled status
                 let side_str = match cancelled.side {
                     Side::Bid => "buy",
@@ -185,10 +204,10 @@ impl AppState {
             .clamp(0, i64::MAX as i128) as i64;
         {
             let account = self.accounts.get_or_create(&trader);
-            // SECURITY: Use equity (balance + locked + unrealized PnL) for margin check.
-            // Using balance alone allows opening positions with underwater equity.
             let equity = account.equity(&self.mark_prices);
-            if equity < notional / 10 {
+            let maint = account.maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
+            let available = equity - maint - account.locked;
+            if available < notional / 10 {
                 return Err(AppError::InsufficientMargin);
             }
 
@@ -227,6 +246,7 @@ impl AppState {
                 order_type,
                 reduce_only,
                 timestamp: self.timestamp,
+                locked_margin: 0,
             };
 
             let fills = book.place(order, &config)?;
@@ -263,6 +283,37 @@ impl AppState {
             remaining,
         });
 
+        // Lock collateral for resting orders
+        if remaining > 0 && (order_type == OrderType::Gtc || order_type == OrderType::Alo) {
+            let lock_amount = ((remaining as i128 * price as i128) / 100_000_000 / 10) as i64;
+            if lock_amount > 0 {
+                self.accounts.lock_collateral(&trader, lock_amount)?;
+                // Update the resting order's locked_margin in the book
+                if let Some(book) = self.orderbooks.get_mut(&symbol) {
+                    match side {
+                        Side::Bid => {
+                            if let Some(level) = book.bids.get_mut(&std::cmp::Reverse(price)) {
+                                if let Some(order) = level.back_mut() {
+                                    if order.id == order_id {
+                                        order.locked_margin = lock_amount;
+                                    }
+                                }
+                            }
+                        }
+                        Side::Ask => {
+                            if let Some(level) = book.asks.get_mut(&price) {
+                                if let Some(order) = level.back_mut() {
+                                    if order.id == order_id {
+                                        order.locked_margin = lock_amount;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Process fills (book borrow is now released)
         self.process_fills(&fills, &symbol, &config);
 
@@ -283,12 +334,35 @@ impl AppState {
                 config.taker_fee,
             );
 
+            // Unlock proportional collateral for maker's resting order
+            if fill.maker_locked_margin > 0 && fill.maker_original_size > 0 {
+                let unlock = (fill.size as i128 * fill.maker_locked_margin as i128
+                    / fill.maker_original_size as i128) as i64;
+                if unlock > 0 {
+                    self.accounts.unlock_collateral(&fill.maker, unlock);
+                }
+            }
+
             // Mark both accounts as dirty for incremental hashing
             self.mark_dirty_account(&fill.maker);
             self.mark_dirty_account(&fill.taker);
 
-            // Update mark price to last trade
-            self.mark_prices.insert(symbol.clone(), fill.price);
+            // Update mark price using EMA to resist manipulation
+            let alpha = self.configs.get(symbol).map(|c| c.ema_alpha_bps).unwrap_or(100);
+            let old_ema = self.mark_price_ema.get(symbol).copied()
+                .or_else(|| self.mark_prices.get(symbol).copied())
+                .unwrap_or(fill.price);
+            let new_ema = ((alpha as i128 * fill.price as i128
+                + (10000 - alpha) as i128 * old_ema as i128) / 10000) as i64;
+            self.mark_price_ema.insert(symbol.clone(), new_ema);
+
+            // Blend with oracle price if available
+            let mark = if let Some(oracle_price) = self.oracle_price(symbol) {
+                ((new_ema as i128 + oracle_price as i128) / 2) as i64
+            } else {
+                new_ema
+            };
+            self.mark_prices.insert(symbol.clone(), mark);
             self.mark_globals_dirty();
 
             // Store fill in trade history

@@ -55,6 +55,8 @@ pub struct Order {
     pub order_type: OrderType,
     pub reduce_only: bool, // Only reduce existing position
     pub timestamp: u64,
+    #[serde(default)]
+    pub locked_margin: i64,
 }
 
 /// A fill (trade execution)
@@ -69,6 +71,10 @@ pub struct Fill {
     pub price: Price,
     pub size: Size,
     pub timestamp: u64,
+    #[serde(default)]
+    pub maker_locked_margin: i64,
+    #[serde(default)]
+    pub maker_original_size: i64,
 }
 
 /// Price level for display
@@ -98,6 +104,9 @@ pub struct OrderBook {
     /// Order index for O(1) cancel lookup: OrderId -> (Side, Price)
     pub(crate) order_index: HashMap<OrderId, (Side, Price)>,
 
+    /// Per-trader open order count for O(1) limit checks
+    pub(crate) trader_order_counts: HashMap<String, usize>,
+
     /// Last traded price
     pub(crate) last_price: Price,
 
@@ -112,6 +121,7 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             order_index: HashMap::new(),
+            trader_order_counts: HashMap::new(),
             last_price: 0,
             seq: 0,
         }
@@ -142,6 +152,11 @@ impl OrderBook {
                     self.bids.remove(&Reverse(price));
                 }
 
+                let trader_lower = cancelled.trader.to_lowercase();
+                if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
+                    *count = count.saturating_sub(1);
+                }
+
                 Some(cancelled)
             }
             Side::Ask => {
@@ -152,6 +167,11 @@ impl OrderBook {
                 // Remove empty price level - O(log n)
                 if level.is_empty() {
                     self.asks.remove(&price);
+                }
+
+                let trader_lower = cancelled.trader.to_lowercase();
+                if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
+                    *count = count.saturating_sub(1);
                 }
 
                 Some(cancelled)
@@ -221,15 +241,10 @@ impl OrderBook {
             .collect()
     }
 
-    /// Count open orders for a specific trader (for limit enforcement)
+    /// Count open orders for a specific trader (for limit enforcement) - O(1)
     pub fn count_orders_by_trader(&self, trader: &str) -> usize {
         let trader_lower = trader.to_lowercase();
-        self.bids
-            .values()
-            .chain(self.asks.values())
-            .flat_map(|orders| orders.iter())
-            .filter(|order| order.trader.to_lowercase() == trader_lower)
-            .count()
+        self.trader_order_counts.get(&trader_lower).copied().unwrap_or(0)
     }
 
     // --- Internal helpers ---
@@ -280,6 +295,17 @@ impl OrderBook {
                 got: order.size,
             });
         }
+        // Check minimum notional value (skip for reduce-only orders like trigger SL/TP
+        // which use extreme sweep prices that don't reflect actual fill price)
+        if !order.reduce_only {
+            let notional = ((order.size as i128 * order.price as i128) / 100_000_000) as i64;
+            if notional < config.min_notional {
+                return Err(OrderBookError::BelowMinNotional {
+                    min: config.min_notional,
+                    got: notional,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -300,6 +326,7 @@ impl OrderBook {
     pub(crate) fn add_bid(&mut self, order: Order) {
         let price = order.price;
         let id = order.id.clone();
+        *self.trader_order_counts.entry(order.trader.to_lowercase()).or_insert(0) += 1;
 
         self.bids
             .entry(Reverse(price))
@@ -313,6 +340,7 @@ impl OrderBook {
     pub(crate) fn add_ask(&mut self, order: Order) {
         let price = order.price;
         let id = order.id.clone();
+        *self.trader_order_counts.entry(order.trader.to_lowercase()).or_insert(0) += 1;
 
         self.asks
             .entry(price)
@@ -342,4 +370,6 @@ pub enum OrderBookError {
     TooManyOpenOrders { max: usize },
     #[error("orderbook depth limit reached (max: {max} price levels)")]
     DepthLimitReached { max: usize },
+    #[error("order notional {got} below minimum {min}")]
+    BelowMinNotional { min: i64, got: i64 },
 }
