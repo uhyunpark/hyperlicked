@@ -17,7 +17,9 @@ export interface AccountData {
  * Hook for managing account data fetching and faucet requests
  */
 export function useAccountData(address: string | null) {
-  const { balanceRefreshTrigger, positions, markPrices } = useTradingStore()
+  const balanceRefreshTrigger = useTradingStore((s) => s.balanceRefreshTrigger)
+  const positions = useTradingStore((s) => s.positions)
+  const markPrices = useTradingStore((s) => s.markPrices)
   const [account, setAccount] = useState<AccountData | null>(null)
   const [isLoadingAccount, setIsLoadingAccount] = useState(false)
   const [isFaucetLoading, setIsFaucetLoading] = useState(false)
@@ -80,11 +82,11 @@ export function useAccountData(address: string | null) {
     try {
       const success = await requestFaucet(address)
       if (success) {
-        toast.success('Faucet', 'Received $100,000 test USDT')
+        toast.success('Faucet', 'Received $100,000 test USDC')
         // Wait for block to be processed then refresh
         setTimeout(() => fetchAccount(), 500)
       } else {
-        toast.error('Faucet Failed', 'Could not get test USDT')
+        toast.error('Faucet Failed', 'Could not get test USDC')
       }
     } catch (error: any) {
       toast.error('Faucet Failed', error.message)

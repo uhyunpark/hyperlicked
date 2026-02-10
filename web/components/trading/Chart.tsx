@@ -8,7 +8,8 @@ import { CandlestickAggregator, Interval } from '@/lib/candlestickAggregator'
 import type { CandleInterval } from '@/lib/api'
 
 export function Chart() {
-  const { selectedSymbol, trades } = useTradingStore()
+  const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
+  const trades = useTradingStore((s) => s.trades)
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<any>(null)
@@ -16,6 +17,7 @@ export function Chart() {
   const [interval, setInterval] = useState<CandleInterval>('1m')
   const [loading, setLoading] = useState(true)
   const lastProcessedTradeRef = useRef<string | null>(null)
+  const lastCandleTimeRef = useRef<number | null>(null)
 
   // Fetch candles from API
   const fetchCandles = useCallback(async () => {
@@ -39,6 +41,9 @@ export function Chart() {
 
         // Always call setData to initialize series (even empty)
         candleSeriesRef.current.setData(chartData)
+        lastCandleTimeRef.current = chartData.length > 0
+          ? (chartData[chartData.length - 1].time as number)
+          : null
       }
     } catch (error) {
       console.error('[chart] Failed to fetch candles:', error)
@@ -141,11 +146,11 @@ export function Chart() {
     if (candle) {
       try {
         const series = candleSeriesRef.current
-        const data = series.data()
+        const candleTime = candle.time as number
+        const lastTime = lastCandleTimeRef.current
 
         // update() only works for last candle or newer
-        // If series is empty or candle time >= last time, safe to update
-        if (data.length === 0) {
+        if (lastTime === null) {
           series.setData([{
             time: candle.time,
             open: candle.open,
@@ -153,20 +158,18 @@ export function Chart() {
             low: candle.low,
             close: candle.close,
           }])
-        } else {
-          const lastTime = data[data.length - 1].time as number
-          const candleTime = candle.time as number
-          if (candleTime >= lastTime) {
-            series.update({
-              time: candle.time,
-              open: candle.open,
-              high: candle.high,
-              low: candle.low,
-              close: candle.close,
-            })
-          }
-          // Skip if candle time is older than last - historical data already has it
+          lastCandleTimeRef.current = candleTime
+        } else if (candleTime >= lastTime) {
+          series.update({
+            time: candle.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          })
+          lastCandleTimeRef.current = candleTime
         }
+        // Skip if candle time is older than last - historical data already has it
       } catch (e) {
         // Silently ignore chart update errors
         console.debug('[chart] update error:', e)

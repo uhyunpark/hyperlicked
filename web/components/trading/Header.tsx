@@ -68,7 +68,10 @@ function formatLargeNumber(n: number): string {
 }
 
 export function Header() {
-  const { selectedSymbol, currentPrice, isConnected: wsConnected, assetCtx } = useTradingStore()
+  const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
+  const currentPrice = useTradingStore((s) => s.currentPrice)
+  const wsConnected = useTradingStore((s) => s.isConnected)
+  const assetCtx = useTradingStore((s) => s.assetCtx)
   const wallet = useWallet()
   const [showWalletDropdown, setShowWalletDropdown] = useState(false)
   const [fundingInfo, setFundingInfo] = useState<ApiFundingInfo | null>(null)

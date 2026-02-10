@@ -3,7 +3,7 @@
 import { useTradingStore } from '@/lib/store'
 
 export function RecentTrades() {
-  const { trades } = useTradingStore()
+  const trades = useTradingStore((state) => state.trades)
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -15,7 +15,7 @@ export function RecentTrades() {
       {/* Column headers */}
       <div className="flex justify-between border-b border-border px-4 py-1 text-xs text-text-muted">
         <div>Time</div>
-        <div>Price (USDT)</div>
+        <div>Price (USDC)</div>
         <div>Size (BTC)</div>
       </div>
 

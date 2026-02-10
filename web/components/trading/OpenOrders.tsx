@@ -6,8 +6,10 @@ import { cancelOrder, getOrders, convertPrice, convertSize } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 
 function OpenOrdersInner() {
-  const { openOrders, setOpenOrders } = useTradingStore()
-  const { address, isConnected } = useWalletStore()
+  const openOrders = useTradingStore((s) => s.openOrders)
+  const setOpenOrders = useTradingStore((s) => s.setOpenOrders)
+  const address = useWalletStore((s) => s.address)
+  const isConnected = useWalletStore((s) => s.isConnected)
 
   // Fetch orders via REST as fallback (in case WebSocket isn't working)
   const fetchOrders = useCallback(async () => {

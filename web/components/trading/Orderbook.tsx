@@ -87,13 +87,13 @@ const TradeRow = memo(function TradeRow({ trade }: { trade: { id: string; price:
 
 // Trades panel component for the tab
 const TradesPanel = memo(function TradesPanel() {
-  const { trades } = useTradingStore()
+  const trades = useTradingStore((state) => state.trades)
 
   return (
     <div className="flex h-full flex-col">
       {/* Column headers */}
       <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
-        <div>Price (USDT)</div>
+        <div>Price (USDC)</div>
         <div>Size (BTC)</div>
         <div>Time</div>
       </div>
@@ -110,7 +110,10 @@ const TradesPanel = memo(function TradesPanel() {
 
 function OrderbookInner() {
   const [activeTab, setActiveTab] = useState<OrderbookTab>('orderbook')
-  const { orderbook, updateOrderbook, addTrade, isConnected: wsConnected } = useTradingStore()
+  const orderbook = useTradingStore((s) => s.orderbook)
+  const updateOrderbook = useTradingStore((s) => s.updateOrderbook)
+  const addTrade = useTradingStore((s) => s.addTrade)
+  const wsConnected = useTradingStore((s) => s.isConnected)
 
   // REST fallback: fetch orderbook data if WebSocket isn't connected
   const fetchData = useCallback(async () => {
@@ -235,7 +238,7 @@ function OrderbookInner() {
         <div role="tabpanel" id="orderbook-panel" aria-labelledby="orderbook-tab" className="flex flex-1 flex-col overflow-hidden">
           {/* Column headers */}
           <div className="flex justify-between border-b border-border px-3 py-1 text-xs text-text-muted">
-            <div>Price (USDT)</div>
+            <div>Price (USDC)</div>
             <div>Size (BTC)</div>
             <div>Total</div>
           </div>

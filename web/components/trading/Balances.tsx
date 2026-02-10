@@ -32,8 +32,8 @@ export function Balances() {
         // Convert account data to balance format
         setBalances([
           {
-            token: 'USDT',
-            symbol: 'USDT',
+            token: 'USDC',
+            symbol: 'USDC',
             available: data.availableBalance / 100,
             inOrder: data.lockedCollateral / 100,
             total: data.balance / 100,
@@ -89,7 +89,7 @@ export function Balances() {
             <th className="px-4 py-2 text-right font-medium">Available</th>
             <th className="px-4 py-2 text-right font-medium">In Order</th>
             <th className="px-4 py-2 text-right font-medium">Total</th>
-            <th className="px-4 py-2 text-right font-medium">USD Value</th>
+            <th className="px-4 py-2 text-right font-medium">Value (USDC)</th>
           </tr>
         </thead>
         <tbody>
@@ -126,7 +126,7 @@ export function Balances() {
       {balances.length > 0 && (
         <div className="border-t border-border bg-bg-primary px-4 py-2">
           <div className="flex justify-between text-xs">
-            <span className="text-text-muted">Total USD Value:</span>
+            <span className="text-text-muted">Total Value (USDC):</span>
             <span className="font-mono font-semibold text-text-primary">
               ${balances.reduce((sum, b) => sum + b.usdValue, 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
             </span>

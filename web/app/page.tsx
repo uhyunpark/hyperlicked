@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useCallback, useRef, useState } from 'react'
 import { Header } from '@/components/trading/Header'
 import { Orderbook } from '@/components/trading/Orderbook'
 import { Chart } from '@/components/trading/Chart'
@@ -15,11 +15,10 @@ const MAX_BOTTOM_HEIGHT = 500
 const DEFAULT_BOTTOM_HEIGHT = 256
 
 export default function TradingPage() {
-  const [isConnected, setIsConnected] = useState(false)
+  const isConnected = useTradingStore((s) => s.isConnected)
   const [bottomHeight, setBottomHeight] = useState(DEFAULT_BOTTOM_HEIGHT)
   const [isResizing, setIsResizing] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const orderbook = useTradingStore((state) => state.orderbook)
 
   // Handle resize drag
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -51,30 +50,7 @@ export default function TradingPage() {
   }, [isResizing])
 
   // Connect to WebSocket for real-time updates (also handles user data)
-  const ws = useWebSocket()
-
-  // Check connection based on receiving orderbook data
-  useEffect(() => {
-    // Connected if we have orderbook data (proves WebSocket is working)
-    if (orderbook && (orderbook.bids.length > 0 || orderbook.asks.length > 0)) {
-      setIsConnected(true)
-    }
-  }, [orderbook])
-
-  // Also check WebSocket state directly with polling
-  useEffect(() => {
-    const checkConnection = () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        setIsConnected(true)
-      }
-    }
-
-    // Check immediately and then every 500ms
-    checkConnection()
-    const interval = setInterval(checkConnection, 500)
-
-    return () => clearInterval(interval)
-  }, [ws])
+  useWebSocket()
 
   return (
     <div className="flex h-screen flex-col bg-bg-primary">

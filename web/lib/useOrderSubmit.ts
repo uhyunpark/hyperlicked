@@ -38,7 +38,8 @@ interface OrderCallbacks {
  * Hook for handling order submission logic
  */
 export function useOrderSubmit() {
-  const { selectedSymbol, currentPrice } = useTradingStore()
+  const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
+  const currentPrice = useTradingStore((s) => s.currentPrice)
   const wallet = useWallet()
 
   const submitOrder = useCallback(async (

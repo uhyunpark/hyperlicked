@@ -23,7 +23,10 @@ interface PositionTriggers {
 }
 
 function PositionsInner() {
-  const { positions, markPrices, triggerOrders, setTriggerOrders } = useTradingStore()
+  const positions = useTradingStore((s) => s.positions)
+  const markPrices = useTradingStore((s) => s.markPrices)
+  const triggerOrders = useTradingStore((s) => s.triggerOrders)
+  const setTriggerOrders = useTradingStore((s) => s.setTriggerOrders)
   const wallet = useWallet()
 
   // Derive trigger orders by symbol from store

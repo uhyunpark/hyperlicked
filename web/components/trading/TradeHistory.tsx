@@ -32,7 +32,9 @@ function formatTimestamp(timestamp: number) {
 
 export function TradeHistory() {
   const wallet = useWallet()
-  const { selectedSymbol, userFills, setUserFills } = useTradingStore()
+  const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
+  const userFills = useTradingStore((s) => s.userFills)
+  const setUserFills = useTradingStore((s) => s.setUserFills)
   const [isLoading, setIsLoading] = useState(false)
   const [initialLoadDone, setInitialLoadDone] = useState(false)
 

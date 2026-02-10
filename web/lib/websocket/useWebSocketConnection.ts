@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { useTradingStore, useWalletStore } from '../store'
 import { convertPrice, convertSize, getOrders, getPositions } from '../api'
 import * as handlers from './handlers'
@@ -16,16 +16,15 @@ export function useWebSocketConnection() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
   const subscribedAddressRef = useRef<string | null>(null)
 
-  const {
-    updateOrderbook,
-    addTrade,
-    setWsConnected,
-    setOpenOrders,
-    setPositions,
-    clearUserFills,
-    clearTriggerOrders,
-  } = useTradingStore()
-  const { isConnected: walletConnected, address } = useWalletStore()
+  // Extract actions as individual selectors (stable references)
+  const setWsConnected = useTradingStore((s) => s.setWsConnected)
+  const setOpenOrders = useTradingStore((s) => s.setOpenOrders)
+  const setPositions = useTradingStore((s) => s.setPositions)
+  const clearUserFills = useTradingStore((s) => s.clearUserFills)
+  const clearTriggerOrders = useTradingStore((s) => s.clearTriggerOrders)
+
+  const walletConnected = useWalletStore((s) => s.isConnected)
+  const address = useWalletStore((s) => s.address)
 
   // Fetch user data (orders and positions)
   const fetchUserData = useCallback(async (userAddress: string) => {
@@ -72,8 +71,8 @@ export function useWebSocketConnection() {
     }
   }, [setOpenOrders, setPositions])
 
-  // Handler dependencies
-  const deps = { fetchUserData, subscribedAddressRef }
+  // Handler dependencies (memoized to avoid re-creating every render)
+  const deps = useMemo(() => ({ fetchUserData, subscribedAddressRef }), [fetchUserData])
 
   useEffect(() => {
     function connect() {
@@ -136,7 +135,8 @@ export function useWebSocketConnection() {
         wsRef.current.close()
       }
     }
-  }, [updateOrderbook, addTrade, setWsConnected, fetchUserData, walletConnected, address])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletConnected, address])
 
   // Subscribe/unsubscribe when wallet connection changes
   useEffect(() => {
@@ -153,7 +153,8 @@ export function useWebSocketConnection() {
       clearUserFills()
       clearTriggerOrders()
     }
-  }, [walletConnected, address, setOpenOrders, setPositions, clearUserFills, clearTriggerOrders])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletConnected, address])
 
   return wsRef.current
 }

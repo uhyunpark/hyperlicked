@@ -37,7 +37,7 @@ export function OrderInputs({
       {orderType === 'limit' && (
         <div className="mb-4">
           <label htmlFor="price-input" className="mb-1 block text-xs text-text-muted">
-            Price (USDT)
+            Price (USDC)
           </label>
           <input
             id="price-input"
