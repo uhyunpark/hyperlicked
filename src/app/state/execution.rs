@@ -102,6 +102,13 @@ impl AppState {
                 sources,
                 signature,
             } => self.execute_oracle_update(operator, symbol, sources, signature),
+
+            // Admin: add market
+            Transaction::AddMarket {
+                admin,
+                config,
+                initial_mark_price,
+            } => self.execute_add_market(admin, config, initial_mark_price),
         }
     }
 
@@ -376,6 +383,70 @@ impl AppState {
             self.candle_manager
                 .add_trade(&fill.symbol, fill.price, fill.size, fill.timestamp);
         }
+    }
+
+    // === Admin Transaction Handlers ===
+
+    fn execute_add_market(
+        &mut self,
+        admin: String,
+        config: MarketConfig,
+        initial_mark_price: i64,
+    ) -> Result<Vec<Fill>, AppError> {
+        // Check admin authorization
+        let admin_address = crate::config::Config::global()
+            .admin_address
+            .as_ref()
+            .ok_or_else(|| AppError::Unauthorized("no admin address configured".to_string()))?;
+
+        if admin.to_lowercase() != admin_address.to_lowercase() {
+            return Err(AppError::Unauthorized(format!(
+                "address {} is not admin",
+                admin
+            )));
+        }
+
+        // Check market doesn't already exist
+        if self.configs.contains_key(&config.symbol) {
+            return Err(AppError::Unauthorized(format!(
+                "market {} already exists",
+                config.symbol
+            )));
+        }
+
+        // Validate config sanity
+        if config.tick_size <= 0 {
+            return Err(AppError::Unauthorized("tick_size must be > 0".to_string()));
+        }
+        if config.lot_size <= 0 {
+            return Err(AppError::Unauthorized("lot_size must be > 0".to_string()));
+        }
+        if config.min_notional <= 0 {
+            return Err(AppError::Unauthorized("min_notional must be > 0".to_string()));
+        }
+        if initial_mark_price <= 0 {
+            return Err(AppError::Unauthorized("initial_mark_price must be > 0".to_string()));
+        }
+
+        let symbol = config.symbol.clone();
+
+        // Create the market (orderbook + config + default mark price)
+        self.add_market(config);
+
+        // Override mark price and EMA with initial_mark_price
+        self.mark_prices.insert(symbol.clone(), initial_mark_price);
+        self.mark_price_ema.insert(symbol.clone(), initial_mark_price);
+
+        self.mark_globals_dirty();
+
+        tracing::info!(
+            symbol = %symbol,
+            initial_mark_price,
+            admin = %admin,
+            "New market added"
+        );
+
+        Ok(vec![])
     }
 
     // === Staking Transaction Handlers ===

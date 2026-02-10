@@ -1046,6 +1046,106 @@ mod tests {
     }
 
     #[test]
+    fn test_add_market_creates_orderbook() {
+        let mut state = AppState::new();
+
+        // Verify BTC-USDT exists by default
+        assert!(state.orderbook("BTC-USDT").is_some());
+        assert!(state.market_config("BTC-USDT").is_some());
+
+        // Add a new market directly (bypassing admin check)
+        let eth_config = MarketConfig {
+            symbol: "ETH-USDT".to_string(),
+            tick_size: 1,
+            lot_size: 1,
+            min_notional: 500,
+            maker_fee: 2,
+            taker_fee: 5,
+            ..MarketConfig::default()
+        };
+
+        state.add_market(eth_config);
+        // Override mark price (like execute_add_market does)
+        state.mark_prices.insert("ETH-USDT".to_string(), 300_000); // $3,000
+        state.mark_price_ema.insert("ETH-USDT".to_string(), 300_000);
+
+        // Verify new market exists
+        assert!(state.orderbook("ETH-USDT").is_some());
+        assert!(state.market_config("ETH-USDT").is_some());
+        assert_eq!(state.mark_price("ETH-USDT"), Some(300_000));
+        assert_eq!(state.market_configs().len(), 2);
+
+        // Verify can place order on new market
+        state.execute_tx(Transaction::Deposit { trader: "alice".into(), amount: 100_000_000 }).unwrap();
+        let fills = state.execute_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "ETH-USDT".into(),
+            side: Side::Bid,
+            price: 300_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        }).unwrap();
+        assert!(fills.is_empty()); // No counterparty
+        assert!(state.orderbook("ETH-USDT").unwrap().best_bid().is_some());
+    }
+
+    #[test]
+    fn test_snapshot_preserves_new_markets() {
+        let mut state = AppState::new();
+
+        // Add ETH-USDT
+        let eth_config = MarketConfig {
+            symbol: "ETH-USDT".to_string(),
+            tick_size: 1,
+            lot_size: 1,
+            min_notional: 500,
+            maker_fee: 3,
+            taker_fee: 6,
+            ..MarketConfig::default()
+        };
+        state.add_market(eth_config);
+        state.mark_prices.insert("ETH-USDT".to_string(), 300_000);
+        state.mark_price_ema.insert("ETH-USDT".to_string(), 300_000);
+
+        // Create snapshot
+        let snapshot = state.create_snapshot(100);
+        assert_eq!(snapshot.market_configs.len(), 2);
+
+        // Restore from snapshot
+        let restored = AppState::from_snapshot(snapshot);
+        assert_eq!(restored.market_configs().len(), 2);
+        assert!(restored.market_config("BTC-USDT").is_some());
+        assert!(restored.market_config("ETH-USDT").is_some());
+        assert!(restored.orderbook("BTC-USDT").is_some());
+        assert!(restored.orderbook("ETH-USDT").is_some());
+        assert_eq!(restored.mark_price("ETH-USDT"), Some(300_000));
+
+        // Verify config fields were preserved
+        let eth = restored.market_config("ETH-USDT").unwrap();
+        assert_eq!(eth.maker_fee, 3);
+        assert_eq!(eth.taker_fee, 6);
+    }
+
+    #[test]
+    fn test_add_market_tx_rejects_without_admin() {
+        let mut state = AppState::new();
+
+        // AddMarket transaction should fail when no admin address is configured
+        let result = state.execute_tx(Transaction::AddMarket {
+            admin: "0x1234".into(),
+            config: MarketConfig {
+                symbol: "ETH-USDT".to_string(),
+                ..MarketConfig::default()
+            },
+            initial_mark_price: 300_000,
+        });
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unauthorized"), "Expected unauthorized error, got: {}", err_msg);
+    }
+
+    #[test]
     fn test_withdraw_blocked_with_positions() {
         let mut state = AppState::new();
 

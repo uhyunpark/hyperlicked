@@ -37,7 +37,7 @@ pub mod trigger;
 
 pub use accounts::{Account, AccountManager};
 pub use positions::Position;
-pub use candles::{Candle, CandleManager, Interval};
+pub use candles::{Candle, CandleManager, Interval, ALL_INTERVALS};
 pub use funding::{FundingError, FundingResult};
 pub use liquidation::{LiquidationError, LiquidationResult};
 pub use liquidation_queue::LiquidationQueue;
@@ -161,6 +161,12 @@ pub enum Transaction {
         sources: Vec<oracle::PriceSource>,
         signature: Vec<u8>,
     },
+    /// Add a new market (admin only)
+    AddMarket {
+        admin: Address,
+        config: MarketConfig,
+        initial_mark_price: i64,
+    },
 }
 
 impl Transaction {
@@ -178,7 +184,8 @@ impl Transaction {
             | Transaction::ClaimRewards { .. }
             | Transaction::Unjail { .. }
             | Transaction::SubmitEvidence { .. }
-            | Transaction::OraclePriceUpdate { .. } => 0,
+            | Transaction::OraclePriceUpdate { .. }
+            | Transaction::AddMarket { .. } => 0,
             // Medium priority: order cancellations (including trigger cancels)
             Transaction::CancelOrder { .. }
             | Transaction::CancelTriggerOrder { .. }
@@ -208,7 +215,8 @@ impl Transaction {
             | Transaction::ClaimUnstaked { .. }
             | Transaction::ClaimRewards { .. }
             | Transaction::Unjail { .. }
-            | Transaction::SubmitEvidence { .. } => None,
+            | Transaction::SubmitEvidence { .. }
+            | Transaction::AddMarket { .. } => None,
         }
     }
 
@@ -240,6 +248,7 @@ impl Transaction {
             Transaction::CancelTriggerOrder { trader, .. } => trader,
             Transaction::CancelTriggerOrderByCloid { trader, .. } => trader,
             Transaction::OraclePriceUpdate { operator, .. } => operator,
+            Transaction::AddMarket { admin, .. } => admin,
         }
     }
 }

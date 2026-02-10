@@ -27,6 +27,7 @@ use tracing::info;
 
 use hyperlicked::api::{create_router_with_store, AssetCtxData, SharedState, WebSocketHandler};
 use hyperlicked::api::state::PriceLevel;
+use hyperlicked::app::candles::ALL_INTERVALS;
 use hyperlicked::app::market_maker::{MarketMakerConfig, MarketMakerState};
 use hyperlicked::app::oracle::{FetcherConfig, OracleConfig, OracleFetcher};
 use hyperlicked::app::{AppState, Transaction};
@@ -103,6 +104,29 @@ async fn main() -> Result<()> {
         // Start from snapshot
         let mut app = AppState::from_snapshot(recovery.snapshot);
 
+        // Load persisted candles from RocksDB
+        let symbols = app.market_configs().keys().cloned().collect::<Vec<_>>();
+        let mut candle_count = 0usize;
+        for symbol in &symbols {
+            for interval in &ALL_INTERVALS {
+                match store.load_candles(symbol, interval.as_str(), 10_000) {
+                    Ok(candles) => {
+                        candle_count += candles.len();
+                        app.candle_manager_mut().load_candles(symbol, *interval, candles);
+                    }
+                    Err(e) => {
+                        tracing::warn!(symbol, interval = interval.as_str(), error = %e, "Failed to load candles");
+                    }
+                }
+            }
+        }
+        if candle_count > 0 {
+            info!(candle_count, "Loaded candles from storage");
+        }
+
+        // Pause candle updates during replay (already persisted)
+        app.candle_manager_mut().pause();
+
         // Replay blocks since snapshot
         let blocks = hyperlicked::storage::recovery::get_blocks_to_replay(
             &**store,
@@ -117,6 +141,9 @@ async fn main() -> Result<()> {
         if !blocks.is_empty() {
             info!(count = blocks.len(), "Replayed blocks from storage");
         }
+
+        // Resume candle updates for new blocks
+        app.candle_manager_mut().resume();
 
         app
     } else {
@@ -160,7 +187,11 @@ async fn main() -> Result<()> {
     if config.node_role.is_rpc() && !config.peers.is_empty() {
         println!("  Peers: {}", config.peers.join(", "));
     }
-    println!("  Markets: BTC-USDT");
+    {
+        let app = shared_state.app.read().await;
+        let symbols: Vec<_> = app.market_configs().keys().cloned().collect();
+        println!("  Markets: {}", symbols.join(", "));
+    }
     println!("  Oracle: {}", if config.oracle_enabled { "enabled" } else { "disabled" });
     println!("  Market Maker: {}", if config.mm_enabled { "enabled" } else { "disabled" });
     println!();
@@ -353,6 +384,26 @@ async fn run_consensus_loop(
 
                 if let Err(e) = store.commit_block(&block, &consensus_state) {
                     tracing::error!(error = %e, "Failed to persist block");
+                }
+
+                // Flush dirty candles to RocksDB
+                {
+                    let mut app = state.app.write().await;
+                    let dirty = app.candle_manager_mut().take_dirty();
+                    if !dirty.is_empty() {
+                        let mut batch = Vec::with_capacity(dirty.len());
+                        for (symbol, interval, timestamp) in &dirty {
+                            if let Some(candle) = app.candle_manager_mut().get_candle(symbol, *interval, *timestamp) {
+                                let key = RocksDbStore::candle_key(symbol, interval.as_str(), *timestamp);
+                                if let Ok(value) = serde_json::to_vec(candle) {
+                                    batch.push((key, value));
+                                }
+                            }
+                        }
+                        if let Err(e) = store.save_candles_batch(&batch) {
+                            tracing::error!(error = %e, "Failed to persist candles");
+                        }
+                    }
                 }
 
                 // Periodic snapshot
@@ -731,72 +782,69 @@ async fn run_consensus_loop(
                 total_pending,
             );
 
-            // Broadcast orderbook update
-            let (bids, asks, best_bid, best_ask) = {
+            // Broadcast orderbook, mark price, and asset context for all markets
+            let (best_bid, best_ask) = {
                 let app = state.app.read().await;
-                if let Some(book) = app.orderbook("BTC-USDT") {
-                    let bids: Vec<PriceLevel> = book.bid_levels(20).iter().map(|l| PriceLevel {
-                        price: l.price,
-                        size: l.size,
-                    }).collect();
-                    let asks: Vec<PriceLevel> = book.ask_levels(20).iter().map(|l| PriceLevel {
-                        price: l.price,
-                        size: l.size,
-                    }).collect();
-                    let best_bid = bids.first().map(|l| l.price);
-                    let best_ask = asks.first().map(|l| l.price);
-                    (bids, asks, best_bid, best_ask)
-                } else {
-                    (vec![], vec![], None, None)
+                let symbols: Vec<String> = app.market_configs().keys().cloned().collect();
+
+                let mut first_best_bid = None;
+                let mut first_best_ask = None;
+
+                for symbol in &symbols {
+                    // Orderbook update
+                    if let Some(book) = app.orderbook(symbol) {
+                        let bids: Vec<PriceLevel> = book.bid_levels(20).iter().map(|l| PriceLevel {
+                            price: l.price,
+                            size: l.size,
+                        }).collect();
+                        let asks: Vec<PriceLevel> = book.ask_levels(20).iter().map(|l| PriceLevel {
+                            price: l.price,
+                            size: l.size,
+                        }).collect();
+                        if first_best_bid.is_none() {
+                            first_best_bid = bids.first().map(|l| l.price);
+                            first_best_ask = asks.first().map(|l| l.price);
+                        }
+                        WebSocketHandler::broadcast_orderbook_update(&state, symbol, bids, asks);
+                    }
+
+                    // Mark price update when there are trades
+                    if !fills.is_empty() {
+                        let mark = app.mark_price(symbol).unwrap_or(0);
+                        let index = app.oracle_price(symbol);
+                        WebSocketHandler::broadcast_mark_price(
+                            &state,
+                            symbol,
+                            mark,
+                            index,
+                            block.timestamp,
+                        );
+                    }
+
+                    // Asset context
+                    let funding_rate_bps = app.funding_rate(symbol);
+                    let funding_rate_1m = funding_rate_bps * 100;
+
+                    let ctx = AssetCtxData {
+                        symbol: symbol.to_string(),
+                        mark_price: app.mark_price(symbol).unwrap_or(0),
+                        oracle_price: app.oracle_price(symbol),
+                        mid_price: app.mid_price(symbol).unwrap_or(app.mark_price(symbol).unwrap_or(0)),
+                        funding_rate: funding_rate_1m,
+                        premium: app.premium(symbol).unwrap_or(0),
+                        open_interest: app.get_open_interest(symbol),
+                        prev_day_price: app.prev_day_price(symbol).unwrap_or(0),
+                        day_volume: app.day_volume(symbol),
+                        day_notional_volume: app.day_notional_volume(symbol),
+                        next_funding_time: app.next_funding_time(symbol),
+                        timestamp: block.timestamp,
+                    };
+
+                    WebSocketHandler::broadcast_asset_ctx(&state, ctx);
                 }
+
+                (first_best_bid, first_best_ask)
             };
-
-            WebSocketHandler::broadcast_orderbook_update(&state, "BTC-USDT", bids, asks);
-
-            // Broadcast mark price update when there are trades
-            if !fills.is_empty() {
-                let (mark_price, index_price) = {
-                    let app = state.app.read().await;
-                    let mark = app.mark_price("BTC-USDT").unwrap_or(0);
-                    let index = app.oracle_price("BTC-USDT");
-                    (mark, index)
-                };
-
-                WebSocketHandler::broadcast_mark_price(
-                    &state,
-                    "BTC-USDT",
-                    mark_price,
-                    index_price,
-                    block.timestamp,
-                );
-            }
-
-            // Broadcast asset context (market stats) every block
-            {
-                let app = state.app.read().await;
-                let symbol = "BTC-USDT";
-
-                // Convert funding rate from bps to 1/1M units (multiply by 100)
-                let funding_rate_bps = app.funding_rate(symbol);
-                let funding_rate_1m = funding_rate_bps * 100;
-
-                let ctx = AssetCtxData {
-                    symbol: symbol.to_string(),
-                    mark_price: app.mark_price(symbol).unwrap_or(0),
-                    oracle_price: app.oracle_price(symbol),
-                    mid_price: app.mid_price(symbol).unwrap_or(app.mark_price(symbol).unwrap_or(0)),
-                    funding_rate: funding_rate_1m,
-                    premium: app.premium(symbol).unwrap_or(0),
-                    open_interest: app.get_open_interest(symbol),
-                    prev_day_price: app.prev_day_price(symbol).unwrap_or(0),
-                    day_volume: app.day_volume(symbol),
-                    day_notional_volume: app.day_notional_volume(symbol),
-                    next_funding_time: app.next_funding_time(symbol),
-                    timestamp: block.timestamp,
-                };
-
-                WebSocketHandler::broadcast_asset_ctx(&state, ctx);
-            }
 
             // Log block production
             if total_pending > 0 {
@@ -844,13 +892,18 @@ async fn run_oracle_fetcher(state: SharedState) {
 
     info!(
         poll_interval_ms = config.poll_interval_ms,
-        symbols = ?config.symbols,
         "Oracle fetcher started"
     );
 
     loop {
+        // Refresh symbols from app state each iteration (picks up newly added markets)
+        let symbols: Vec<String> = {
+            let app = state.app.read().await;
+            app.market_configs().keys().cloned().collect()
+        };
+
         // Fetch prices for each symbol
-        for symbol in &config.symbols {
+        for symbol in &symbols {
             tracing::debug!(symbol = %symbol, "Fetching oracle prices...");
             let sources = fetcher.fetch_prices(symbol).await;
 

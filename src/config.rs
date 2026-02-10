@@ -170,6 +170,10 @@ pub struct Config {
 
     /// Whether gossip protocol is enabled
     pub gossip_enabled: bool,
+
+    /// Admin address authorized for governance transactions (AddMarket, etc.)
+    /// Set via ADMIN_ADDRESS env var. Format: checksummed hex (0x...)
+    pub admin_address: Option<String>,
 }
 
 impl Config {
@@ -280,6 +284,7 @@ impl Config {
             gossip_enabled: std::env::var("GOSSIP_ENABLED")
                 .map(|s| s == "true" || s == "1")
                 .unwrap_or(true), // Default: enabled
+            admin_address: std::env::var("ADMIN_ADDRESS").ok(),
         }
     }
 

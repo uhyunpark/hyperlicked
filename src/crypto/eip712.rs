@@ -192,6 +192,46 @@ impl CancelTriggerOrderEIP712 {
     }
 }
 
+/// Add market for EIP-712 signing (admin only)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddMarketEIP712 {
+    pub symbol: String,
+    pub tick_size: U256,
+    pub lot_size: U256,
+    pub min_notional: U256,
+    pub maker_fee: U256,
+    pub taker_fee: U256,
+    pub initial_mark_price: U256,
+    pub nonce: U256,
+    pub owner: Address,
+}
+
+impl AddMarketEIP712 {
+    /// Compute the struct hash for this add market request
+    pub fn struct_hash(&self) -> B256 {
+        let type_hash = keccak256(
+            b"AddMarket(string symbol,uint256 tickSize,uint256 lotSize,uint256 minNotional,uint256 makerFee,uint256 takerFee,uint256 initialMarkPrice,uint256 nonce,address owner)"
+        );
+
+        let symbol_hash = keccak256(self.symbol.as_bytes());
+
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(type_hash.as_slice());
+        encoded.extend_from_slice(symbol_hash.as_slice());
+        encoded.extend_from_slice(&self.tick_size.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.lot_size.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.min_notional.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.maker_fee.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.taker_fee.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.initial_mark_price.to_be_bytes::<32>());
+        encoded.extend_from_slice(&self.nonce.to_be_bytes::<32>());
+        encoded.extend_from_slice(&[0u8; 12]); // address padding
+        encoded.extend_from_slice(self.owner.as_slice());
+
+        keccak256(&encoded)
+    }
+}
+
 /// EIP-712 signer for orders and cancels
 pub struct EIP712Signer {
     domain: EIP712Domain,
@@ -336,6 +376,29 @@ impl EIP712Signer {
         let hash = self.hash_cancel_trigger_order(cancel);
         let recovered = recover_address(&hash.into(), signature)?;
         Ok(recovered == cancel.owner)
+    }
+
+    /// Hash an add market request according to EIP-712
+    pub fn hash_add_market(&self, add_market: &AddMarketEIP712) -> B256 {
+        let domain_separator = self.domain.separator();
+        let struct_hash = add_market.struct_hash();
+
+        let mut message = vec![0x19, 0x01];
+        message.extend_from_slice(domain_separator.as_slice());
+        message.extend_from_slice(struct_hash.as_slice());
+
+        keccak256(&message)
+    }
+
+    /// Verify an add market signature
+    pub fn verify_add_market_signature(
+        &self,
+        add_market: &AddMarketEIP712,
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let hash = self.hash_add_market(add_market);
+        let recovered = recover_address(&hash.into(), signature)?;
+        Ok(recovered == add_market.owner)
     }
 
     /// Get the domain for JSON serialization (for frontend)

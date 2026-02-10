@@ -12,19 +12,23 @@ use serde::Deserialize;
 use crate::api::state::PriceLevel;
 use crate::api::types::{ApiState, CandleInfo, FundingInfo, MarketInfo, OrderbookSnapshot};
 
-pub async fn get_markets(State(_state): State<ApiState>) -> Json<Vec<MarketInfo>> {
-    Json(vec![MarketInfo::default()])
+pub async fn get_markets(State(state): State<ApiState>) -> Json<Vec<MarketInfo>> {
+    let app = state.shared.app.read().await;
+    let markets: Vec<MarketInfo> = app
+        .market_configs()
+        .values()
+        .map(MarketInfo::from_config)
+        .collect();
+    Json(markets)
 }
 
 pub async fn get_market(
-    State(_state): State<ApiState>,
+    State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<MarketInfo>, StatusCode> {
-    if symbol == "BTC-USDT" {
-        Ok(Json(MarketInfo::default()))
-    } else {
-        Err(StatusCode::NOT_FOUND)
-    }
+    let app = state.shared.app.read().await;
+    let config = app.market_config(&symbol).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(MarketInfo::from_config(config)))
 }
 
 pub async fn get_orderbook(
@@ -129,7 +133,7 @@ pub async fn get_candles(
 
     let interval_str = params.interval.as_deref().unwrap_or("1m");
     let interval = Interval::from_str(interval_str).ok_or(StatusCode::BAD_REQUEST)?;
-    let limit = params.limit.unwrap_or(500).min(500);
+    let limit = params.limit.unwrap_or(500).min(10_000);
 
     let app = state.shared.app.read().await;
 

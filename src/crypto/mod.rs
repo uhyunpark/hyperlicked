@@ -20,7 +20,7 @@ pub use bls::{
     BlsSecretKey, BlsSignature,
 };
 pub use eip712::{
-    CancelEIP712, CancelTriggerOrderEIP712, EIP712Domain, EIP712Signer, OrderEIP712,
-    TriggerOrderEIP712,
+    AddMarketEIP712, CancelEIP712, CancelTriggerOrderEIP712, EIP712Domain, EIP712Signer,
+    OrderEIP712, TriggerOrderEIP712,
 };
 pub use signer::{recover_address, Signer};

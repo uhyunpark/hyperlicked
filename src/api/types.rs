@@ -95,6 +95,28 @@ impl Default for MarketInfo {
     }
 }
 
+impl MarketInfo {
+    /// Build MarketInfo from a MarketConfig
+    pub fn from_config(config: &crate::app::MarketConfig) -> Self {
+        let (base, quote) = config
+            .symbol
+            .split_once('-')
+            .unwrap_or((&config.symbol, "USDT"));
+        Self {
+            symbol: config.symbol.clone(),
+            base_asset: base.to_string(),
+            quote_asset: quote.to_string(),
+            market_type: "perp".to_string(),
+            status: "active".to_string(),
+            tick_size: config.tick_size,
+            lot_size: config.lot_size,
+            max_leverage: 50,
+            taker_fee_bps: config.taker_fee,
+            maker_fee_bps: config.maker_fee,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrderbookSnapshot {
     pub symbol: String,
@@ -513,4 +535,36 @@ pub struct SnapshotMetadata {
 pub struct SnapshotExport {
     pub metadata: SnapshotMetadata,
     pub data: String, // base64 encoded
+}
+
+// =============================================================================
+// Admin Types
+// =============================================================================
+
+/// Market config details for AddMarket request (all strings for EIP-712 compat)
+#[derive(Debug, Deserialize)]
+pub struct AddMarketConfigDetails {
+    pub symbol: String,
+    pub tick_size: String,
+    pub lot_size: String,
+    pub min_notional: String,
+    pub maker_fee: String,
+    pub taker_fee: String,
+}
+
+/// Request to add a new market (admin only, EIP-712 signed)
+#[derive(Debug, Deserialize)]
+pub struct AddMarketRequest {
+    pub admin: String,
+    pub config: AddMarketConfigDetails,
+    pub initial_mark_price: String,
+    pub nonce: String,
+    pub signature: String,
+}
+
+/// Response after adding a market
+#[derive(Debug, Serialize)]
+pub struct AddMarketResponse {
+    pub status: String,
+    pub symbol: String,
 }

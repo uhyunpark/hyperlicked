@@ -10,6 +10,7 @@
 //! - Heavy: 20 req/min (sync, snapshots)
 
 mod account;
+mod admin;
 mod adl;
 mod chain;
 mod market;
@@ -109,6 +110,8 @@ pub fn create_router_with_store(
         // Oracle submit (admin action, but rate limited with trading)
         .route("/oracle/submit", post(oracle::submit_oracle_update))
         .route("/oracle/enable", post(oracle::set_oracle_enabled))
+        // Admin
+        .route("/admin/add-market", post(admin::add_market))
         .with_state(api_state.clone())
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),

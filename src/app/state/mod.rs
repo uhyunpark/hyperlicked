@@ -314,6 +314,11 @@ impl AppState {
         self.candle_manager.get_candles(symbol, interval, limit)
     }
 
+    /// Get mutable candle manager (for pause/resume/flush)
+    pub fn candle_manager_mut(&mut self) -> &mut CandleManager {
+        &mut self.candle_manager
+    }
+
     /// Get all market configs (for snapshot)
     pub fn market_configs(&self) -> &HashMap<Symbol, MarketConfig> {
         &self.configs
@@ -593,4 +598,6 @@ pub enum AppError {
     ReduceOnlyViolation,
     #[error("position size {would_be} would exceed max {max}")]
     PositionTooLarge { max: i64, would_be: i64 },
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
 }

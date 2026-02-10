@@ -7,13 +7,13 @@ use alloy_primitives::{Address, U256};
 
 use crate::config::Config;
 use crate::crypto::{
-    verify_agent_order, AgentSigner, CancelEIP712, CancelTriggerOrderEIP712, EIP712Signer,
-    OrderEIP712, TriggerOrderEIP712,
+    verify_agent_order, AddMarketEIP712, AgentSigner, CancelEIP712, CancelTriggerOrderEIP712,
+    EIP712Signer, OrderEIP712, TriggerOrderEIP712,
 };
 
 use super::types::{
-    CancelTriggerOrderRequest, OrderDetails, PlaceTriggerOrderRequest, SignedTransaction,
-    StoredDelegation,
+    AddMarketRequest, CancelTriggerOrderRequest, OrderDetails, PlaceTriggerOrderRequest,
+    SignedTransaction, StoredDelegation,
 };
 
 /// Result of successful order verification
@@ -358,6 +358,80 @@ fn verify_agent_trigger_order_sig(
     }
 
     Ok(())
+}
+
+/// Result of successful add market verification
+pub struct VerifiedAddMarket {
+    pub owner: Address,
+    pub symbol: String,
+    pub tick_size: i64,
+    pub lot_size: i64,
+    pub min_notional: i64,
+    pub maker_fee: i64,
+    pub taker_fee: i64,
+    pub initial_mark_price: i64,
+}
+
+/// Verify an add market request signature
+pub fn verify_add_market(
+    req: &AddMarketRequest,
+    eip712: &EIP712Signer,
+) -> Result<VerifiedAddMarket, VerifyError> {
+    // Parse signature
+    let sig_hex = req.signature.strip_prefix("0x").unwrap_or(&req.signature);
+    let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
+
+    // Parse owner address
+    let owner: Address = req.admin.parse().map_err(|_| VerifyError::InvalidOwner)?;
+
+    // Build AddMarketEIP712
+    let add_market_eip712 = AddMarketEIP712 {
+        symbol: req.config.symbol.clone(),
+        tick_size: U256::from_str_radix(&req.config.tick_size, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        lot_size: U256::from_str_radix(&req.config.lot_size, 10)
+            .map_err(|_| VerifyError::InvalidSize)?,
+        min_notional: U256::from_str_radix(&req.config.min_notional, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        maker_fee: U256::from_str_radix(&req.config.maker_fee, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        taker_fee: U256::from_str_radix(&req.config.taker_fee, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        initial_mark_price: U256::from_str_radix(&req.initial_mark_price, 10)
+            .map_err(|_| VerifyError::InvalidPrice)?,
+        nonce: U256::from_str_radix(&req.nonce, 10)
+            .map_err(|_| VerifyError::InvalidNonce)?,
+        owner,
+    };
+
+    // Skip verification in dev mode if configured
+    if !Config::global().skip_signature_verification {
+        let valid = eip712
+            .verify_add_market_signature(&add_market_eip712, &signature)
+            .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
+        if !valid {
+            return Err(VerifyError::InvalidSignature);
+        }
+    }
+
+    // Parse numeric fields
+    let tick_size: i64 = req.config.tick_size.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let lot_size: i64 = req.config.lot_size.parse().map_err(|_| VerifyError::InvalidSize)?;
+    let min_notional: i64 = req.config.min_notional.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let maker_fee: i64 = req.config.maker_fee.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let taker_fee: i64 = req.config.taker_fee.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let initial_mark_price: i64 = req.initial_mark_price.parse().map_err(|_| VerifyError::InvalidPrice)?;
+
+    Ok(VerifiedAddMarket {
+        owner,
+        symbol: req.config.symbol.clone(),
+        tick_size,
+        lot_size,
+        min_notional,
+        maker_fee,
+        taker_fee,
+        initial_mark_price,
+    })
 }
 
 /// Verify order with agent delegation
