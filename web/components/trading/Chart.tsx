@@ -10,6 +10,7 @@ import type { CandleInterval } from '@/lib/api'
 export function Chart() {
   const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
   const trades = useTradingStore((s) => s.trades)
+  const isConnected = useTradingStore((s) => s.isConnected)
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<any>(null)
@@ -18,15 +19,18 @@ export function Chart() {
   const [loading, setLoading] = useState(true)
   const lastProcessedTradeRef = useRef<string | null>(null)
   const lastCandleTimeRef = useRef<number | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   // Fetch candles from API
   const fetchCandles = useCallback(async () => {
+    abortRef.current?.abort()
+    abortRef.current = new AbortController()
     try {
       setLoading(true)
-      const candles = await getCandles(selectedSymbol, interval, 500)
+      const candles = await getCandles(selectedSymbol, interval, 2000, abortRef.current.signal)
 
       // Create new aggregator for this interval
-      aggregatorRef.current = new CandlestickAggregator(interval as Interval)
+      aggregatorRef.current = new CandlestickAggregator(interval as Interval, 2000)
       lastProcessedTradeRef.current = null
 
       if (candleSeriesRef.current) {
@@ -46,6 +50,7 @@ export function Chart() {
           : null
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
       console.error('[chart] Failed to fetch candles:', error)
     } finally {
       setLoading(false)
@@ -117,10 +122,19 @@ export function Chart() {
     }
   }, [])
 
-  // Fetch candles when symbol or interval changes
+  // Fetch on mount, symbol change, interval change
   useEffect(() => {
     fetchCandles()
   }, [fetchCandles])
+
+  // Also refetch on WS reconnect to fill gap
+  const prevConnectedRef = useRef(false)
+  useEffect(() => {
+    if (isConnected && !prevConnectedRef.current) {
+      fetchCandles()
+    }
+    prevConnectedRef.current = isConnected
+  }, [isConnected, fetchCandles])
 
   // Update current candle with real-time trades using the aggregator
   useEffect(() => {

@@ -12,6 +12,7 @@ use std::path::Path;
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
 
 use super::{AppSnapshot, ConsensusState, PersistentStore};
+use crate::app::candles::Candle;
 use crate::consensus::BlockStore;
 use crate::types::{Block, Hash};
 
@@ -21,6 +22,7 @@ const CF_HEIGHT_INDEX: &str = "height_index";
 const CF_CONSENSUS: &str = "consensus";
 const CF_SNAPSHOTS: &str = "snapshots";
 const CF_META: &str = "meta";
+const CF_CANDLES: &str = "candles";
 
 /// RocksDB-backed persistent store
 pub struct RocksDbStore {
@@ -40,6 +42,7 @@ impl RocksDbStore {
             ColumnFamilyDescriptor::new(CF_CONSENSUS, Options::default()),
             ColumnFamilyDescriptor::new(CF_SNAPSHOTS, Options::default()),
             ColumnFamilyDescriptor::new(CF_META, Options::default()),
+            ColumnFamilyDescriptor::new(CF_CANDLES, Options::default()),
         ];
 
         let db = DB::open_cf_descriptors(&opts, path, cfs)?;
@@ -49,6 +52,69 @@ impl RocksDbStore {
     /// Get column family handle (panics if not found - programming error)
     fn cf(&self, name: &str) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(name).expect("column family must exist")
+    }
+
+    /// Build candle key: `{symbol}\0{interval_str}\0{timestamp_be_u64}`
+    pub fn candle_key(symbol: &str, interval_str: &str, timestamp: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(symbol.len() + 1 + interval_str.len() + 1 + 8);
+        key.extend_from_slice(symbol.as_bytes());
+        key.push(0);
+        key.extend_from_slice(interval_str.as_bytes());
+        key.push(0);
+        key.extend_from_slice(&timestamp.to_be_bytes());
+        key
+    }
+
+    /// Save a batch of candles atomically
+    pub fn save_candles_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> anyhow::Result<()> {
+        let mut batch = WriteBatch::default();
+        let cf = self.cf(CF_CANDLES);
+        for (key, value) in entries {
+            batch.put_cf(cf, key, value);
+        }
+        self.db.write(batch)?;
+        Ok(())
+    }
+
+    /// Load candles for a (symbol, interval) pair, returning the latest `limit` candles
+    pub fn load_candles(
+        &self,
+        symbol: &str,
+        interval_str: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Candle>> {
+        let cf = self.cf(CF_CANDLES);
+        // Build prefix for this (symbol, interval)
+        let mut prefix = Vec::with_capacity(symbol.len() + 1 + interval_str.len() + 1);
+        prefix.extend_from_slice(symbol.as_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(interval_str.as_bytes());
+        prefix.push(0);
+
+        // Scan forward from prefix, collect all matching entries
+        let iter = self.db.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        let mut candles = Vec::new();
+        for item in iter {
+            let (key, value) = item?;
+            // Check key still has our prefix
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if let Ok(candle) = serde_json::from_slice::<Candle>(&value) {
+                candles.push(candle);
+            }
+        }
+
+        // Keep only the latest `limit` candles
+        if candles.len() > limit {
+            candles = candles.split_off(candles.len() - limit);
+        }
+
+        Ok(candles)
     }
 }
 
@@ -209,6 +275,14 @@ impl PersistentStore for RocksDbStore {
         self.db.write(batch)?;
 
         Ok(())
+    }
+
+    fn save_candles_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> anyhow::Result<()> {
+        RocksDbStore::save_candles_batch(self, entries)
+    }
+
+    fn load_candles(&self, symbol: &str, interval_str: &str, limit: usize) -> anyhow::Result<Vec<Candle>> {
+        RocksDbStore::load_candles(self, symbol, interval_str, limit)
     }
 }
 

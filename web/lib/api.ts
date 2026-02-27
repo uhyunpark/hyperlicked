@@ -332,9 +332,10 @@ export interface ApiCandle {
 export async function getCandles(
   symbol: string,
   interval: CandleInterval = '1m',
-  limit: number = 500
+  limit: number = 2000,
+  signal?: AbortSignal
 ): Promise<ApiCandle[]> {
-  const res = await fetch(`${API_BASE}/markets/${symbol}/candles?interval=${interval}&limit=${limit}`)
+  const res = await fetch(`${API_BASE}/markets/${symbol}/candles?interval=${interval}&limit=${limit}`, { signal })
   if (!res.ok) throw new Error(`Failed to fetch candles: ${res.statusText}`)
   return res.json()
 }

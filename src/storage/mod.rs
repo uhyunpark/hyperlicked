@@ -24,6 +24,7 @@ pub use verify::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::candles::Candle;
 use crate::consensus::BlockStore;
 use crate::types::{Block, Certificate, Hash, View};
 
@@ -85,4 +86,10 @@ pub trait PersistentStore: BlockStore {
 
     /// Atomic commit: block + consensus state together
     fn commit_block(&self, block: &Block, state: &ConsensusState) -> anyhow::Result<()>;
+
+    /// Save a batch of candles (key-value pairs already serialized)
+    fn save_candles_batch(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> anyhow::Result<()>;
+
+    /// Load candles for a (symbol, interval) pair
+    fn load_candles(&self, symbol: &str, interval_str: &str, limit: usize) -> anyhow::Result<Vec<Candle>>;
 }

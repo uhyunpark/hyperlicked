@@ -395,8 +395,9 @@ async fn run_consensus_loop(
                         for (symbol, interval, timestamp) in &dirty {
                             if let Some(candle) = app.candle_manager_mut().get_candle(symbol, *interval, *timestamp) {
                                 let key = RocksDbStore::candle_key(symbol, interval.as_str(), *timestamp);
-                                if let Ok(value) = serde_json::to_vec(candle) {
-                                    batch.push((key, value));
+                                match serde_json::to_vec(candle) {
+                                    Ok(value) => batch.push((key, value)),
+                                    Err(e) => tracing::warn!(error = %e, "Failed to serialize candle"),
                                 }
                             }
                         }

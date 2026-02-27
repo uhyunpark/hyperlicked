@@ -7,16 +7,26 @@
 //! - Price: i64 in cents (100 = $1.00)
 //! - Size/Volume: i64 in satoshis (100_000_000 = 1 unit)
 
-use std::collections::{HashMap, VecDeque};
-use serde::Serialize;
+use std::collections::{HashMap, HashSet, VecDeque};
+use serde::{Deserialize, Serialize};
 use crate::types::{Price, Size};
 use super::Symbol;
 
 /// Maximum number of candles to keep per symbol/interval
-const MAX_CANDLES: usize = 500;
+const MAX_CANDLES: usize = 10_000;
+
+/// All supported intervals (for iteration during load/flush)
+pub const ALL_INTERVALS: [Interval; 6] = [
+    Interval::Min1,
+    Interval::Min5,
+    Interval::Min15,
+    Interval::Hour1,
+    Interval::Hour4,
+    Interval::Day1,
+];
 
 /// Supported candle intervals
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Interval {
     Min1,
     Min5,
@@ -66,7 +76,7 @@ impl Interval {
 }
 
 /// A single OHLCV candle
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candle {
     /// Bucket start timestamp (ms since epoch)
     pub time: u64,
@@ -109,16 +119,28 @@ impl Candle {
 }
 
 /// Manages candle aggregation for all symbols and intervals
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CandleManager {
     /// Candles indexed by (symbol, interval)
     candles: HashMap<(Symbol, Interval), VecDeque<Candle>>,
+    /// When true, add_trade() is a no-op (used during block replay)
+    paused: bool,
+    /// Tracks modified candle buckets since last flush: (symbol, interval, bucket_timestamp)
+    dirty: HashSet<(Symbol, Interval, u64)>,
+}
+
+impl Default for CandleManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CandleManager {
     pub fn new() -> Self {
         Self {
             candles: HashMap::new(),
+            paused: false,
+            dirty: HashSet::new(),
         }
     }
 
@@ -128,8 +150,51 @@ impl CandleManager {
         (timestamp / interval_ms) * interval_ms
     }
 
+    /// Pause candle updates (used during block replay to avoid double-counting)
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// Resume candle updates after replay
+    pub fn resume(&mut self) {
+        self.paused = false;
+    }
+
+    /// Drain the dirty set, returning all modified (symbol, interval, timestamp) keys
+    pub fn take_dirty(&mut self) -> HashSet<(Symbol, Interval, u64)> {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// Look up a specific candle by (symbol, interval, bucket_timestamp)
+    pub fn get_candle(&self, symbol: &str, interval: Interval, timestamp: u64) -> Option<&Candle> {
+        let key = (symbol.to_string(), interval);
+        self.candles.get(&key).and_then(|deque| {
+            deque.iter().find(|c| c.time == timestamp)
+        })
+    }
+
+    /// Bulk load candles from storage (used on startup)
+    pub fn load_candles(&mut self, symbol: &str, interval: Interval, candles: Vec<Candle>) {
+        if candles.is_empty() {
+            return;
+        }
+        let key = (symbol.to_string(), interval);
+        let deque = self.candles.entry(key).or_insert_with(VecDeque::new);
+        for candle in candles {
+            deque.push_back(candle);
+        }
+        // Trim to MAX_CANDLES
+        while deque.len() > MAX_CANDLES {
+            deque.pop_front();
+        }
+    }
+
     /// Add a trade and update all interval candles
     pub fn add_trade(&mut self, symbol: &str, price: Price, size: Size, timestamp: u64) {
+        if self.paused {
+            return;
+        }
+
         // Update candles for all intervals
         for interval in [
             Interval::Min1,
@@ -161,12 +226,14 @@ impl CandleManager {
             if last.time == bucket {
                 // Same bucket - update existing candle
                 last.update(price, size);
+                self.dirty.insert((symbol.to_string(), interval, bucket));
                 return;
             }
         }
 
         // New bucket - create new candle
         candles.push_back(Candle::new(bucket, price, size));
+        self.dirty.insert((symbol.to_string(), interval, bucket));
 
         // Evict old candles if needed
         while candles.len() > MAX_CANDLES {
