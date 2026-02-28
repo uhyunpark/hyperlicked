@@ -265,7 +265,7 @@ function PositionsInner() {
                     className="border-b border-border/50 transition-colors hover:bg-bg-tertiary"
                   >
                     <td className="px-4 py-2 font-medium text-text-primary">{position.symbol}</td>
-                    <td className={`px-4 py-2 font-semibold ${isLong ? 'text-green-buy' : 'text-red-sell'}`}>
+                    <td className={`px-4 py-2 font-semibold ${isLong ? 'text-long' : 'text-short'}`}>
                       {isLong ? 'LONG' : 'SHORT'}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
@@ -277,19 +277,19 @@ function PositionsInner() {
                     <td className="px-4 py-2 text-right font-mono text-text-primary">
                       {displayCurrency(realtimeMarkPrice)}
                     </td>
-                    <td className="px-4 py-2 text-right font-mono text-red-sell">
+                    <td className="px-4 py-2 text-right font-mono text-short">
                       {displayCurrency(position.liquidationPrice ?? 0)}
                     </td>
                     {/* Take Profit */}
                     <td className="px-4 py-2 text-right">
                       {triggers.tp ? (
                         <div className="flex items-center justify-end gap-1">
-                          <span className="font-mono text-green-buy">
+                          <span className="font-mono text-long">
                             ${triggers.tp.triggerPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                           </span>
                           <button
                             onClick={() => handleCancelTrigger(triggers.tp!.id, position.symbol, 'tp')}
-                            className="text-text-muted hover:text-red-sell"
+                            className="text-text-muted hover:text-short"
                             title="Cancel TP"
                           >
                             ×
@@ -303,12 +303,12 @@ function PositionsInner() {
                     <td className="px-4 py-2 text-right">
                       {triggers.sl ? (
                         <div className="flex items-center justify-end gap-1">
-                          <span className="font-mono text-red-sell">
+                          <span className="font-mono text-short">
                             ${triggers.sl.triggerPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                           </span>
                           <button
                             onClick={() => handleCancelTrigger(triggers.sl!.id, position.symbol, 'sl')}
-                            className="text-text-muted hover:text-red-sell"
+                            className="text-text-muted hover:text-short"
                             title="Cancel SL"
                           >
                             ×
@@ -318,7 +318,7 @@ function PositionsInner() {
                         <span className="text-text-muted">--</span>
                       )}
                     </td>
-                    <td className={`px-4 py-2 text-right font-mono font-semibold ${isProfitable ? 'text-green-buy' : 'text-red-sell'}`}>
+                    <td className={`px-4 py-2 text-right font-mono font-semibold ${isProfitable ? 'text-long' : 'text-short'}`}>
                       {Number.isFinite(realtimePnL) ? (
                         <>
                           {isProfitable ? '+' : ''}${realtimePnL.toFixed(2)}
@@ -333,7 +333,7 @@ function PositionsInner() {
                     <td className="px-4 py-2 text-center">
                       <button
                         onClick={() => handleClose(position.symbol, position.size, realtimeMarkPrice)}
-                        className="rounded border border-accent/30 bg-accent/10 px-2 py-1 text-accent transition-colors hover:bg-accent/20"
+                        className="rounded border border-short/30 bg-short/10 px-2 py-1 text-short transition-colors hover:bg-short/20"
                       >
                         Close
                       </button>
@@ -355,7 +355,7 @@ function PositionsInner() {
             <div className="flex justify-between text-xs">
               <span className="text-text-muted">Total Unrealized PnL:</span>
               <span className={`font-mono font-semibold ${
-                safeTotalPnL > 0 ? 'text-green-buy' : 'text-red-sell'
+                safeTotalPnL > 0 ? 'text-long' : 'text-short'
               }`}>
                 ${safeTotalPnL.toFixed(2)}
               </span>

@@ -11,20 +11,20 @@ export function SideToggle({ side, onSideChange }: SideToggleProps) {
   return (
     <div className="mb-4 grid grid-cols-2 gap-2">
       <button
-        className={`rounded py-2 text-sm font-semibold transition-colors ${
+        className={`rounded py-2 text-sm font-semibold transition-all duration-150 ${
           side === 'buy'
-            ? 'bg-green-buy text-white'
-            : 'border border-border bg-bg-tertiary text-text-secondary hover:bg-bg-tertiary/80'
+            ? 'bg-long text-white shadow-panel'
+            : 'border border-border/50 bg-bg-tertiary text-text-secondary hover:bg-bg-tertiary/80'
         }`}
         onClick={() => onSideChange('buy')}
       >
         Buy / Long
       </button>
       <button
-        className={`rounded py-2 text-sm font-semibold transition-colors ${
+        className={`rounded py-2 text-sm font-semibold transition-all duration-150 ${
           side === 'sell'
-            ? 'bg-red-sell text-white'
-            : 'border border-border bg-bg-tertiary text-text-secondary hover:bg-bg-tertiary/80'
+            ? 'bg-short text-white shadow-panel'
+            : 'border border-border/50 bg-bg-tertiary text-text-secondary hover:bg-bg-tertiary/80'
         }`}
         onClick={() => onSideChange('sell')}
       >

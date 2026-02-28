@@ -32,7 +32,7 @@ export function RecentTrades() {
               className="flex justify-between px-4 py-1 text-xs font-mono transition-colors hover:bg-bg-tertiary"
             >
               <div className="text-text-muted">{timeStr}</div>
-              <div className={isBuy ? 'text-green-buy' : 'text-red-sell'}>
+              <div className={isBuy ? 'text-long' : 'text-short'}>
                 {isBuy ? '▲ ' : '▼ '}{trade.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
               <div className="text-text-primary">{trade.size.toFixed(4)}</div>

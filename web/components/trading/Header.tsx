@@ -4,7 +4,6 @@ import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/lib/store'
 import { useWallet } from '@/lib/useWallet'
 import { config, isDevelopment } from '@/lib/config'
-import { toast } from '@/components/ui/Toast'
 import {
   getFunding,
   getInsuranceFund,
@@ -131,13 +130,13 @@ export function Header() {
   const isWrongNetwork = wallet.isConnected && wallet.chainId !== config.network.chainId
 
   return (
-    <header className="border-b border-border bg-bg-secondary">
+    <header className="border-b border-border/50 bg-bg-secondary">
       {/* Error/Warning Banner */}
       {(wallet.error || isWrongNetwork) && (
-        <div className="flex items-center justify-between bg-red-sell/20 px-4 py-1.5">
+        <div className="flex items-center justify-between bg-short/20 px-4 py-1.5">
           <div className="flex items-center gap-2">
-            <span className="text-red-sell">⚠️</span>
-            <span className="text-sm text-red-sell">
+            <span className="text-short">⚠️</span>
+            <span className="text-sm text-short">
               {wallet.error || `Wrong network. Please switch to ${config.network.chainName}`}
             </span>
           </div>
@@ -145,7 +144,7 @@ export function Header() {
             {isWrongNetwork && (
               <button
                 onClick={() => wallet.switchNetwork(config.network.chainId)}
-                className="rounded bg-red-sell px-3 py-1 text-xs font-medium text-white hover:bg-red-sell/80"
+                className="rounded bg-short px-3 py-1 text-xs font-medium text-white hover:bg-short/80"
               >
                 Switch Network
               </button>
@@ -164,7 +163,7 @@ export function Header() {
             {wallet.error && !wallet.needsReconnect && (
               <button
                 onClick={() => wallet.clearError()}
-                className="text-xs text-red-sell hover:text-red-sell/80"
+                className="text-xs text-short hover:text-short/80"
                 aria-label="Dismiss error"
               >
                 ✕
@@ -175,19 +174,19 @@ export function Header() {
       )}
 
       {/* Top Row: Logo + Navigation + Wallet */}
-      <div className="flex items-center justify-between border-b border-border px-4 py-1.5">
+      <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5">
         {/* Left: Logo + Navigation (inline) */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div
-              className="h-2 w-2 rounded-full bg-green-500"
+              className="h-2 w-2 rounded-full bg-success animate-pulse-subtle"
               title={wsConnected ? 'Online' : 'Connecting...'}
               role="status"
               aria-label={wsConnected ? 'Connection status: Online' : 'Connection status: Connecting'}
             />
             <div className="text-lg font-bold text-text-primary">HyperLicked</div>
             {isDevelopment && (
-              <span className="rounded bg-yellow-500/20 px-1.5 py-0.5 text-xs font-medium text-yellow-500">
+              <span className="rounded bg-warning/20 px-1.5 py-0.5 text-xs font-medium text-warning">
                 DEV
               </span>
             )}
@@ -229,11 +228,11 @@ export function Header() {
                     aria-hidden="true"
                   />
                   <div
-                    className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border bg-bg-primary shadow-lg"
+                    className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-border/50 bg-bg-elevated glass-panel shadow-elevated"
                     role="menu"
                     aria-orientation="vertical"
                   >
-                    <div className="border-b border-border px-4 py-2">
+                    <div className="border-b border-border/50 px-4 py-2">
                       <div className="text-xs text-text-muted">Connected</div>
                       <div className="font-mono text-sm text-text-primary">
                         {wallet.address.slice(0, 8)}...{wallet.address.slice(-6)}
@@ -244,7 +243,7 @@ export function Header() {
                         wallet.disconnect()
                         setShowWalletDropdown(false)
                       }}
-                      className="w-full px-4 py-2 text-left text-sm text-red-sell transition-colors hover:bg-red-sell/10"
+                      className="w-full px-4 py-2 text-left text-sm text-short transition-colors hover:bg-short/10"
                       role="menuitem"
                     >
                       Disconnect
@@ -264,9 +263,8 @@ export function Header() {
         </div>
       </div>
 
-      {/* Second Row: Market Info + Wallet Actions */}
-      <div className="flex items-center justify-between px-4 py-1.5">
-        {/* Left: Market Info */}
+      {/* Second Row: Market Info */}
+      <div className="flex items-center px-4 py-1.5">
         <div className="flex items-center gap-6">
           {/* Market selector */}
           <div>
@@ -277,7 +275,7 @@ export function Header() {
           {/* Mark Price */}
           <div>
             <div className="text-xs text-text-muted">Mark Price</div>
-            <div className={`text-lg font-mono font-semibold ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
+            <div className={`text-lg font-mono font-semibold ${isPositive ? 'text-long' : 'text-short'}`}>
               ${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </div>
           </div>
@@ -295,7 +293,7 @@ export function Header() {
           {/* 24h Change */}
           <div>
             <div className="text-xs text-text-muted">24h Change</div>
-            <div className={`text-sm font-mono ${isPositive ? 'text-green-buy' : 'text-red-sell'}`}>
+            <div className={`text-sm font-mono ${isPositive ? 'text-long' : 'text-short'}`}>
               {isPositive ? '+' : ''}{priceChangePercent.toFixed(2)}%
               <span className="ml-1 text-xs">
                 ({isPositive ? '+' : ''}${priceChange24h.toLocaleString()})
@@ -323,7 +321,7 @@ export function Header() {
           <div>
             <div className="text-xs text-text-muted">Funding / Countdown</div>
             <div className="flex items-center gap-2">
-              <span className={`text-sm font-mono ${isFundingPositive ? 'text-red-sell' : 'text-green-buy'}`}>
+              <span className={`text-sm font-mono ${isFundingPositive ? 'text-short' : 'text-long'}`}>
                 {isFundingPositive ? '+' : ''}{fundingRatePercent}%
               </span>
               <span className="text-xs text-text-muted">in {countdown || '--:--'}</span>
@@ -337,50 +335,6 @@ export function Header() {
               ${insuranceFund?.balance_usd?.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? '--'}
             </div>
           </div>
-        </div>
-
-        {/* Right: Trading Status */}
-        <div>
-          {wallet.isConnected && wallet.address ? (
-            <div className="flex items-center gap-3">
-              {/* Trading status */}
-              {wallet.tradingEnabled ? (
-                <div className="flex items-center gap-2 rounded border border-accent bg-accent/10 px-3 py-2">
-                  <div className="h-2 w-2 rounded-full bg-accent animate-pulse" />
-                  <div className="text-xs font-semibold text-accent">Trading Enabled</div>
-                  <div className="text-xs text-text-muted">({wallet.delegationExpiry})</div>
-                  <button
-                    onClick={() => wallet.disableTrading()}
-                    className="ml-2 text-xs text-text-muted hover:text-red-sell"
-                    aria-label="Disable trading"
-                  >
-                    Disable
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={async () => {
-                    try {
-                      await wallet.enableTrading(7)
-                      toast.success('Trading Enabled', 'You can now trade without signing every order')
-                    } catch (error: any) {
-                      toast.error('Enable Trading Failed', error.message)
-                    }
-                  }}
-                  className="rounded border border-accent bg-accent/10 px-4 py-2 text-sm font-semibold text-accent transition-colors hover:bg-accent/20"
-                >
-                  Enable Trading (7d)
-                </button>
-              )}
-            </div>
-          ) : (
-            <button
-              onClick={() => wallet.connect()}
-              className="rounded border border-accent bg-bg-tertiary px-4 py-2 text-sm font-medium text-accent transition-colors hover:bg-accent hover:text-white"
-            >
-              Connect Wallet
-            </button>
-          )}
         </div>
       </div>
     </header>

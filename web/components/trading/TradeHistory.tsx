@@ -138,7 +138,7 @@ export function TradeHistory() {
               >
                 <td className="px-4 py-2 text-text-muted">{formatTimestamp(trade.timestamp)}</td>
                 <td className="px-4 py-2 font-medium text-text-primary">{trade.symbol}</td>
-                <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-green-buy' : 'text-red-sell'}`}>
+                <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-long' : 'text-short'}`}>
                   {isBuy ? 'Buy' : 'Sell'}
                 </td>
                 <td className="px-4 py-2 text-right font-mono text-text-primary">

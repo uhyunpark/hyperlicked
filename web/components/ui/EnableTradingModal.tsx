@@ -112,7 +112,7 @@ export function EnableTradingModal({
       {/* Modal */}
       <div
         ref={modalRef}
-        className="relative bg-bg-secondary border border-border rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl"
+        className="relative bg-bg-elevated glass-panel border border-border/50 rounded-xl p-6 w-full max-w-md mx-4 shadow-modal"
       >
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
@@ -136,15 +136,15 @@ export function EnableTradingModal({
           </p>
           <ul className="bg-bg-tertiary rounded-lg p-4 space-y-2" aria-label="Benefits of enabling trading">
             <li className="flex items-center gap-2 text-sm">
-              <span className="text-green-500" aria-hidden="true">✓</span>
+              <span className="text-success" aria-hidden="true">✓</span>
               <span className="text-text-secondary">No transaction fees</span>
             </li>
             <li className="flex items-center gap-2 text-sm">
-              <span className="text-green-500" aria-hidden="true">✓</span>
+              <span className="text-success" aria-hidden="true">✓</span>
               <span className="text-text-secondary">Instant order signing</span>
             </li>
             <li className="flex items-center gap-2 text-sm">
-              <span className="text-green-500" aria-hidden="true">✓</span>
+              <span className="text-success" aria-hidden="true">✓</span>
               <span className="text-text-secondary">Revoke anytime</span>
             </li>
           </ul>

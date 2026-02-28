@@ -47,8 +47,8 @@ export function SubmitButton({ side, symbol, onSubmit }: SubmitButtonProps) {
   return (
     <button
       onClick={onSubmit}
-      className={`w-full rounded py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 ${
-        side === 'buy' ? 'bg-green-buy' : 'bg-red-sell'
+      className={`w-full rounded py-3 text-sm font-semibold text-white shadow-panel transition-opacity hover:opacity-90 ${
+        side === 'buy' ? 'bg-long' : 'bg-short'
       }`}
     >
       {side === 'buy' ? 'Buy' : 'Sell'} {symbol}

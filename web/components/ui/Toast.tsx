@@ -63,24 +63,24 @@ function ToastItem({ toast, onClose }: { toast: Toast; onClose: () => void }) {
   }
 
   const colors: Record<ToastType, string> = {
-    success: 'border-green-500 bg-green-500/10',
-    error: 'border-red-500 bg-red-500/10',
-    warning: 'border-yellow-500 bg-yellow-500/10',
-    info: 'border-blue-500 bg-blue-500/10'
+    success: 'border-success bg-success/10',
+    error: 'border-error bg-error/10',
+    warning: 'border-warning bg-warning/10',
+    info: 'border-accent bg-accent/10'
   }
 
   const iconColors: Record<ToastType, string> = {
-    success: 'text-green-500',
-    error: 'text-red-500',
-    warning: 'text-yellow-500',
-    info: 'text-blue-500'
+    success: 'text-success',
+    error: 'text-error',
+    warning: 'text-warning',
+    info: 'text-accent'
   }
 
   return (
     <div
       className={`
         flex items-start gap-3 rounded-lg border-l-4 p-4
-        bg-bg-secondary shadow-lg backdrop-blur-sm
+        glass-panel shadow-elevated
         animate-slide-in
         ${colors[toast.type]}
       `}

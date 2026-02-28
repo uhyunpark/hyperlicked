@@ -63,17 +63,17 @@ export function Chart() {
 
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: '#0a0a0f' },
-        textColor: '#9ca3af',
+        background: { type: ColorType.Solid, color: '#0c0d10' },
+        textColor: '#9a9590',
       },
       grid: {
-        vertLines: { color: '#1f1f29' },
-        horzLines: { color: '#1f1f29' },
+        vertLines: { color: '#1a1d2515' },
+        horzLines: { color: '#1a1d2515' },
       },
       width: chartContainerRef.current.clientWidth,
       height: chartContainerRef.current.clientHeight,
       timeScale: {
-        borderColor: '#2e2e3e',
+        borderColor: '#1f2128',
         timeVisible: true,
         secondsVisible: false,
         tickMarkMaxCharacterLength: 12,
@@ -87,17 +87,17 @@ export function Chart() {
         },
       },
       rightPriceScale: {
-        borderColor: '#2e2e3e',
+        borderColor: '#1f2128',
       },
     })
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#a855f7',
-      downColor: '#ef4444',
-      borderUpColor: '#a855f7',
-      borderDownColor: '#ef4444',
-      wickUpColor: '#a855f7',
-      wickDownColor: '#ef4444',
+      upColor: '#a78bfa',
+      downColor: '#c75050',
+      borderUpColor: '#a78bfa',
+      borderDownColor: '#c75050',
+      wickUpColor: '#a78bfa',
+      wickDownColor: '#c75050',
     })
 
     chartRef.current = chart
@@ -227,7 +227,7 @@ export function Chart() {
           <div className="flex items-center gap-4">
             <div>
               <span className="text-text-muted">Funding Rate: </span>
-              <span className="font-mono text-green-buy">+0.0100%</span>
+              <span className="font-mono text-long">+0.0100%</span>
             </div>
             <div>
               <span className="text-text-muted">Next Funding: </span>

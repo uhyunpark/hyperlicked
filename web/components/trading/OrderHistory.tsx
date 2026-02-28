@@ -80,13 +80,13 @@ export function OrderHistory() {
   const getStatusColor = (status: HistoricalOrder['status']) => {
     switch (status) {
       case 'filled':
-        return 'text-green-buy'
+        return 'text-long'
       case 'cancelled':
         return 'text-text-muted'
       case 'expired':
-        return 'text-yellow-500'
+        return 'text-warning'
       case 'rejected':
-        return 'text-red-sell'
+        return 'text-short'
       default:
         return 'text-text-muted'
     }
@@ -143,7 +143,7 @@ export function OrderHistory() {
               >
                 <td className="px-4 py-2 text-text-muted">{formatTimestamp(order.timestamp)}</td>
                 <td className="px-4 py-2 font-medium text-text-primary">{order.symbol}</td>
-                <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-green-buy' : 'text-red-sell'}`}>
+                <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-long' : 'text-short'}`}>
                   {isBuy ? 'Buy' : 'Sell'}
                 </td>
                 <td className="px-4 py-2 text-text-secondary capitalize">{order.type}</td>

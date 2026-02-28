@@ -109,7 +109,7 @@ export function FundingHistory() {
                 <td className="px-4 py-2 text-text-muted">{formatTimestamp(payment.timestamp)}</td>
                 <td className="px-4 py-2 font-medium text-text-primary">{payment.symbol}</td>
                 <td className={`px-4 py-2 text-right font-mono ${
-                  payment.fundingRate >= 0 ? 'text-green-buy' : 'text-red-sell'
+                  payment.fundingRate >= 0 ? 'text-long' : 'text-short'
                 }`}>
                   {payment.fundingRate >= 0 ? '+' : ''}{(payment.fundingRate * 100).toFixed(4)}%
                 </td>
@@ -117,7 +117,7 @@ export function FundingHistory() {
                   {payment.positionSize.toFixed(4)}
                 </td>
                 <td className={`px-4 py-2 text-right font-mono font-semibold ${
-                  isPositive ? 'text-green-buy' : 'text-red-sell'
+                  isPositive ? 'text-long' : 'text-short'
                 }`}>
                   {isPositive ? '+' : ''}{payment.payment.toFixed(2)} USDC
                 </td>
@@ -133,7 +133,7 @@ export function FundingHistory() {
           <div className="flex justify-between text-xs">
             <span className="text-text-muted">Total Funding Received:</span>
             <span className={`font-mono font-semibold ${
-              payments.reduce((sum, p) => sum + p.payment, 0) >= 0 ? 'text-green-buy' : 'text-red-sell'
+              payments.reduce((sum, p) => sum + p.payment, 0) >= 0 ? 'text-long' : 'text-short'
             }`}>
               ${payments.reduce((sum, p) => sum + p.payment, 0).toFixed(2)}
             </span>

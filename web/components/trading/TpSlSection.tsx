@@ -24,7 +24,7 @@ export function TpSlSection({
   onSlPriceChange
 }: TpSlSectionProps) {
   return (
-    <div className="mb-4 rounded border border-border bg-bg-primary">
+    <div className="mb-4 rounded border border-border/50 bg-bg-primary/80">
       <button
         onClick={onToggle}
         className="flex w-full items-center justify-between p-3 text-left"
@@ -42,7 +42,7 @@ export function TpSlSection({
           {/* Take Profit */}
           <div>
             <label htmlFor="tp-input" className="mb-1 flex items-center justify-between text-xs">
-              <span className="text-green-buy">Take Profit</span>
+              <span className="text-long">Take Profit</span>
               <span className="text-text-muted">
                 {side === 'buy' ? '> Mark' : '< Mark'}
               </span>
@@ -56,14 +56,14 @@ export function TpSlSection({
                 ? (currentPrice * 1.05).toFixed(2)
                 : (currentPrice * 0.95).toFixed(2)
               }
-              className="w-full rounded border border-border bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-green-buy focus:outline-none"
+              className="w-full rounded border border-border/50 bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-long focus:outline-none"
             />
           </div>
 
           {/* Stop Loss */}
           <div>
             <label htmlFor="sl-input" className="mb-1 flex items-center justify-between text-xs">
-              <span className="text-red-sell">Stop Loss</span>
+              <span className="text-short">Stop Loss</span>
               <span className="text-text-muted">
                 {side === 'buy' ? '< Mark' : '> Mark'}
               </span>
@@ -77,7 +77,7 @@ export function TpSlSection({
                 ? (currentPrice * 0.95).toFixed(2)
                 : (currentPrice * 1.05).toFixed(2)
               }
-              className="w-full rounded border border-border bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-red-sell focus:outline-none"
+              className="w-full rounded border border-border/50 bg-bg-secondary px-3 py-2 text-sm font-mono text-text-primary focus:border-short focus:outline-none"
             />
           </div>
 

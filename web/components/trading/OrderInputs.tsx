@@ -45,7 +45,7 @@ export function OrderInputs({
             value={price}
             onChange={(e) => onPriceChange(e.target.value)}
             placeholder={currentPrice.toFixed(2)}
-            className="w-full rounded border border-border bg-bg-primary px-3 py-2 text-sm font-mono text-text-primary focus:border-accent focus:outline-none"
+            className="w-full rounded border border-border/50 bg-bg-primary/80 px-3 py-2 text-sm font-mono text-text-primary focus:border-accent focus:outline-none"
           />
         </div>
       )}
@@ -61,7 +61,7 @@ export function OrderInputs({
           value={size}
           onChange={(e) => onSizeChange(e.target.value)}
           placeholder="0.00"
-          className="w-full rounded border border-border bg-bg-primary px-3 py-2 text-sm font-mono text-text-primary focus:border-accent focus:outline-none"
+          className="w-full rounded border border-border/50 bg-bg-primary/80 px-3 py-2 text-sm font-mono text-text-primary focus:border-accent focus:outline-none"
         />
         {/* Size Percentage Buttons */}
         <div className="mt-2 flex gap-1">

@@ -20,7 +20,7 @@ export function AccountInfo({
   realtimePnL
 }: AccountInfoProps) {
   return (
-    <div className="mt-4 rounded border border-border bg-bg-primary p-3">
+    <div className="mt-4 rounded border border-border/50 bg-bg-primary/80 p-3">
       {/* Account Equity Header */}
       <div className="mb-3 flex items-center justify-between">
         <span className="text-xs font-medium text-text-muted">Account Equity</span>
@@ -52,7 +52,7 @@ export function AccountInfo({
             </div>
             <div className="flex justify-between text-xs">
               <span className="text-text-muted">Unrealized PnL</span>
-              <span className={`font-mono ${realtimePnL >= 0 ? 'text-green-buy' : 'text-red-sell'}`}>
+              <span className={`font-mono ${realtimePnL >= 0 ? 'text-long' : 'text-short'}`}>
                 {realtimePnL >= 0 ? '+' : ''}${realtimePnL.toLocaleString('en-US', { minimumFractionDigits: 2 })}
               </span>
             </div>

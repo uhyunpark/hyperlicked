@@ -35,7 +35,7 @@ const OrderbookRow = memo(function OrderbookRow({
 
   return (
     <div
-      className="relative flex cursor-pointer items-center justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary focus:bg-bg-tertiary focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
+      className="relative flex cursor-pointer items-center justify-between px-3 py-0.5 text-xs font-mono transition-colors duration-150 hover:bg-bg-tertiary focus:bg-bg-tertiary focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
       onClick={handleClick}
       onKeyDown={handleKeyDown}
       role="button"
@@ -44,12 +44,12 @@ const OrderbookRow = memo(function OrderbookRow({
     >
       {/* Depth bar */}
       <div
-        className={`absolute inset-y-0 ${isBid ? 'right-0 bg-green-bg' : 'right-0 bg-red-bg'} opacity-30`}
+        className={`absolute inset-y-0 ${isBid ? 'right-0 bg-long-bg' : 'right-0 bg-short-bg'} opacity-30`}
         style={{ width: `${depthPercent}%` }}
       />
 
       {/* Price */}
-      <div className={`relative z-10 ${isBid ? 'text-green-buy' : 'text-red-sell'}`}>
+      <div className={`relative z-10 ${isBid ? 'text-long' : 'text-short'}`}>
         {level.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </div>
 
@@ -76,7 +76,7 @@ const TradeRow = memo(function TradeRow({ trade }: { trade: { id: string; price:
     <div
       className="flex justify-between px-3 py-0.5 text-xs font-mono transition-colors hover:bg-bg-tertiary"
     >
-      <div className={isBuy ? 'text-green-buy' : 'text-red-sell'}>
+      <div className={isBuy ? 'text-long' : 'text-short'}>
         {trade.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </div>
       <div className="text-text-primary">{trade.size.toFixed(4)}</div>

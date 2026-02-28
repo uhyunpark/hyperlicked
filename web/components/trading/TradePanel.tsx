@@ -12,23 +12,17 @@ import { SideToggle } from './SideToggle'
 import { OrderInputs } from './OrderInputs'
 import { TpSlSection } from './TpSlSection'
 import { OrderPreview } from './OrderPreview'
-import { AccountInfo } from './AccountInfo'
 import { SubmitButton } from './SubmitButton'
 
 export function TradePanel() {
   const selectedSymbol = useTradingStore((s) => s.selectedSymbol)
   const currentPrice = useTradingStore((s) => s.currentPrice)
-  const positions = useTradingStore((s) => s.positions)
   const wallet = useWallet()
   const { submitOrder } = useOrderSubmit()
   const {
-    account,
     availableBalance,
-    marginRatio,
-    isLoadingAccount,
     isFaucetLoading,
     handleFaucet,
-    getRealtimeUnrealizedPnL
   } = useAccountData(wallet.isConnected ? wallet.address : null)
 
   // Form state
@@ -82,10 +76,6 @@ export function TradePanel() {
     })
   }, [submitOrder, side, orderType, tif, price, size, leverage, reduceOnly, tpSlEnabled, tpPrice, slPrice])
 
-  // Calculate realtime values
-  const realtimePnL = positions.length > 0 ? getRealtimeUnrealizedPnL() : (account?.unrealizedPnL ?? 0)
-  const realtimeEquity = (account?.balance ?? 0) + realtimePnL
-
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
       {/* Header */}
@@ -130,7 +120,7 @@ export function TradePanel() {
           <button
             onClick={handleFaucet}
             disabled={isFaucetLoading}
-            className="mb-3 w-full rounded border border-yellow-500/30 bg-yellow-500/10 py-2 text-sm font-medium text-yellow-500 transition-colors hover:bg-yellow-500/20 disabled:opacity-50"
+            className="mb-3 w-full rounded border border-warning/30 bg-warning/10 py-2 text-sm font-medium text-warning transition-colors hover:bg-warning/20 disabled:opacity-50"
           >
             {isFaucetLoading ? 'Requesting...' : 'Get Test USDC ($100k)'}
           </button>
@@ -170,20 +160,14 @@ export function TradePanel() {
           estimatedFee={estimatedFee}
           availableBalance={availableBalance}
         />
+      </div>
 
+      {/* Pinned submit button */}
+      <div className="border-t border-border/50 p-4">
         <SubmitButton
           side={side}
           symbol={selectedSymbol}
           onSubmit={handleSubmit}
-        />
-
-        <AccountInfo
-          account={account}
-          isLoading={isLoadingAccount}
-          leverage={leverage}
-          marginRatio={marginRatio}
-          realtimeEquity={realtimeEquity}
-          realtimePnL={realtimePnL}
         />
       </div>
     </div>

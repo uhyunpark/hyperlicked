@@ -110,7 +110,7 @@ function OpenOrdersInner() {
                   >
                     <td className="px-4 py-2 font-mono text-text-muted">{timeStr}</td>
                     <td className="px-4 py-2 font-medium text-text-primary">{order.symbol}</td>
-                    <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-green-buy' : 'text-red-sell'}`}>
+                    <td className={`px-4 py-2 font-semibold ${isBuy ? 'text-long' : 'text-short'}`}>
                       {order.side.toUpperCase()}
                     </td>
                     <td className="px-4 py-2 text-text-secondary">{order.type}</td>
@@ -131,7 +131,7 @@ function OpenOrdersInner() {
                     <td className="px-4 py-2 text-center">
                       <button
                         onClick={() => handleCancel(order.id)}
-                        className="rounded border border-red-sell/30 bg-red-sell/10 px-2 py-1 text-red-sell transition-colors hover:bg-red-sell/20"
+                        className="rounded border border-short/30 bg-short/10 px-2 py-1 text-short transition-colors hover:bg-short/20"
                       >
                         Cancel
                       </button>

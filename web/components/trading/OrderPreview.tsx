@@ -12,7 +12,7 @@ export function OrderPreview({
   availableBalance
 }: OrderPreviewProps) {
   return (
-    <div className="mb-4 rounded border border-border bg-bg-primary p-3">
+    <div className="mb-4 rounded border border-border/50 bg-bg-primary/80 p-3">
       <div className="mb-2 flex justify-between text-xs">
         <span className="text-text-muted">Required Margin</span>
         <span className="font-mono text-text-primary">${requiredMargin.toFixed(2)}</span>

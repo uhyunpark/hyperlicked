@@ -56,7 +56,7 @@ export default function TradingPage() {
     <div className="flex h-screen flex-col bg-bg-primary">
       {/* Connection status indicator */}
       {!isConnected && (
-        <div className="bg-red-sell/20 px-4 py-1 text-center text-xs text-red-sell">
+        <div className="bg-short/20 px-4 py-1 text-center text-xs text-short">
           Connecting to blockchain...
         </div>
       )}
@@ -70,7 +70,7 @@ export default function TradingPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Chart + Bottom Tabs (dominant area) */}
         <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden">
-          <div className="min-h-0 flex-1 border-b border-border">
+          <div className="min-h-0 flex-1 border-b border-border/50">
             <ErrorBoundary fallback={<SectionErrorFallback title="Chart" />}>
               <Chart />
             </ErrorBoundary>
@@ -94,14 +94,14 @@ export default function TradingPage() {
         </div>
 
         {/* Center-Right: Orderbook */}
-        <div className="w-72 border-l border-border">
+        <div className="w-72 border-l border-border/50">
           <ErrorBoundary fallback={<SectionErrorFallback title="Orderbook" />}>
             <Orderbook />
           </ErrorBoundary>
         </div>
 
         {/* Far Right: Trade Panel */}
-        <div className="w-80 border-l border-border">
+        <div className="w-80 border-l border-border/50">
           <ErrorBoundary fallback={<SectionErrorFallback title="Trade Panel" />}>
             <TradePanel />
           </ErrorBoundary>

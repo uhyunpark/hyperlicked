@@ -18,11 +18,11 @@ export function OrderTypeSelector({
   return (
     <>
       {/* Order Type Tabs */}
-      <div className="mb-3 flex gap-1 rounded border border-border bg-bg-primary p-1">
+      <div className="mb-3 flex gap-1 rounded border border-border/50 bg-bg-primary/80 p-1">
         <button
           className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
             orderType === 'limit'
-              ? 'bg-bg-secondary text-text-primary'
+              ? 'bg-bg-tertiary text-text-primary'
               : 'text-text-muted hover:text-text-secondary'
           }`}
           onClick={() => onOrderTypeChange('limit')}
@@ -32,7 +32,7 @@ export function OrderTypeSelector({
         <button
           className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
             orderType === 'market'
-              ? 'bg-bg-secondary text-text-primary'
+              ? 'bg-bg-tertiary text-text-primary'
               : 'text-text-muted hover:text-text-secondary'
           }`}
           onClick={() => onOrderTypeChange('market')}
@@ -43,7 +43,7 @@ export function OrderTypeSelector({
 
       {/* TIF Selector (Limit orders only) */}
       {orderType === 'limit' && (
-        <div className="mb-3 flex gap-1 rounded border border-border bg-bg-primary p-1">
+        <div className="mb-3 flex gap-1 rounded border border-border/50 bg-bg-primary/80 p-1">
           <button
             className={`flex-1 rounded px-2 py-1 text-xs transition-colors ${
               tif === 'gtc'
