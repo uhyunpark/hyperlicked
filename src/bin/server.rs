@@ -291,6 +291,11 @@ async fn run_consensus_loop(
     let log_all_blocks = config.log_all_blocks;
     let snapshot_interval = config.snapshot_interval;
 
+    let block_retention: u64 = std::env::var("BLOCK_RETENTION")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let mut height = initial_height;
     let mut view = initial_view;
     let mut last_snapshot_height = initial_height;
@@ -384,6 +389,17 @@ async fn run_consensus_loop(
 
                 if let Err(e) = store.commit_block(&block, &consensus_state) {
                     tracing::error!(error = %e, "Failed to persist block");
+                }
+
+                // Prune old blocks if retention is configured
+                if block_retention > 0 && height > block_retention {
+                    let prune_below = height - block_retention;
+                    if let Err(e) = store.prune_blocks_before(prune_below) {
+                        tracing::warn!(error = %e, "Block pruning failed");
+                    }
+                    if let Err(e) = store.prune_snapshots_before(prune_below) {
+                        tracing::warn!(error = %e, "Snapshot pruning failed");
+                    }
                 }
 
                 // Flush dirty candles to RocksDB

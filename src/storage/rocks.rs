@@ -118,6 +118,75 @@ impl RocksDbStore {
     }
 }
 
+impl RocksDbStore {
+    /// Prune blocks and height index entries below the given height.
+    /// Returns number of blocks deleted.
+    pub fn prune_blocks_before(&self, height: u64) -> anyhow::Result<u64> {
+        let cf_blocks = self.cf(CF_BLOCKS);
+        let cf_height = self.cf(CF_HEIGHT_INDEX);
+        let mut batch = WriteBatch::default();
+        let mut count = 0u64;
+
+        let iter = self
+            .db
+            .iterator_cf(cf_height, rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (key, hash_bytes) = item?;
+            if key.len() == 8 {
+                let h = u64::from_be_bytes(key[..8].try_into().unwrap());
+                if h >= height {
+                    break;
+                }
+                batch.delete_cf(cf_height, &key);
+                batch.delete_cf(cf_blocks, &*hash_bytes);
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(count, below_height = height, "Pruned old blocks");
+        }
+        Ok(count)
+    }
+
+    /// Prune snapshots below the given height, keeping the latest one for recovery.
+    pub fn prune_snapshots_before(&self, height: u64) -> anyhow::Result<u64> {
+        let cf = self.cf(CF_SNAPSHOTS);
+        let mut batch = WriteBatch::default();
+        let mut count = 0u64;
+        let mut snapshot_heights: Vec<u64> = Vec::new();
+
+        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item?;
+            if key.len() == 8 {
+                let h = u64::from_be_bytes(key[..8].try_into().unwrap());
+                if h >= height {
+                    break;
+                }
+                snapshot_heights.push(h);
+            }
+        }
+
+        // Keep the latest snapshot below threshold for recovery
+        if snapshot_heights.len() > 1 {
+            snapshot_heights.pop(); // keep latest
+            for h in &snapshot_heights {
+                batch.delete_cf(cf, h.to_be_bytes());
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(count, "Pruned old snapshots");
+        }
+        Ok(count)
+    }
+}
+
 impl BlockStore for RocksDbStore {
     fn save(&self, block: &Block) {
         let hash = block.hash();
