@@ -35,3 +35,8 @@ pub mod triggers_test;
 pub mod staking_test;
 pub mod integration_test;
 pub mod oracle_test;
+
+// Phase 4: Advanced Features
+pub mod add_market_test;
+pub mod staking_advanced_test;
+pub mod risk_limits_test;

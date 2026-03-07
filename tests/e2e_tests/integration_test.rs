@@ -336,8 +336,13 @@ fn test_mempool_ordering_in_block() {
     ctx.execute_block();
 
     // Deposit was processed first, so order should succeed
-    // (If order was processed before deposit, it would fail due to no margin)
-    assert_balance(&ctx.state, TRADER_ALICE, DEFAULT_DEPOSIT - 0); // Balance reduced only by fees if order rests
+    // Balance is reduced by locked margin for the resting GTC order
+    let account = ctx.state.account(TRADER_ALICE).unwrap();
+    assert_eq!(
+        account.balance + account.locked, DEFAULT_DEPOSIT,
+        "Balance + locked should equal deposit (no fees for resting order)"
+    );
+    assert!(account.locked > 0, "Resting order should lock margin");
 
     // Order should be on book (deposit processed first, giving margin)
     let best_bid = ctx.best_bid(BTC_SYMBOL);

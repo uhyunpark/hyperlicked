@@ -254,6 +254,34 @@ pub fn assert_validator_exists(state: &AppState, operator: &str) {
     );
 }
 
+/// Assert validator status
+pub fn assert_validator_status(
+    state: &AppState,
+    operator: &str,
+    expected: hyperlicked::app::ValidatorStatus,
+) {
+    let staking = state.staking();
+    let operator_string = operator.to_string();
+    let validator = staking
+        .get_validator(&operator_string)
+        .expect("validator should exist");
+
+    assert_eq!(
+        validator.status, expected,
+        "Validator {} status mismatch: expected {:?}, got {:?}",
+        operator, expected, validator.status
+    );
+}
+
+/// Assert a market/orderbook exists for a symbol
+pub fn assert_market_exists(state: &AppState, symbol: &str) {
+    assert!(
+        state.orderbook(symbol).is_some(),
+        "Expected market {} to exist",
+        symbol
+    );
+}
+
 /// Assert validator stake amount
 pub fn assert_validator_stake(state: &AppState, operator: &str, expected_stake: i64) {
     let staking = state.staking();

@@ -263,7 +263,7 @@ fn test_stress_multi_symbol() {
             "BTC-USDT" => 5_000_000,
             "ETH-USDT" => 300_000,
             "SOL-USDT" => 10_000,
-            _ => 2_000,
+            _ => 20_000, // Must be high enough for min_notional ($10 = 1000 cents)
         };
 
         state.submit_tx(Transaction::PlaceOrder {

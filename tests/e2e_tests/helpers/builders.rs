@@ -2,7 +2,10 @@
 //!
 //! Fluent builders for creating test transactions.
 
-use hyperlicked::app::{OrderType, Side, Transaction, TriggerType};
+use hyperlicked::app::{MarketConfig, OrderType, Side, Transaction, TriggerType};
+use hyperlicked::app::staking::{Evidence, EvidenceType};
+use hyperlicked::crypto::bls::BlsSecretKey;
+use hyperlicked::types::Certificate;
 
 use super::fixtures::{BTC_SYMBOL, DEFAULT_BTC_PRICE, ONE_BTC};
 
@@ -332,6 +335,12 @@ impl ValidatorBuilder {
         self
     }
 
+    /// Set BLS public key bytes
+    pub fn with_bls_pubkey(mut self, bls_pubkey: Vec<u8>) -> Self {
+        self.bls_pubkey = bls_pubkey;
+        self
+    }
+
     /// Build the transaction
     pub fn build(self) -> Transaction {
         Transaction::RegisterValidator {
@@ -374,6 +383,110 @@ impl DelegateBuilder {
             validator: self.validator,
             amount: self.amount,
         }
+    }
+}
+
+// =============================================================================
+// AddMarketBuilder
+// =============================================================================
+
+/// Fluent builder for AddMarket transactions
+pub struct AddMarketBuilder {
+    admin: String,
+    config: MarketConfig,
+    initial_mark_price: i64,
+}
+
+impl AddMarketBuilder {
+    /// Create an AddMarket transaction for a new symbol
+    pub fn new(admin: &str, symbol: &str) -> Self {
+        let mut config = MarketConfig::default();
+        config.symbol = symbol.to_string();
+        Self {
+            admin: admin.into(),
+            config,
+            initial_mark_price: super::fixtures::DEFAULT_ETH_PRICE,
+        }
+    }
+
+    /// Set the initial mark price
+    pub fn with_mark_price(mut self, price: i64) -> Self {
+        self.initial_mark_price = price;
+        self
+    }
+
+    /// Set max_position_size on the market config
+    pub fn with_max_position_size(mut self, max: i64) -> Self {
+        self.config.max_position_size = max;
+        self
+    }
+
+    /// Set tick_size (for validation tests)
+    pub fn with_tick_size(mut self, tick: i64) -> Self {
+        self.config.tick_size = tick;
+        self
+    }
+
+    /// Set lot_size (for validation tests)
+    pub fn with_lot_size(mut self, lot: i64) -> Self {
+        self.config.lot_size = lot;
+        self
+    }
+
+    /// Set min_notional (for validation tests)
+    pub fn with_min_notional(mut self, notional: i64) -> Self {
+        self.config.min_notional = notional;
+        self
+    }
+
+    /// Build the transaction
+    pub fn build(self) -> Transaction {
+        Transaction::AddMarket {
+            admin: self.admin,
+            config: self.config,
+            initial_mark_price: self.initial_mark_price,
+        }
+    }
+}
+
+// =============================================================================
+// BLS Test Helpers
+// =============================================================================
+
+/// Create a deterministic BLS keypair for testing
+///
+/// Returns (secret_key, pubkey_bytes, node_id)
+pub fn test_bls_keypair(seed: u8) -> (BlsSecretKey, Vec<u8>, [u8; 32]) {
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes[0] = seed;
+    let sk = BlsSecretKey::from_seed(&seed_bytes);
+    let pk = sk.public_key();
+    let mut node_id = [0u8; 32];
+    node_id[0] = seed;
+    (sk, pk.to_bytes().to_vec(), node_id)
+}
+
+/// Create valid double-vote evidence with real BLS signatures
+pub fn create_valid_evidence(sk: &BlsSecretKey, node_id: [u8; 32], height: u64) -> Evidence {
+    let hash_a = [1u8; 32];
+    let hash_b = [2u8; 32];
+    let zero_app_hash = [0u8; 32];
+
+    let msg_a = Certificate::build_signing_message(height, &hash_a, &zero_app_hash);
+    let msg_b = Certificate::build_signing_message(height, &hash_b, &zero_app_hash);
+
+    let sig_a = sk.sign(&msg_a);
+    let sig_b = sk.sign(&msg_b);
+
+    Evidence {
+        evidence_type: EvidenceType::DoubleVote,
+        offender: node_id,
+        height,
+        timestamp: 1000,
+        hash_a,
+        hash_b,
+        signature_a: sig_a.to_bytes().to_vec(),
+        signature_b: sig_b.to_bytes().to_vec(),
     }
 }
 

@@ -36,6 +36,15 @@ pub const HALF_BTC: i64 = 50_000_000;
 /// Minimum tick increment for prices (1 cent)
 pub const TICK_SIZE: i64 = 1;
 
+/// Admin address for AddMarket tests
+pub const ADMIN_ADDRESS: &str = "test_admin";
+
+/// ETH market symbol
+pub const ETH_SYMBOL: &str = "ETH-USDT";
+
+/// Default ETH price: $3,000 (300_000 cents)
+pub const DEFAULT_ETH_PRICE: i64 = 300_000;
+
 // =============================================================================
 // TestContext
 // =============================================================================
@@ -50,6 +59,11 @@ pub struct TestContext {
 impl TestContext {
     /// Create a new test context with fresh state
     pub fn new() -> Self {
+        // Set env vars before Config::global() OnceLock captures them.
+        // ADMIN_ADDRESS: required for AddMarket tests.
+        // SKIP_SIG_VERIFY: all e2e tests skip real signature verification.
+        std::env::set_var("ADMIN_ADDRESS", ADMIN_ADDRESS);
+        std::env::set_var("SKIP_SIG_VERIFY", "true");
         Self {
             state: AppState::new(),
             block_height: 0,
