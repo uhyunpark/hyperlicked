@@ -33,7 +33,7 @@ src/
 └── bin/          # hl-server, hl-node, hl-visor, multinode
 web/              # Next.js trading frontend
 tests/            # Integration + E2E tests
-docs/             # Architecture, API, operations guides
+docs/             # Architecture decisions, roadmap
 ```
 
 ## Commands
@@ -55,13 +55,12 @@ cd web && bun run dev                  # Frontend dev server
 
 | Need to know about... | Look here |
 |---|---|
-| Rust patterns, consensus, orderbook | Activates via `blockchain-dev-guidelines` skill when touching `src/**/*.rs` |
-| Frontend patterns, components, state | Activates via `frontend-dev-guidelines` skill when touching `web/**/*.tsx` |
-| Environment variables, deployment | `docs/operations/CONFIGURATION.md` |
-| API endpoints (REST/WebSocket) | `docs/api/REST.md`, `docs/api/WEBSOCKET.md` |
-| Storage, persistence, recovery | `docs/storage/PERSISTENCE.md` |
-| Current roadmap and priorities | `docs/blockchain/ROADMAP.md` |
-| Architecture decisions | `docs/blockchain/architecture-decisions.md` |
-| Active plans and dev context | `docs/plans/`, `docs/dev/` |
+| Rust patterns, consensus, orderbook | `blockchain-dev-guidelines` skill (auto-activates on `src/**/*.rs`) |
+| Frontend patterns, components, state | `frontend-dev-guidelines` skill (auto-activates on `web/**/*.tsx`) |
+| API endpoints, WebSocket channels | `src/api/CLAUDE.md` (auto-loaded) |
+| Storage schema, snapshots, recovery | `src/storage/CLAUDE.md` (auto-loaded) |
+| Exchange logic, MarketConfig | `src/app/CLAUDE.md` (auto-loaded) |
+| Environment variables | Read `src/config.rs` directly |
+| Roadmap and priorities | `docs/blockchain/ROADMAP.md` |
 | EIP-712 integration pattern | Check MEMORY.md for the checklist |
 | Code review | `backend-architecture-reviewer` and `frontend-architecture-reviewer` agents run automatically |

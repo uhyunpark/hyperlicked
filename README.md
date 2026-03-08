@@ -2,17 +2,6 @@
 
 A Hyperliquid clone built in Rust. Can also be used as a standalone perpdex starter.
 
-## Features
-
-- **HotStuff-2 consensus** - 2-chain commit, BLS signatures, sub-second blocks
-- **Heap-based orderbook** - O(log N) matching engine
-- **EIP-712 signing** - Customer signatures, gasless trading via agent keys
-- **BLS12-381 validators** - Aggregated validator signatures
-- **Perpetual trading** - Funding rates, liquidations, auto-deleverage (ADL)
-- **Oracle system** - CEX price feeds (Binance, etc.)
-- **Real-time streaming** - WebSocket market data and order updates
-- **Dev mode market maker** - Artificial liquidity for testing
-
 ## Quick Start
 
 ### Backend
@@ -76,7 +65,6 @@ cargo test
 
 - **CLAUDE.md** - Development guidelines, architecture, AI instructions
 - **docs/blockchain/ROADMAP.md** - Current status and next steps
-- **docs/plans/** - Active implementation plans
 
 ## Tech Stack
 

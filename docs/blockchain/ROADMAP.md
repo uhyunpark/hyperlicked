@@ -40,8 +40,6 @@ Additional fixes from comprehensive review:
 - **HIGH-9: Nonce gap handling** - Allow out-of-order nonces within MAX_NONCE_GAP (10) for dropped tx recovery
 - **HIGH-11: Peer reputation** - Track peer failures, blacklist after consecutive failures (PEER_BLACKLIST_THRESHOLD)
 
-See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
-
 ### Critical Issues Fixes (2026-01-29 PM) ✅
 
 Remaining critical issues from comprehensive review:
@@ -54,8 +52,6 @@ Remaining critical issues from comprehensive review:
 
 **Deferred to P2:**
 - **CRITICAL-4: Isolated margin** - Complex feature requiring MarginMode enum, margin allocation txs, modified liquidation
-
-See `docs/reviews/2026-01-29-comprehensive-blockchain-review.md` for full details.
 
 ### Security Hardening for Multi-Node (2026-01-31) ✅
 
@@ -102,7 +98,7 @@ Hardened mempool for gasless trading model:
 
 Code clarity and operational improvements from blockchain expert review:
 - **Operator alerting** - `state_corrupted` exposed in `/chain/health` for Byzantine detection
-- **Incremental hash docs** - Migration guide at `docs/operations/INCREMENTAL_HASH_MIGRATION.md`
+- **Incremental hash** - Migration for incremental app hash computation
 - **ADL code extraction** - `process_liquidations_with_adl()` helper for cleaner execute()
 - **Follower documentation** - Clarified intentional no-op in Engine::run_follower
 - **Matching optimization** - `take_while` iterator for early termination in orderbook matching
