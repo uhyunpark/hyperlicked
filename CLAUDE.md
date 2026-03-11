@@ -1,6 +1,6 @@
 # Hyperlicked
 
-Hyperliquid clone in Rust — a standalone perpdex with HotStuff-2 BFT consensus, BTreeMap orderbook matching, and a Next.js trading frontend.
+A standalone perpdex with HotStuff-2 BFT consensus, BTreeMap orderbook matching, and a Next.js trading frontend. Inspired by hyperliquid.
 
 ## Tech Stack
 

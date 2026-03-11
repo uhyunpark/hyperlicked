@@ -1,5 +1,5 @@
-//! Hyperliquid Clone
-//!
+//! Hyperlicked
+//! 
 //! A mock implementation of Hyperlicked for testing and development.
 //! A high-performance perpetual futures exchange built with HotStuff-2 consensus.
 //!

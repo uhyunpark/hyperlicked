@@ -7,7 +7,7 @@ description: Rust blockchain development patterns for hyperlicked. Covers HotStu
 
 ## Purpose
 
-Comprehensive patterns and conventions for the hyperlicked Rust blockchain codebase. This is a Hyperliquid clone implementing HotStuff-2 BFT consensus with a heap-based orderbook matching engine.
+Comprehensive patterns and conventions for the hyperlicked blockchain codebase. Inspired by Hyperliquid; implements HotStuff-2 BFT consensus with a heap-based orderbook matching engine.
 
 ## Project Structure
 

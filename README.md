@@ -1,6 +1,6 @@
 # Hyperlicked
 
-A Hyperliquid clone built in Rust. Can also be used as a standalone perpdex starter.
+High performance blockchain built for perpdex inspired by Hyperliquid. Can also be used as a standalone perpdex starter.
 
 ## Quick Start
 
