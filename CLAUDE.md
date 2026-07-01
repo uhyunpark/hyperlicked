@@ -30,6 +30,7 @@ src/
 ├── network/      # TCP transport, gossip, sync
 ├── storage/      # RocksDB persistence, snapshots, recovery
 ├── types/        # Block, Vote, Certificate, config types
+├── visor/        # Process supervisor: binary upgrades, health checks (hl-visor)
 └── bin/          # hl-server, hl-node, hl-visor, multinode
 web/              # Next.js trading frontend
 tests/            # Integration + E2E tests
@@ -43,6 +44,8 @@ cargo run --bin hl-server              # API server + consensus (port 8080)
 cargo test                             # All tests
 cargo test --test e2e                  # E2E integration tests
 cd web && bun run dev                  # Frontend dev server
+cd web && bun run lint                 # Lint frontend (biome)
+cargo clippy --all-targets             # Lint Rust
 ```
 
 ## Golden Rules
@@ -62,5 +65,5 @@ cd web && bun run dev                  # Frontend dev server
 | Exchange logic, MarketConfig | `src/app/CLAUDE.md` (auto-loaded) |
 | Environment variables | Read `src/config.rs` directly |
 | Roadmap and priorities | `docs/blockchain/ROADMAP.md` |
-| EIP-712 integration pattern | Check MEMORY.md for the checklist |
+| EIP-712 integration pattern | `blockchain-dev-guidelines` skill → `references/CRYPTO.md` (backend), `frontend-dev-guidelines` skill → `references/WALLET.md` (frontend) |
 | Code review | `backend-architecture-reviewer` and `frontend-architecture-reviewer` agents run automatically |
