@@ -32,7 +32,7 @@ impl EIP712Domain {
     /// Compute the domain separator hash
     pub fn separator(&self) -> B256 {
         let type_hash = keccak256(
-            b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+            b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
         );
 
         let name_hash = keccak256(self.name.as_bytes());
@@ -54,7 +54,7 @@ impl EIP712Domain {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderEIP712 {
     pub symbol: String,
-    pub side: u8,      // 1 = Buy, 2 = Sell
+    pub side: u8,       // 1 = Buy, 2 = Sell
     pub order_type: u8, // 1 = GTC, 2 = IOC, 3 = ALO
     pub price: U256,
     pub qty: U256,
@@ -105,9 +105,8 @@ pub struct CancelEIP712 {
 impl CancelEIP712 {
     /// Compute the struct hash for this cancel
     pub fn struct_hash(&self) -> B256 {
-        let type_hash = keccak256(
-            b"CancelOrder(string orderId,string symbol,uint256 nonce,address owner)"
-        );
+        let type_hash =
+            keccak256(b"CancelOrder(string orderId,string symbol,uint256 nonce,address owner)");
 
         let order_id_hash = keccak256(self.order_id.as_bytes());
         let symbol_hash = keccak256(self.symbol.as_bytes());
@@ -174,7 +173,7 @@ impl CancelTriggerOrderEIP712 {
     /// Compute the struct hash for this cancel trigger order
     pub fn struct_hash(&self) -> B256 {
         let type_hash = keccak256(
-            b"CancelTriggerOrder(string triggerOrderId,string symbol,uint256 nonce,address owner)"
+            b"CancelTriggerOrder(string triggerOrderId,string symbol,uint256 nonce,address owner)",
         );
 
         let trigger_order_id_hash = keccak256(self.trigger_order_id.as_bytes());
@@ -518,10 +517,10 @@ mod tests {
 
         let trigger = TriggerOrderEIP712 {
             symbol: "BTC-USDT".to_string(),
-            trigger_type: 1, // StopLoss
+            trigger_type: 1,                        // StopLoss
             trigger_price: U256::from(45000_00u64), // $45,000
-            size: U256::from(100_000_000u64), // 1 BTC
-            limit_price: U256::ZERO, // Market order on trigger
+            size: U256::from(100_000_000u64),       // 1 BTC
+            limit_price: U256::ZERO,                // Market order on trigger
             nonce: U256::from(1),
             owner: signer.address(),
         };
@@ -529,7 +528,9 @@ mod tests {
         let signature = eip712.sign_trigger_order(&signer, &trigger);
         assert_eq!(signature.len(), 65);
 
-        let valid = eip712.verify_trigger_order_signature(&trigger, &signature).unwrap();
+        let valid = eip712
+            .verify_trigger_order_signature(&trigger, &signature)
+            .unwrap();
         assert!(valid);
     }
 
@@ -548,7 +549,9 @@ mod tests {
         let hash = eip712.hash_cancel_trigger_order(&cancel);
         let sig = signer.sign(&hash.into());
 
-        let valid = eip712.verify_cancel_trigger_order_signature(&cancel, &sig).unwrap();
+        let valid = eip712
+            .verify_cancel_trigger_order_signature(&cancel, &sig)
+            .unwrap();
         assert!(valid);
     }
 

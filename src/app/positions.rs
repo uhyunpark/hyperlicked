@@ -63,24 +63,45 @@ impl Position {
             return 0;
         }
 
+        let signed_payment = self.funding_payment(funding_rate_bps, index_price);
+        self.record_funding(signed_payment, timestamp);
+        signed_payment
+    }
+
+    /// Calculate the signed funding payment without changing position metadata.
+    ///
+    /// This is used by the funding settlement's preflight phase so account
+    /// balances and position metadata are only mutated after both sides have
+    /// been capped and the transfer amounts have been allocated.
+    pub fn funding_payment(&self, funding_rate_bps: i64, index_price: Price) -> i64 {
+        if self.size == 0 {
+            return 0;
+        }
+
         // Payment = |size| * index_price * funding_rate / 1e8 / 10000
         // Use i128 for entire calculation to prevent overflow
-        let notional_i128 = (self.size.abs() as i128 * index_price as i128) / 100_000_000;
-        let payment_i128 = (notional_i128 * funding_rate_bps as i128) / 10000;
-        let payment = payment_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let size_i128 = (self.size as i128).abs();
+        let notional_i128 = size_i128.saturating_mul(index_price as i128) / 100_000_000;
+        let payment_i128 = notional_i128.saturating_mul(funding_rate_bps as i128) / 10000;
 
         // Positive rate: longs pay, shorts receive
         // Negative rate: shorts pay, longs receive
-        let signed_payment = if self.size > 0 {
-            -payment // Long pays (or receives if rate negative)
+        let signed_payment_i128 = if self.size > 0 {
+            -payment_i128 // Long pays (or receives if rate negative)
         } else {
-            payment // Short receives (or pays if rate negative)
+            payment_i128 // Short receives (or pays if rate negative)
         };
+        signed_payment_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    }
 
+    /// Record a settled funding amount in the position metadata.
+    ///
+    /// Funding settlement may be smaller than the nominal amount when a
+    /// payer is insolvent.  Callers must pass the amount actually transferred,
+    /// rather than the nominal amount calculated from the position.
+    pub(crate) fn record_funding(&mut self, signed_payment: i64, timestamp: u64) {
         self.cumulative_funding = self.cumulative_funding.saturating_add(signed_payment);
         self.last_funding_timestamp = timestamp;
-
-        signed_payment
     }
 
     /// Calculate liquidation price given available margin
@@ -192,5 +213,19 @@ mod tests {
         assert_eq!(payment, -500_00); // -$500 (paid)
         assert_eq!(pos.cumulative_funding, -500_00);
         assert_eq!(pos.last_funding_timestamp, 1000);
+    }
+
+    #[test]
+    fn test_funding_payment_extreme_values_is_bounded() {
+        let mut pos = Position::default();
+        pos.size = i64::MAX;
+        pos.entry_price = i64::MAX;
+
+        let payment = pos.funding_payment(i64::MAX, i64::MAX);
+        assert_eq!(payment, i64::MIN);
+
+        // The same calculation must remain safe when metadata is recorded.
+        assert_eq!(pos.apply_funding(i64::MAX, i64::MAX, 1000), i64::MIN);
+        assert_eq!(pos.cumulative_funding, i64::MIN);
     }
 }

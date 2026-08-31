@@ -2,12 +2,8 @@
 //!
 //! Tests for Byzantine fault detection: equivocation (double voting).
 
-use std::collections::HashMap;
-
-use hyperlicked::consensus::{
-    EquivocationDetector, EquivocationProof, ConsensusMetrics, VoteCheckResult,
-};
-use hyperlicked::types::{NodeId, Vote};
+use hyperlicked::consensus::{ConsensusMetrics, EquivocationDetector, VoteCheckResult};
+use hyperlicked::types::{ConsensusContext, NodeId, Vote};
 
 fn test_node_id(n: u8) -> NodeId {
     let mut id = [0u8; 32];
@@ -23,9 +19,12 @@ fn test_vote(view: u64, voter_id: u8, block_hash_byte: u8) -> Vote {
     hash[0] = block_hash_byte;
 
     Vote {
+        epoch: 0,
+        committee_hash: ConsensusContext::new(0, [0u8; 32]).committee_hash,
+        genesis_hash: ConsensusContext::new(0, [0u8; 32]).genesis_hash,
         view,
         block_hash: hash,
-        app_hash: [0u8; 32],
+        app_hash: [block_hash_byte.wrapping_add(100); 32],
         voter,
         signature: vec![voter_id, block_hash_byte], // Simplified signature for testing
         bls_pubkey: None,
@@ -78,6 +77,8 @@ fn test_equivocation_detected() {
             assert_eq!(proof.offender, vote1.voter);
             assert_eq!(proof.hash_a[0], 10);
             assert_eq!(proof.hash_b[0], 20);
+            assert_eq!(proof.app_hash_a, [110u8; 32]);
+            assert_eq!(proof.app_hash_b, [120u8; 32]);
         }
         _ => panic!("Should detect equivocation"),
     }

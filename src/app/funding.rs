@@ -19,6 +19,7 @@
 use super::accounts::AccountManager;
 use super::orderbook::OrderBook;
 use crate::types::Price;
+use serde::{Deserialize, Serialize};
 
 /// Funding errors
 #[derive(Debug, Clone, thiserror::Error)]
@@ -32,7 +33,7 @@ pub enum FundingError {
 }
 
 /// Per-user funding payment for WebSocket notification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserFundingPayment {
     /// Trader address
     pub address: String,
@@ -49,15 +50,15 @@ pub struct UserFundingPayment {
 }
 
 /// Result of funding application
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundingResult {
     /// Symbol this funding was applied to
     pub symbol: String,
     /// Funding rate in basis points (positive = longs pay shorts)
     pub funding_rate_bps: i64,
-    /// Total amount paid by longs
+    /// Signed total attributed to longs (positive = paid, negative = received)
     pub longs_paid: i64,
-    /// Total amount received by shorts (should equal longs_paid ideally)
+    /// Signed total attributed to shorts (positive = received, negative = paid)
     pub shorts_received: i64,
     /// Timestamp of funding
     pub timestamp: u64,
@@ -182,6 +183,127 @@ pub fn calculate_funding_rate(
     funding_rate.clamp(-max_rate_bps, max_rate_bps)
 }
 
+/// A funding entry collected during the settlement preflight.
+///
+/// Funding is first calculated for every position and then settled in one
+/// deterministic pass.  Keeping the nominal and capped amounts separate is
+/// important: an insolvent payer must not make an unbacked receiver credit.
+#[derive(Debug)]
+struct FundingEntry {
+    address: String,
+    position_size: i64,
+    payer_capacity: i128,
+    receiver_capacity: i128,
+    settled_payment: i64,
+}
+
+fn clamp_i128_to_i64(value: i128) -> i64 {
+    value.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+/// Return the maximum amount that can be collected from a negative payment.
+///
+/// A payer may only spend positive free collateral.  The cumulative funding
+/// field is bounded as well, so it is included in the cap to keep metadata
+/// exactly representative of the settled amount even at integer limits.
+fn payer_capacity(nominal_payment: i64, balance: i64, cumulative_funding: i64) -> i128 {
+    if nominal_payment >= 0 {
+        return 0;
+    }
+
+    let nominal_amount = -(nominal_payment as i128);
+    let balance_capacity = (balance as i128).max(0);
+    let metadata_capacity = cumulative_funding as i128 - i64::MIN as i128;
+
+    nominal_amount
+        .min(balance_capacity)
+        .min(metadata_capacity.max(0))
+}
+
+/// Return the maximum amount that can be credited to a positive payment.
+///
+/// Both the account balance and cumulative funding are i64 values.  Capping
+/// by their remaining headroom prevents a valid funding event from panicking
+/// or silently saturating either consensus field.
+fn receiver_capacity(nominal_payment: i64, balance: i64, cumulative_funding: i64) -> i128 {
+    if nominal_payment <= 0 {
+        return 0;
+    }
+
+    let nominal_amount = nominal_payment as i128;
+    let balance_capacity = i64::MAX as i128 - balance as i128;
+    let metadata_capacity = i64::MAX as i128 - cumulative_funding as i128;
+
+    nominal_amount
+        .min(balance_capacity.max(0))
+        .min(metadata_capacity.max(0))
+}
+
+/// Allocate `target` units proportionally to non-negative `weights`.
+///
+/// Every allocation is bounded by its corresponding weight.  Integer
+/// division leaves a remainder smaller than the number of entries; those
+/// units go to the largest fractional remainders, with the original (already
+/// address-sorted) index as the deterministic tie-breaker.
+fn allocate_pro_rata(weights: &[i128], target: i128) -> Vec<i64> {
+    let total_weight = weights.iter().fold(0i128, |total, weight| {
+        total.saturating_add((*weight).max(0))
+    });
+    let target = target.clamp(0, total_weight);
+    let mut allocations = vec![0i64; weights.len()];
+
+    if target == 0 || total_weight == 0 {
+        return allocations;
+    }
+
+    // Monetary values are i64 and the number of accounts in a state is
+    // bounded by available memory, so this product fits in i128 in normal
+    // operation.  If an artificially enormous state exceeds that bound,
+    // preserve conservation with a deterministic bounded fallback rather
+    // than panicking during block execution.
+    let mut remainders = Vec::with_capacity(weights.len());
+    let mut distributed = 0i128;
+    for (index, weight) in weights.iter().enumerate() {
+        let weight = (*weight).max(0);
+        let Some(numerator) = target.checked_mul(weight) else {
+            let mut remaining = target;
+            for (index, weight) in weights.iter().enumerate() {
+                let amount = remaining.min((*weight).max(0));
+                allocations[index] = clamp_i128_to_i64(amount);
+                remaining -= amount;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            return allocations;
+        };
+        let whole = numerator / total_weight;
+        let remainder = numerator % total_weight;
+        allocations[index] = clamp_i128_to_i64(whole);
+        distributed = distributed.saturating_add(whole);
+        remainders.push((remainder, index));
+    }
+
+    let remainder_units = target.saturating_sub(distributed);
+    remainders.sort_by(
+        |(left_remainder, left_index), (right_remainder, right_index)| {
+            right_remainder
+                .cmp(left_remainder)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
+
+    // At most one unit is left for each non-zero weight after flooring.  The
+    // guard also keeps the cast safe if a malformed/intermediate state ever
+    // causes the arithmetic above to saturate.
+    let remainder_units = remainder_units.min(remainders.len() as i128) as usize;
+    for (_, index) in remainders.into_iter().take(remainder_units) {
+        allocations[index] = allocations[index].saturating_add(1);
+    }
+
+    allocations
+}
+
 /// Apply funding to all positions in a symbol
 ///
 /// Iterates through all accounts with positions in the symbol and applies
@@ -195,55 +317,133 @@ pub fn apply_funding(
     index_price: Price,
     timestamp: u64,
 ) -> FundingResult {
-    let mut longs_paid: i64 = 0;
-    let mut shorts_received: i64 = 0;
-    let mut user_payments: Vec<UserFundingPayment> = Vec::new();
-
-    // Get addresses with positions (need to collect to avoid borrow issues)
-    let addresses: Vec<String> = accounts
+    // Build the complete preflight from immutable account snapshots.  The
+    // AccountManager uses a HashMap internally, so sort explicitly before any
+    // allocation or event construction.
+    let mut entries: Vec<FundingEntry> = accounts
         .all_accounts()
-        .iter()
-        .filter(|a| a.positions.get(symbol).map(|p| p.size != 0).unwrap_or(false))
-        .map(|a| a.address.clone())
-        .collect();
-
-    // Apply funding to each account
-    for address in addresses {
-        let account = accounts.get_or_create(&address);
-        if let Some(position) = account.positions.get_mut(symbol) {
-            let position_size = position.size;
-            let payment = position.apply_funding(funding_rate_bps, index_price, timestamp);
-
-            // Cap negative payments at available balance (can't pay more than you have)
-            let actual_payment = if payment < 0 {
-                payment.max(-account.balance)
-            } else {
-                payment
-            };
-
-            // Track totals using actual payment
-            if position_size > 0 {
-                // Long position
-                longs_paid += -actual_payment;
-            } else {
-                // Short position
-                shorts_received += actual_payment;
+        .into_iter()
+        .filter_map(|account| {
+            let position = account.positions.get(symbol)?;
+            if position.size == 0 {
+                return None;
             }
 
-            // Apply to balance
-            account.balance += actual_payment;
+            let nominal_payment = position.funding_payment(funding_rate_bps, index_price);
+            Some(FundingEntry {
+                address: account.address,
+                position_size: position.size,
+                payer_capacity: payer_capacity(
+                    nominal_payment,
+                    account.balance,
+                    position.cumulative_funding,
+                ),
+                receiver_capacity: receiver_capacity(
+                    nominal_payment,
+                    account.balance,
+                    position.cumulative_funding,
+                ),
+                settled_payment: 0,
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| left.address.cmp(&right.address));
 
-            // Record per-user payment for WebSocket notification
+    let payer_indices: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.payer_capacity > 0)
+        .map(|(index, _)| index)
+        .collect();
+    let receiver_indices: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.receiver_capacity > 0)
+        .map(|(index, _)| index)
+        .collect();
+
+    let payer_weights: Vec<i128> = payer_indices
+        .iter()
+        .map(|index| entries[*index].payer_capacity)
+        .collect();
+    let receiver_weights: Vec<i128> = receiver_indices
+        .iter()
+        .map(|index| entries[*index].receiver_capacity)
+        .collect();
+
+    // No counterpart means no transfer.  If one side is insolvent or cannot
+    // represent another credit, only the amount backed by both sides moves.
+    let payer_total = payer_weights
+        .iter()
+        .fold(0i128, |total, amount| total.saturating_add(*amount));
+    let receiver_total = receiver_weights
+        .iter()
+        .fold(0i128, |total, amount| total.saturating_add(*amount));
+    // FundingResult and each account's balance use i64 amounts.  Keep one
+    // event's aggregate within that representation so its totals remain
+    // exact even when many individually valid accounts participate.
+    let settlement_total = payer_total.min(receiver_total).min(i64::MAX as i128);
+
+    let payer_allocations = allocate_pro_rata(&payer_weights, settlement_total);
+    for (allocation_index, entry_index) in payer_indices.iter().enumerate() {
+        entries[*entry_index].settled_payment = -payer_allocations[allocation_index];
+    }
+
+    let receiver_allocations = allocate_pro_rata(&receiver_weights, settlement_total);
+    for (allocation_index, entry_index) in receiver_indices.iter().enumerate() {
+        entries[*entry_index].settled_payment = receiver_allocations[allocation_index];
+    }
+
+    let mut longs_paid: i128 = 0;
+    let mut shorts_received: i128 = 0;
+    let mut user_payments: Vec<UserFundingPayment> = Vec::with_capacity(entries.len());
+
+    // Commit the preflight result.  The planned capacities make this checked
+    // addition safe; the i128 clamp is a final defensive guard for malformed
+    // state and keeps execution from panicking on integer overflow.
+    for entry in entries {
+        let account = accounts.get_or_create(&entry.address);
+        if let Some(position) = account.positions.get_mut(symbol) {
+            let balance = account.balance as i128;
+            let actual_payment = clamp_i128_to_i64(
+                (entry.settled_payment as i128)
+                    .clamp(i64::MIN as i128 - balance, i64::MAX as i128 - balance),
+            );
+
+            account.balance = account
+                .balance
+                .checked_add(actual_payment)
+                .unwrap_or_else(|| {
+                    if actual_payment < 0 {
+                        i64::MIN
+                    } else {
+                        i64::MAX
+                    }
+                });
+            position.record_funding(actual_payment, timestamp);
+
+            // Preserve the existing signed side-total semantics: for a
+            // positive rate longs_paid/shorts_received are positive, while a
+            // reversed rate makes the corresponding side total negative.
+            if entry.position_size > 0 {
+                longs_paid = longs_paid.saturating_sub(actual_payment as i128);
+            } else {
+                shorts_received = shorts_received.saturating_add(actual_payment as i128);
+            }
+
             user_payments.push(UserFundingPayment {
-                address: address.clone(),
+                address: entry.address,
                 symbol: symbol.to_string(),
                 payment: actual_payment,
-                position_size,
+                position_size: entry.position_size,
                 funding_rate_bps,
                 timestamp,
             });
         }
     }
+
+    let longs_paid = clamp_i128_to_i64(longs_paid);
+    let shorts_received = clamp_i128_to_i64(shorts_received);
 
     tracing::info!(
         symbol,
@@ -430,10 +630,258 @@ mod tests {
 
         // Long should only pay what they have
         let long = accounts.get("poor_long").unwrap();
-        assert!(long.balance >= 0, "Balance should not go negative, got {}", long.balance);
+        assert!(
+            long.balance >= 0,
+            "Balance should not go negative, got {}",
+            long.balance
+        );
 
         // Total paid by longs should be capped
-        assert!(result.longs_paid <= 100, "Longs paid {} should be capped at balance 100", result.longs_paid);
+        assert!(
+            result.longs_paid <= 100,
+            "Longs paid {} should be capped at balance 100",
+            result.longs_paid
+        );
+    }
+
+    #[test]
+    fn funding_settlement_conserves_insolvent_payer_amount() {
+        let mut accounts = AccountManager::new();
+
+        let long = accounts.get_or_create("poor_long");
+        long.balance = 100;
+        long.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+
+        let short = accounts.get_or_create("short_trader");
+        short.balance = 1_000_000;
+        short.apply_fill("BTC-USDT", false, 100_000_000, 5_000_000);
+
+        let total_before: i128 = accounts
+            .all_accounts()
+            .iter()
+            .map(|account| account.balance as i128)
+            .sum();
+        let result = apply_funding(&mut accounts, "BTC-USDT", 100, 5_000_000, 1000);
+        let total_after: i128 = accounts
+            .all_accounts()
+            .iter()
+            .map(|account| account.balance as i128)
+            .sum();
+
+        // The payer's nominal $500 obligation is capped at $1, and only that
+        // backed amount is credited to the receiver.
+        assert_eq!(result.longs_paid, 100);
+        assert_eq!(result.shorts_received, 100);
+        assert_eq!(total_before, total_after);
+        assert_eq!(
+            result.user_payments.iter().map(|p| p.payment).sum::<i64>(),
+            0
+        );
+        assert_eq!(
+            accounts
+                .get("poor_long")
+                .unwrap()
+                .position("BTC-USDT")
+                .cumulative_funding,
+            -100
+        );
+        assert_eq!(
+            accounts
+                .get("short_trader")
+                .unwrap()
+                .position("BTC-USDT")
+                .cumulative_funding,
+            100
+        );
+    }
+
+    #[test]
+    fn funding_settlement_handles_reversed_rate_without_minting() {
+        let mut accounts = AccountManager::new();
+
+        let long = accounts.get_or_create("long_trader");
+        long.balance = 0;
+        long.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+
+        let short = accounts.get_or_create("poor_short");
+        short.balance = 100;
+        short.apply_fill("BTC-USDT", false, 100_000_000, 5_000_000);
+
+        let result = apply_funding(&mut accounts, "BTC-USDT", -100, 5_000_000, 1000);
+
+        // Negative funding reverses the direction: the short pays the backed
+        // $1 and the long receives exactly $1.
+        assert_eq!(result.longs_paid, -100);
+        assert_eq!(result.shorts_received, -100);
+        assert_eq!(
+            result.user_payments.iter().map(|p| p.payment).sum::<i64>(),
+            0
+        );
+        assert_eq!(accounts.get("long_trader").unwrap().balance, 100);
+        assert_eq!(accounts.get("poor_short").unwrap().balance, 0);
+        assert_eq!(
+            accounts
+                .get("long_trader")
+                .unwrap()
+                .position("BTC-USDT")
+                .cumulative_funding,
+            100
+        );
+        assert_eq!(
+            accounts
+                .get("poor_short")
+                .unwrap()
+                .position("BTC-USDT")
+                .cumulative_funding,
+            -100
+        );
+    }
+
+    #[test]
+    fn funding_settlement_assigns_rounding_remainder_by_address() {
+        let mut accounts = AccountManager::new();
+
+        // At this size/price/rate the nominal payment is exactly one cent.
+        let payer = accounts.get_or_create("payer");
+        payer.balance = 1;
+        payer.apply_fill("BTC-USDT", true, 200_000, 5_000_000);
+
+        let receiver_b = accounts.get_or_create("receiver_b");
+        receiver_b.apply_fill("BTC-USDT", false, 200_000, 5_000_000);
+        let receiver_a = accounts.get_or_create("receiver_a");
+        receiver_a.apply_fill("BTC-USDT", false, 200_000, 5_000_000);
+
+        let result = apply_funding(&mut accounts, "BTC-USDT", 1, 5_000_000, 1000);
+
+        // One cent cannot be split evenly.  Equal fractional remainders are
+        // resolved by canonical address order, so receiver_a gets the unit.
+        assert_eq!(result.user_payments[0].address, "payer");
+        assert_eq!(result.user_payments[1].address, "receiver_a");
+        assert_eq!(result.user_payments[2].address, "receiver_b");
+        assert_eq!(result.user_payments[0].payment, -1);
+        assert_eq!(result.user_payments[1].payment, 1);
+        assert_eq!(result.user_payments[2].payment, 0);
+        assert_eq!(result.longs_paid, 1);
+        assert_eq!(result.shorts_received, 1);
+        assert_eq!(
+            result.user_payments.iter().map(|p| p.payment).sum::<i64>(),
+            0
+        );
+        assert_eq!(accounts.get("payer").unwrap().balance, 0);
+        assert_eq!(accounts.get("receiver_a").unwrap().balance, 1);
+        assert_eq!(accounts.get("receiver_b").unwrap().balance, 0);
+    }
+
+    #[test]
+    fn pro_rata_allocation_is_bounded_and_conserves_remainder() {
+        let weights = [2, 3, 5];
+        let allocations = allocate_pro_rata(&weights, 7);
+
+        assert_eq!(
+            allocations
+                .iter()
+                .map(|amount| *amount as i128)
+                .sum::<i128>(),
+            7
+        );
+        assert!(allocations
+            .iter()
+            .zip(weights)
+            .all(|(allocation, weight)| { *allocation >= 0 && i128::from(*allocation) <= weight }));
+        // 7 * [2, 3, 5] / 10 = [1.4, 2.1, 3.5].  The leftover unit goes to
+        // the largest fractional remainder.
+        assert_eq!(allocations, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn funding_settlement_does_not_credit_from_negative_balance() {
+        let mut accounts = AccountManager::new();
+
+        let long = accounts.get_or_create("insolvent_long");
+        long.balance = -100;
+        long.apply_fill("BTC-USDT", true, 100_000_000, 5_000_000);
+
+        let short = accounts.get_or_create("short_trader");
+        short.balance = 1_000_000;
+        short.apply_fill("BTC-USDT", false, 100_000_000, 5_000_000);
+
+        let result = apply_funding(&mut accounts, "BTC-USDT", 100, 5_000_000, 1000);
+
+        assert_eq!(result.longs_paid, 0);
+        assert_eq!(result.shorts_received, 0);
+        assert_eq!(
+            result.user_payments.iter().map(|p| p.payment).sum::<i64>(),
+            0
+        );
+        assert_eq!(accounts.get("insolvent_long").unwrap().balance, -100);
+        assert_eq!(accounts.get("short_trader").unwrap().balance, 1_000_000);
+        assert_eq!(
+            accounts
+                .get("insolvent_long")
+                .unwrap()
+                .position("BTC-USDT")
+                .last_funding_timestamp,
+            1000
+        );
+    }
+
+    #[test]
+    fn funding_result_root_is_independent_of_account_insertion_order() {
+        use crate::types::{CommitmentV2, EventRecord, EventType};
+
+        fn accounts_in_order(addresses: &[&str]) -> AccountManager {
+            let mut accounts = AccountManager::new();
+            for address in addresses {
+                let account = accounts.get_or_create(address);
+                account.balance = 1_000_000;
+                account.apply_fill(
+                    "BTC-USDT",
+                    address.starts_with("long"),
+                    100_000_000,
+                    5_000_000,
+                );
+            }
+            accounts
+        }
+
+        fn result_root(result: &FundingResult) -> [u8; 32] {
+            let event = EventRecord::from_bincode(0, EventType::FUNDING, result)
+                .expect("funding payload encodes");
+            CommitmentV2::new_with_system_events(Vec::new(), vec![event])
+                .expect("commitment validates")
+                .root()
+                .expect("commitment root computes")
+        }
+
+        let mut first = accounts_in_order(&["long_b", "short_a", "long_a"]);
+        let mut second = accounts_in_order(&["long_a", "long_b", "short_a"]);
+
+        let first_result = apply_funding(&mut first, "BTC-USDT", 100, 5_000_000, 1000);
+        let second_result = apply_funding(&mut second, "BTC-USDT", 100, 5_000_000, 1000);
+
+        assert_eq!(result_root(&first_result), result_root(&second_result));
+        assert_eq!(
+            first_result
+                .user_payments
+                .iter()
+                .map(|payment| payment.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["long_a", "long_b", "short_a"]
+        );
+        for address in ["long_a", "long_b", "short_a"] {
+            assert_eq!(
+                first.get(address).map(|account| account.balance),
+                second.get(address).map(|account| account.balance)
+            );
+            assert_eq!(
+                first
+                    .get(address)
+                    .map(|account| account.position("BTC-USDT").cumulative_funding),
+                second
+                    .get(address)
+                    .map(|account| account.position("BTC-USDT").cumulative_funding)
+            );
+        }
     }
 
     #[test]
@@ -465,7 +913,11 @@ mod tests {
         // With 50% oracle weight: (50% * 98 + 50% * 300) / 100 ≈ 199 bps
         let blended = sample_premium_with_oracle(&book, 5_000_000, 5_100_000, 5000);
         // Due to integer math, should be close to 199
-        assert!(blended > 150 && blended < 250, "Expected ~199, got {}", blended);
+        assert!(
+            blended > 150 && blended < 250,
+            "Expected ~199, got {}",
+            blended
+        );
     }
 
     #[test]
@@ -477,7 +929,11 @@ mod tests {
         let blended = sample_premium_with_oracle(&book, 5_000_000, 5_100_000, 10000);
 
         // Oracle premium = (51500 - 51000) / 51000 * 10000 ≈ 98 bps
-        assert!(blended > 80 && blended < 120, "Expected ~98, got {}", blended);
+        assert!(
+            blended > 80 && blended < 120,
+            "Expected ~98, got {}",
+            blended
+        );
     }
 
     #[test]

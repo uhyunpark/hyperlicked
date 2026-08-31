@@ -4,17 +4,24 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! use consensus::metrics::ConsensusMetrics;
+//! ```
+//! use hyperlicked::consensus::ConsensusMetrics;
+//! use hyperlicked::types::NodeId;
 //!
 //! let metrics = ConsensusMetrics::new();
+//! let voter: NodeId = [1u8; 32];
+//! let sender: NodeId = [2u8; 32];
 //!
 //! // Record events as they occur
-//! metrics.record_invalid_vote_signature(voter);
-//! metrics.record_invalid_timeout_signature(sender);
+//! metrics.record_invalid_vote_signature(&voter);
+//! metrics.record_invalid_timeout_signature(&sender);
 //!
 //! // Get summary for monitoring
 //! let summary = metrics.summary();
+//! assert_eq!(summary.invalid_vote_signatures, 1);
+//! assert_eq!(summary.invalid_timeout_signatures, 1);
+//! assert_eq!(summary.suspicious_validators, 2);
+//! assert!(summary.has_byzantine_activity());
 //! ```
 
 use std::collections::HashMap;
@@ -63,7 +70,8 @@ impl ConsensusMetrics {
 
     /// Record an invalid timeout signature
     pub fn record_invalid_timeout_signature(&self, sender: &NodeId) {
-        self.invalid_timeout_signatures.fetch_add(1, Ordering::Relaxed);
+        self.invalid_timeout_signatures
+            .fetch_add(1, Ordering::Relaxed);
         self.increment_byzantine_suspicion(sender);
     }
 
@@ -79,7 +87,8 @@ impl ConsensusMetrics {
 
     /// Record a signature parse failure
     pub fn record_signature_parse_failure(&self) {
-        self.signature_parse_failures.fetch_add(1, Ordering::Relaxed);
+        self.signature_parse_failures
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record an aggregation failure

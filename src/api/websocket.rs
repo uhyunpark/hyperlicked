@@ -20,11 +20,14 @@ use tracing::{debug, info, warn};
 
 use super::state::{Event, SharedState, UserEvent};
 use super::types::ApiState;
-use crate::config::{Config, Mode};
 use crate::crypto::recover_address;
 
 /// WebSocket connection handler
 pub struct WebSocketHandler;
+
+fn finalized_event_matches_subscriber(subscribed: Option<&str>, event_address: &str) -> bool {
+    subscribed.map(str::to_ascii_lowercase).as_deref() == Some(event_address)
+}
 
 /// Client subscription request (unauthenticated - for public channels)
 #[derive(Debug, Deserialize)]
@@ -66,7 +69,7 @@ async fn verify_subscription_auth(
     api_state: &ApiState,
 ) -> bool {
     // In dev mode, allow unauthenticated subscriptions for testing
-    if Config::global().mode == Mode::Dev {
+    if api_state.security_policy.mode.is_dev() {
         debug!(address, "Dev mode: allowing unauthenticated subscription");
         return true;
     }
@@ -75,7 +78,10 @@ async fn verify_subscription_auth(
     let (signature, timestamp) = match (signature, timestamp) {
         (Some(sig), Some(ts)) => (sig, ts),
         _ => {
-            warn!(address, "Subscription rejected: missing signature or timestamp");
+            warn!(
+                address,
+                "Subscription rejected: missing signature or timestamp"
+            );
             return false;
         }
     };
@@ -87,7 +93,10 @@ async fn verify_subscription_auth(
         .as_secs();
 
     if now.abs_diff(*timestamp) > 300 {
-        warn!(address, timestamp, now, "Subscription rejected: timestamp too old");
+        warn!(
+            address,
+            timestamp, now, "Subscription rejected: timestamp too old"
+        );
         return false;
     }
 
@@ -183,6 +192,7 @@ pub async fn handle_socket(socket: WebSocket, api_state: ApiState) {
 
     // Subscribe to public events
     let mut public_rx = state.subscribe();
+    let mut committed_user_rx = state.subscribe_committed_user_events();
 
     // Channel for sending messages to this client
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<String>();
@@ -218,6 +228,24 @@ pub async fn handle_socket(socket: WebSocket, api_state: ApiState) {
     // Handle incoming messages (subscriptions)
     loop {
         tokio::select! {
+            committed = committed_user_rx.recv() => {
+                match committed {
+                    Ok((address, event)) => {
+                        if finalized_event_matches_subscriber(user_address.as_deref(), &address) {
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                if msg_tx_clone.send(json).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "WebSocket client lagged finalized user events; receipt lookup is required");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
             // Check for user events if subscribed
             user_event = async {
                 if let Some(ref mut rx) = user_rx {
@@ -414,4 +442,47 @@ pub struct AssetCtxData {
     pub day_notional_volume: i64,
     pub next_funding_time: u64,
     pub timestamp: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalized_event_matches_subscriber;
+    use crate::api::state::{FinalizedReceiptEvent, UserEvent};
+
+    #[test]
+    fn finalized_user_events_are_filtered_by_authenticated_address() {
+        assert!(finalized_event_matches_subscriber(Some("0xAbCd"), "0xabcd"));
+        assert!(!finalized_event_matches_subscriber(
+            Some("0xAbCd"),
+            "0xeeee"
+        ));
+        assert!(!finalized_event_matches_subscriber(None, "0xabcd"));
+    }
+
+    #[test]
+    fn finalized_user_event_json_matches_the_client_contract() {
+        let event = UserEvent::TransactionFinalized {
+            tx_hash: "11".repeat(32),
+            block_height: 7,
+            block_hash: "22".repeat(32),
+            tx_index: 3,
+            tx_type: 4,
+            status: 1,
+            error_code: 0,
+            compute_units: 5,
+            storage_read_bytes: 6,
+            storage_write_bytes: 7,
+            events: vec![FinalizedReceiptEvent {
+                event_index: 0,
+                event_type: 2,
+                payload_hex: "deadbeef".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(event).expect("finalized event should serialize");
+        assert_eq!(json["type"], "transactionFinalized");
+        assert_eq!(json["tx_hash"], "11".repeat(32));
+        assert_eq!(json["block_height"], 7);
+        assert_eq!(json["events"][0]["payload_hex"], "deadbeef");
+    }
 }

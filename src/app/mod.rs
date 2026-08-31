@@ -23,6 +23,7 @@
 pub mod accounts;
 pub mod adl;
 pub mod candles;
+pub mod envelope;
 pub mod funding;
 pub mod liquidation;
 pub mod liquidation_queue;
@@ -36,27 +37,33 @@ pub mod state;
 pub mod trigger;
 
 pub use accounts::{Account, AccountManager};
-pub use positions::Position;
+pub use adl::{ADLError, ADLResult, ADLSummary};
 pub use candles::{Candle, CandleManager, Interval, ALL_INTERVALS};
+pub use envelope::{
+    ConsensusTransaction, EnvelopeError, SignatureScheme, SignedEnvelope, ACTION_DOMAIN_TAG,
+    EIP712_V1_DOMAIN_TYPE, EIP712_V1_NAME, EIP712_V1_TRANSACTION_TYPE, EIP712_V1_VERSION,
+    ENVELOPE_VERSION, MAX_ACTION_BYTES, MAX_ENVELOPE_BYTES,
+};
 pub use funding::{FundingError, FundingResult};
 pub use liquidation::{LiquidationError, LiquidationResult};
 pub use liquidation_queue::LiquidationQueue;
-pub use adl::{ADLError, ADLResult, ADLSummary};
+pub use market_maker::{Intensity as MMIntensity, MarketMakerConfig, MarketMakerState};
 pub use mempool::Mempool;
-pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
-pub use staking::{
-    StakingError, StakingState, StakingTransaction, StakingTxResult,
-    ValidatorInfo, ValidatorStatus, Delegation, EpochSnapshot,
-};
 pub use oracle::{OracleConfig, OracleError, OraclePrice, OracleState, PriceSource};
-pub use market_maker::{MarketMakerConfig, MarketMakerState, Intensity as MMIntensity};
+pub use orderbook::{Fill, Order, OrderBook, OrderId, OrderType, Side};
+pub use positions::Position;
+pub use staking::{
+    Delegation, EpochSnapshot, StakingError, StakingState, StakingTransaction, StakingTxResult,
+    StaticValidatorBootstrap, ValidatorInfo, ValidatorStatus,
+};
 pub use state::{
-    AppError, AppState, DepositInfo, OrderUpdateInfo, MAINTENANCE_MARGIN_BPS,
-    INSURANCE_FUND_WARNING_THRESHOLD,
+    AppError, AppState, BlockExecutionArtifacts, DepositInfo, ExecutionTransactionArtifact,
+    OrderUpdateInfo, TransactionArtifact, TriggerIndexError, INSURANCE_FUND_WARNING_THRESHOLD,
+    MAINTENANCE_MARGIN_BPS,
 };
 pub use trigger::{
-    Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType,
-    TriggerOrder, TriggerOrderId, TriggerOrderStatus, TriggerType,
+    Cloid, TriggerCondition, TriggerError, TriggerEvent, TriggerEventType, TriggerOrder,
+    TriggerOrderId, TriggerOrderStatus, TriggerType,
 };
 
 use crate::types::{Price, Size};
@@ -81,18 +88,15 @@ pub enum Transaction {
         reduce_only: bool,
     },
     /// Cancel an order
-    CancelOrder {
-        trader: Address,
-        order_id: OrderId,
-    },
+    CancelOrder { trader: Address, order_id: OrderId },
     /// Deposit collateral
-    Deposit {
-        trader: Address,
-        amount: i64,
-    },
+    Deposit { trader: Address, amount: i64 },
     /// Withdraw collateral
-    Withdraw {
-        trader: Address,
+    Withdraw { trader: Address, amount: i64 },
+    /// Transfer liquid native HYCK between accounts.
+    TransferHyck {
+        from: Address,
+        to: Address,
         amount: i64,
     },
     /// Register a new validator
@@ -100,8 +104,15 @@ pub enum Transaction {
         operator: Address,
         node_id: crate::types::NodeId,
         bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
         self_stake: i64,
         commission_bps: i64,
+    },
+    /// Rotate a validator's BLS key for the next epoch
+    RotateValidatorKey {
+        operator: Address,
+        new_bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
     },
     /// Delegate stake to a validator
     Delegate {
@@ -116,19 +127,16 @@ pub enum Transaction {
         amount: i64,
     },
     /// Claim completed unstakes
-    ClaimUnstaked {
-        delegator: Address,
-    },
+    ClaimUnstaked { delegator: Address },
     /// Claim staking rewards
     ClaimRewards {
         claimant: Address,
         validator: Option<Address>,
     },
     /// Unjail a jailed validator
-    Unjail {
-        operator: Address,
-    },
-    /// Submit evidence of misbehavior
+    Unjail { operator: Address },
+    /// Submit evidence of misbehavior through the protocol-owned system path.
+    /// This action is never accepted inside a signed user envelope.
     SubmitEvidence {
         submitter: Address,
         evidence: staking::Evidence,
@@ -170,6 +178,35 @@ pub enum Transaction {
 }
 
 impl Transaction {
+    /// User-originated actions must be carried by `SignedEnvelope` in
+    /// testnet/mainnet.  The legacy `System(Transaction)` wrapper is retained
+    /// for protocol-owned actions and local fixtures only.
+    pub fn is_user_action(&self) -> bool {
+        if matches!(self, Transaction::SubmitEvidence { .. }) {
+            return false;
+        }
+        matches!(
+            self,
+            Transaction::PlaceOrder { .. }
+                | Transaction::CancelOrder { .. }
+                | Transaction::Deposit { .. }
+                | Transaction::Withdraw { .. }
+                | Transaction::TransferHyck { .. }
+                | Transaction::RegisterValidator { .. }
+                | Transaction::RotateValidatorKey { .. }
+                | Transaction::Delegate { .. }
+                | Transaction::Undelegate { .. }
+                | Transaction::ClaimUnstaked { .. }
+                | Transaction::ClaimRewards { .. }
+                | Transaction::Unjail { .. }
+                | Transaction::PlaceTriggerOrder { .. }
+                | Transaction::CancelTriggerOrder { .. }
+                | Transaction::CancelTriggerOrderByCloid { .. }
+                | Transaction::OraclePriceUpdate { .. }
+                | Transaction::AddMarket { .. }
+        )
+    }
+
     /// Get the bucket for mempool ordering
     /// Lower bucket = higher priority
     pub fn bucket(&self) -> u8 {
@@ -177,7 +214,9 @@ impl Transaction {
             // Highest priority: deposits, withdrawals, staking, and oracle operations
             Transaction::Deposit { .. }
             | Transaction::Withdraw { .. }
+            | Transaction::TransferHyck { .. }
             | Transaction::RegisterValidator { .. }
+            | Transaction::RotateValidatorKey { .. }
             | Transaction::Delegate { .. }
             | Transaction::Undelegate { .. }
             | Transaction::ClaimUnstaked { .. }
@@ -191,8 +230,7 @@ impl Transaction {
             | Transaction::CancelTriggerOrder { .. }
             | Transaction::CancelTriggerOrderByCloid { .. } => 1,
             // Lower priority: order placements (including trigger orders)
-            Transaction::PlaceOrder { .. }
-            | Transaction::PlaceTriggerOrder { .. } => 2,
+            Transaction::PlaceOrder { .. } | Transaction::PlaceTriggerOrder { .. } => 2,
         }
     }
 
@@ -207,9 +245,11 @@ impl Transaction {
             // Global transactions - affect shared state
             Transaction::Deposit { .. }
             | Transaction::Withdraw { .. }
+            | Transaction::TransferHyck { .. }
             | Transaction::CancelOrder { .. } // Order ID not symbol-scoped
             | Transaction::CancelTriggerOrder { .. } // Trigger ID not symbol-scoped
             | Transaction::RegisterValidator { .. }
+            | Transaction::RotateValidatorKey { .. }
             | Transaction::Delegate { .. }
             | Transaction::Undelegate { .. }
             | Transaction::ClaimUnstaked { .. }
@@ -237,7 +277,9 @@ impl Transaction {
             Transaction::CancelOrder { trader, .. } => trader,
             Transaction::Deposit { trader, .. } => trader,
             Transaction::Withdraw { trader, .. } => trader,
+            Transaction::TransferHyck { from, .. } => from,
             Transaction::RegisterValidator { operator, .. } => operator,
+            Transaction::RotateValidatorKey { operator, .. } => operator,
             Transaction::Delegate { delegator, .. } => delegator,
             Transaction::Undelegate { delegator, .. } => delegator,
             Transaction::ClaimUnstaked { delegator, .. } => delegator,
@@ -257,41 +299,41 @@ impl Transaction {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MarketConfig {
     pub symbol: Symbol,
-    pub tick_size: Price,      // Minimum price increment
-    pub lot_size: Size,        // Minimum size increment
-    pub min_notional: i64,     // Minimum order value
-    pub maker_fee: i64,        // Fee in basis points (e.g., 2 = 0.02%)
-    pub taker_fee: i64,        // Fee in basis points
+    pub tick_size: Price,  // Minimum price increment
+    pub lot_size: Size,    // Minimum size increment
+    pub min_notional: i64, // Minimum order value
+    pub maker_fee: i64,    // Fee in basis points (e.g., 2 = 0.02%)
+    pub taker_fee: i64,    // Fee in basis points
     // Funding parameters
-    pub funding_interval_ms: u64,  // Funding interval in ms (3600000 = 1 hour)
-    pub interest_rate_bps: i64,    // Interest rate component (1 = 0.01%)
+    pub funding_interval_ms: u64, // Funding interval in ms (3600000 = 1 hour)
+    pub interest_rate_bps: i64,   // Interest rate component (1 = 0.01%)
     pub max_funding_rate_bps: i64, // Max funding rate cap (400 = 4%)
     // Position/order limits (CRITICAL-3: OOM prevention)
-    pub max_order_size: Size,      // Max single order size (satoshis)
-    pub max_position_size: Size,   // Max position per account (satoshis)
-    pub max_open_orders: usize,    // Max open orders per account
-    pub max_price_levels: usize,   // Max price levels per side (OOM prevention)
-    pub ema_alpha_bps: i64,        // EMA alpha for mark price (100 = 1%)
+    pub max_order_size: Size,    // Max single order size (satoshis)
+    pub max_position_size: Size, // Max position per account (satoshis)
+    pub max_open_orders: usize,  // Max open orders per account
+    pub max_price_levels: usize, // Max price levels per side (OOM prevention)
+    pub ema_alpha_bps: i64,      // EMA alpha for mark price (100 = 1%)
 }
 
 impl Default for MarketConfig {
     fn default() -> Self {
         Self {
             symbol: "BTC-USDT".to_string(),
-            tick_size: 1,                // 1 cent
-            lot_size: 1,                 // 1 satoshi
-            min_notional: 10_00,         // $10 minimum
-            maker_fee: 2,                // 0.02%
-            taker_fee: 5,                // 0.05%
+            tick_size: 1,                 // 1 cent
+            lot_size: 1,                  // 1 satoshi
+            min_notional: 10_00,          // $10 minimum
+            maker_fee: 2,                 // 0.02%
+            taker_fee: 5,                 // 0.05%
             funding_interval_ms: 3600000, // 1 hour
-            interest_rate_bps: 1,        // 0.01% interest
-            max_funding_rate_bps: 400,   // 4% max hourly rate
+            interest_rate_bps: 1,         // 0.01% interest
+            max_funding_rate_bps: 400,    // 4% max hourly rate
             // Position/order limits (sane defaults for BTC)
-            max_order_size: 1_000_000_000_000,    // 10,000 BTC (1e12 satoshis)
+            max_order_size: 1_000_000_000_000, // 10,000 BTC (1e12 satoshis)
             max_position_size: 10_000_000_000_000, // 100,000 BTC (1e13 satoshis)
-            max_open_orders: 100,                  // 100 open orders per account
-            max_price_levels: 1000,                // 1000 price levels per side
-            ema_alpha_bps: 100,                    // 1% EMA alpha
+            max_open_orders: 100,              // 100 open orders per account
+            max_price_levels: 1000,            // 1000 price levels per side
+            ema_alpha_bps: 100,                // 1% EMA alpha
         }
     }
 }

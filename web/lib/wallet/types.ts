@@ -86,6 +86,7 @@ export interface OrderToSign {
   qty: string // BigInt as string
   nonce: string // BigInt as string
   deadline: string // BigInt as string (0 = no expiry)
+  validAfter?: string // BigInt as string (canonical envelope lower bound)
   leverage: number
   owner: string // Address
   reduce_only?: boolean
@@ -96,6 +97,8 @@ export interface CancelToSign {
   symbol: string
   nonce: string // BigInt as string
   owner: string // Address
+  deadline?: string // BigInt as string (canonical envelope upper bound)
+  validAfter?: string // BigInt as string (canonical envelope lower bound)
 }
 
 export interface TriggerOrderToSign {
@@ -106,13 +109,19 @@ export interface TriggerOrderToSign {
   limitPrice: string    // BigInt as string (0 = no limit)
   nonce: string         // BigInt as string
   owner: string         // Address
+  deadline?: string     // BigInt as string (canonical envelope upper bound)
+  validAfter?: string   // BigInt as string (canonical envelope lower bound)
+  cloid?: string
 }
 
 export interface CancelTriggerOrderToSign {
-  triggerOrderId: string
-  symbol: string
+  triggerOrderId?: string
+  symbol?: string
   nonce: string // BigInt as string
   owner: string // Address
+  deadline?: string // BigInt as string (canonical envelope upper bound)
+  validAfter?: string // BigInt as string (canonical envelope lower bound)
+  cloid?: string
 }
 
 export interface LocalWalletState {

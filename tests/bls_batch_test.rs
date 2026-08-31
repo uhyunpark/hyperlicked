@@ -5,9 +5,7 @@
 //! - One invalid signature causes batch to fail with fallback
 //! - Byzantine detection works correctly
 
-use hyperlicked::crypto::bls::{
-    verify_batch, verify_individually, BlsSecretKey, BlsSignature,
-};
+use hyperlicked::crypto::bls::{verify_batch, verify_individually, BlsSecretKey, BlsSignature};
 
 #[test]
 fn test_batch_verify_basic() {
@@ -89,11 +87,11 @@ fn test_verify_individually_multiple_invalid() {
     let mut signatures: Vec<BlsSignature> = vec![];
 
     // Sign different messages for some
-    signatures.push(keys[0].sign(message));      // Valid
-    signatures.push(keys[1].sign(b"wrong1"));    // Invalid
-    signatures.push(keys[2].sign(message));      // Valid
-    signatures.push(keys[3].sign(b"wrong2"));    // Invalid
-    signatures.push(keys[4].sign(message));      // Valid
+    signatures.push(keys[0].sign(message)); // Valid
+    signatures.push(keys[1].sign(b"wrong1")); // Invalid
+    signatures.push(keys[2].sign(message)); // Valid
+    signatures.push(keys[3].sign(b"wrong2")); // Invalid
+    signatures.push(keys[4].sign(message)); // Valid
 
     let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
     let pk_refs: Vec<_> = public_keys.iter().collect();
@@ -106,7 +104,10 @@ fn test_verify_individually_multiple_invalid() {
 fn test_empty_inputs() {
     // Empty arrays should fail gracefully
     assert!(!verify_batch(b"test", &[], &[]), "Empty should fail");
-    assert!(verify_individually(b"test", &[], &[]).is_empty(), "Empty should return empty");
+    assert!(
+        verify_individually(b"test", &[], &[]).is_empty(),
+        "Empty should return empty"
+    );
 }
 
 #[test]
@@ -116,7 +117,10 @@ fn test_mismatched_lengths() {
     let sig = sk.sign(b"test");
 
     // More signatures than keys
-    assert!(!verify_batch(b"test", &[&sig, &sig], &[&pk]), "Mismatched should fail");
+    assert!(
+        !verify_batch(b"test", &[&sig, &sig], &[&pk]),
+        "Mismatched should fail"
+    );
 
     // Should also fail individual
     let result = verify_individually(b"test", &[&sig, &sig], &[&pk]);

@@ -156,7 +156,7 @@ const handleSubmit = async () => {
   }
 
   const response = await submitOrder(order)
-  alert(`Order submitted! ID: ${response.orderId}`)
+  alert(`Order accepted! Transaction: ${response.tx_hash}`)
 }
 ```
 

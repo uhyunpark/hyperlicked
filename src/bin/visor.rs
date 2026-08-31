@@ -16,7 +16,7 @@
 //! hl-visor config
 //!
 //! # Manually add upgrade binary
-//! hl-visor add-upgrade v1.1.0 /path/to/hl-server
+//! hl-visor add-upgrade v1.1.0 /path/to/hl-node
 //!
 //! # Check upgrade status
 //! hl-visor upgrade-status
@@ -91,8 +91,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .init();
 
@@ -126,10 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Run the daemon with supervision
 async fn run_daemon(config: VisorConfig, is_validator: bool) -> anyhow::Result<()> {
-    info!(
-        "Starting hl-visor (validator={})",
-        is_validator
-    );
+    info!("Starting hl-visor (validator={})", is_validator);
 
     // Ensure directories exist
     config.ensure_dirs()?;
@@ -165,9 +161,7 @@ async fn run_daemon(config: VisorConfig, is_validator: bool) -> anyhow::Result<(
 
     // Run process manager in background
     let shutdown_signal = process_manager.shutdown_signal();
-    let process_handle = tokio::spawn(async move {
-        process_manager.run(stop_rx).await
-    });
+    let process_handle = tokio::spawn(async move { process_manager.run(stop_rx).await });
 
     // Main supervision loop
     let result = tokio::select! {
@@ -340,7 +334,11 @@ async fn init_visor(config: VisorConfig, binary: Option<&Path>) -> anyhow::Resul
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(version_dir, &current_link)?;
 
-        println!("Installed binary: {} -> {}", current_link.display(), version_dir.display());
+        println!(
+            "Installed binary: {} -> {}",
+            current_link.display(),
+            version_dir.display()
+        );
     }
 
     println!("\nVisor initialized successfully!");
@@ -355,7 +353,7 @@ async fn init_visor(config: VisorConfig, binary: Option<&Path>) -> anyhow::Resul
 
     if binary.is_none() {
         println!("\nNext steps:");
-        println!("  1. Add a binary: hl-visor add-upgrade v0.1.0 /path/to/hl-server");
+        println!("  1. Add a binary: hl-visor add-upgrade v0.1.0 /path/to/hl-node");
         println!("  2. Start the node: hl-visor run-non-validator");
     }
 

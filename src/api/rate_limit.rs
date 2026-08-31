@@ -70,7 +70,9 @@ struct RateLimitEntry {
 
 impl RateLimitEntry {
     fn new() -> Self {
-        Self { timestamps: Vec::new() }
+        Self {
+            timestamps: Vec::new(),
+        }
     }
 
     /// Check if request is allowed and record it if so
@@ -92,14 +94,20 @@ impl RateLimitEntry {
     /// Get remaining requests in current window
     fn remaining(&self, config: &RateLimitConfig, now: Instant) -> u32 {
         let window_start = now - config.window;
-        let recent_count = self.timestamps.iter().filter(|&&t| t > window_start).count();
+        let recent_count = self
+            .timestamps
+            .iter()
+            .filter(|&&t| t > window_start)
+            .count();
         config.max_requests.saturating_sub(recent_count as u32)
     }
 
     /// Get seconds until oldest request expires from window
     fn retry_after(&self, config: &RateLimitConfig, now: Instant) -> u64 {
         let window_start = now - config.window;
-        let oldest_in_window = self.timestamps.iter()
+        let oldest_in_window = self
+            .timestamps
+            .iter()
             .filter(|&&t| t > window_start)
             .min()
             .copied();
@@ -153,17 +161,20 @@ impl RateLimiter {
 
     /// Check rate limit for trading endpoint
     pub async fn check_trading(&self, ip: IpAddr) -> RateLimitResult {
-        self.check_impl(&self.trading_limits, ip, &self.trading_config).await
+        self.check_impl(&self.trading_limits, ip, &self.trading_config)
+            .await
     }
 
     /// Check rate limit for read endpoint
     pub async fn check_read(&self, ip: IpAddr) -> RateLimitResult {
-        self.check_impl(&self.read_limits, ip, &self.read_config).await
+        self.check_impl(&self.read_limits, ip, &self.read_config)
+            .await
     }
 
     /// Check rate limit for heavy endpoint
     pub async fn check_heavy(&self, ip: IpAddr) -> RateLimitResult {
-        self.check_impl(&self.heavy_limits, ip, &self.heavy_config).await
+        self.check_impl(&self.heavy_limits, ip, &self.heavy_config)
+            .await
     }
 
     async fn check_impl(
@@ -251,15 +262,9 @@ impl Default for RateLimiter {
 #[derive(Debug)]
 pub enum RateLimitResult {
     /// Request is allowed
-    Allowed {
-        remaining: u32,
-        limit: u32,
-    },
+    Allowed { remaining: u32, limit: u32 },
     /// Request is rate limited
-    Limited {
-        retry_after: u64,
-        limit: u32,
-    },
+    Limited { retry_after: u64, limit: u32 },
 }
 
 /// Shared rate limiter state
@@ -358,11 +363,7 @@ pub async fn rate_limit_heavy(
 }
 
 /// Add rate limit headers to response
-fn add_rate_limit_headers(
-    headers: &mut axum::http::HeaderMap,
-    remaining: u32,
-    limit: u32,
-) {
+fn add_rate_limit_headers(headers: &mut axum::http::HeaderMap, remaining: u32, limit: u32) {
     if let Ok(val) = HeaderValue::from_str(&limit.to_string()) {
         headers.insert("X-RateLimit-Limit", val);
     }
@@ -420,8 +421,14 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
         // First two should succeed
-        assert!(matches!(limiter.check_trading(ip).await, RateLimitResult::Allowed { .. }));
-        assert!(matches!(limiter.check_trading(ip).await, RateLimitResult::Allowed { .. }));
+        assert!(matches!(
+            limiter.check_trading(ip).await,
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            limiter.check_trading(ip).await,
+            RateLimitResult::Allowed { .. }
+        ));
 
         // Third should be limited
         let result = limiter.check_trading(ip).await;
@@ -442,12 +449,24 @@ mod tests {
         let ip2 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2));
 
         // First request from each IP should succeed
-        assert!(matches!(limiter.check_trading(ip1).await, RateLimitResult::Allowed { .. }));
-        assert!(matches!(limiter.check_trading(ip2).await, RateLimitResult::Allowed { .. }));
+        assert!(matches!(
+            limiter.check_trading(ip1).await,
+            RateLimitResult::Allowed { .. }
+        ));
+        assert!(matches!(
+            limiter.check_trading(ip2).await,
+            RateLimitResult::Allowed { .. }
+        ));
 
         // Second request from each IP should be limited
-        assert!(matches!(limiter.check_trading(ip1).await, RateLimitResult::Limited { .. }));
-        assert!(matches!(limiter.check_trading(ip2).await, RateLimitResult::Limited { .. }));
+        assert!(matches!(
+            limiter.check_trading(ip1).await,
+            RateLimitResult::Limited { .. }
+        ));
+        assert!(matches!(
+            limiter.check_trading(ip2).await,
+            RateLimitResult::Limited { .. }
+        ));
     }
 
     #[tokio::test]
@@ -482,6 +501,9 @@ mod tests {
         }
 
         // Fourth should be limited
-        assert!(matches!(limiter.check_trading(ip).await, RateLimitResult::Limited { .. }));
+        assert!(matches!(
+            limiter.check_trading(ip).await,
+            RateLimitResult::Limited { .. }
+        ));
     }
 }

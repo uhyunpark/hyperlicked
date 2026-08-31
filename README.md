@@ -2,34 +2,67 @@
 
 High performance blockchain built for perpdex inspired by Hyperliquid. Can also be used as a standalone perpdex starter.
 
+> **Local prototype warning:** The commands below run development binaries. `hl-node`,
+> `multinode`, and `hl-visor` are not production validator, RPC, or supervisor
+> deployments and must not be used to custody real funds or bridge real assets.
+
 ## Quick Start
 
-### Backend
+### Backend (local prototype)
 ```bash
-# Run API server (default port 8080)
-cargo run --bin hl-server
+# Start the canonical local single-node validator and API (API: 127.0.0.1:8080)
+./scripts/local-node
 
-# Run with custom config
-PORT=3000 BLOCK_TIME_MS=50 cargo run --bin hl-server
+# In another terminal, start the web client
+cd web && bun run dev
 
-# Run consensus-only node
-cargo run --bin hl-node
+# The launcher uses the public development-only validator0 BLS fixture seed.
+# Never use HL_LOCAL_BLS_SEED_1 or any value from config/local in production.
 
-# Build release
+# Optional: persist and restart the same local node with RocksDB
+hl_restart_dir="$(mktemp -d)"
+./scripts/local-node --blocks 3 --data-dir "$hl_restart_dir"
+./scripts/local-node --blocks 5 --data-dir "$hl_restart_dir"
+
+# Verified bootstrap: first start all four host-4 validators with their matching
+# HL_LOCAL_BLS_SEED_N values; wait until validator0's source API is ready, then stop
+# validator3 only. Keep validators0-2 running while restarting validator3 fresh:
+HL_LOCAL_BLS_SEED_4=04000000000000000000000000000000000000000000000000000000000000be \
+MODE=dev cargo run --locked --bin hl-node -- \
+  --genesis config/local/genesis.json --config config/local/host-4/node3.json \
+  --sync-peer http://127.0.0.1:8180 --data-dir "$(mktemp -d)"
+
+# Run the local three-node consensus demo in three terminals
+# (loopback, deterministic development keys)
+cargo run --bin multinode -- --node 0
+cargo run --bin multinode -- --node 1
+cargo run --bin multinode -- --node 2
+
+# Build binaries for local testing; this is not a production release process
 cargo build --release
 ```
 
-### Frontend
-```bash
-cd web && bun run dev
-```
+`./scripts/local-node`가 `MODE=dev`, `hl-node`, `--locked`, single-node genesis/config을
+자동으로 설정한다. 일반적인 로컬 실행에서는 사용자가 `--bin hl-node`, `--locked`,
+`--genesis`, `--config`를 직접 입력할 필요가 없다. `--data-dir`를 생략하면 chain domain과
+node ID에 묶인 `.hyperlicked/data/...` 경로가 사용된다. 4-validator Docker fixture와
+PoP/schema v2/BLS seed 설명은 [config/local README](config/local/README.md)에 있다. `--sync-peer`
+는 peer의 finalized block batch를 HTTP startup 단계에서 검증·replay하며, local genesis와
+trusted committee를 trust root로 사용한다. 잘못된 app hash, Commitment, QC 또는 incomplete
+snapshot은 fail closed한다.
 
-### Process Supervisor (Production)
+`./scripts/local-node`의 single-node 설정(`:8080`)은 source와 destination으로 동시에 띄울 수
+없다. 또한 현재 startup은 모든 configured peer가 ready여야 하므로, 4-validator fixture를
+먼저 모두 기동한 뒤 node3만 중지하고 재시작해야 한다. 위 예시는 같은
+`config/local/genesis.json`/committee를 사용하되 `host-4/node0.json`(`:8180`)과
+`host-4/node3.json`(`:8183`)으로 node와 API/consensus 포트를 분리한다.
+
+### Process Supervisor (local prototype)
 ```bash
-# Run as validator
+# Development process wrapper only; not production orchestration
 cargo run --bin hl-visor run-validator
 
-# Run as RPC node
+# Development process wrapper only; not production orchestration
 cargo run --bin hl-visor run-non-validator
 ```
 
@@ -40,31 +73,39 @@ cargo test
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODE` | dev | Runtime mode (dev/testnet/mainnet) |
-| `NODE_ROLE` | validator | Node role (validator/rpc) |
-| `PORT` | 8080 | API server port |
-| `BLOCK_TIME_MS` | 100 | Block interval (0 = max speed) |
-| `CONSENSUS_LOOP_DELAY_MS` | 10 | Delay between consensus rounds |
-| `LOG_BLOCKS` | false | Log empty heartbeat blocks |
-| `RUST_LOG` | info | Log level (error/warn/info/debug/trace) |
-| `DEV_FAUCET_AMOUNT` | 10000000 | Auto-fund new accounts (dev mode, cents) |
-| `DATA_DIR` | None | RocksDB persistence path |
-| `SNAPSHOT_INTERVAL` | 1000 | Snapshot every N blocks (0 = disabled) |
-| `SKIP_SIG_VERIFY` | false | Skip signature verification (dev only!) |
-| `ORACLE_ENABLED` | false | Enable oracle system (dev mode) |
-| `MM_ENABLED` | false | Enable market maker (dev mode) |
-| `MM_INTERVAL_MS` | 100 | Market maker tick interval |
-| `MM_INTENSITY` | medium | MM intensity: low/medium/high |
-| `MM_SEED` | 12345 | RNG seed for deterministic MM addresses |
-| `PEERS` | (empty) | Comma-separated peer URLs for sync |
-| `SYNC_POLL_INTERVAL_MS` | 1000 | Sync poll interval for RPC nodes |
+The canonical `hl-node` startup path uses only the small runtime surface below.
+Consensus/API addresses and peers belong in the node JSON, not environment variables.
+
+| Variable | Local default | Description |
+|----------|---------------|-------------|
+| `MODE` | `dev` in the launcher | `hl-node` currently refuses non-dev modes |
+| `HL_LOCAL_BLS_SEED_N` | public fixture in the launcher/Compose | 32-byte validator secret seed selected by the node JSON; never reuse the local values in production |
+| `RUST_LOG` | `warn` in `scripts/local-node` | Log filter (`info` shows every consensus round) |
+| `CONSENSUS_LOOP_DELAY_MS` | `10` | Delay between consensus rounds |
+
+Legacy settings such as `PORT`, `ORACLE_ENABLED`, and `MM_ENABLED` do not start separate
+services or mutation loops in the canonical node. Persistence is always enabled for
+`hl-node`; prefer the explicit `--data-dir` CLI option for local isolation. Oracle ingress
+and market-maker actions must use deterministic consensus transactions before production use.
 
 ## Documentation
 
 - **CLAUDE.md** - Development guidelines, architecture, AI instructions
 - **docs/blockchain/ROADMAP.md** - Current status and next steps
+- **docs/blockchain/MAINNET_READINESS.md** - Current architecture audit and launch gates
+- **docs/blockchain/WORKLOG_2026-08-11_HL_NODE_RUNTIME_INTEGRATION.md** - Canonical node/API integration record and local commands
+- **docs/blockchain/WORKLOG_2026-08-11_P0_MAINNET_HARDENING.md** - P0 domain, envelope, PoP, persistence, gossip, ActiveSync, and launch blockers
+- **docs/blockchain/WORKLOG_2026-08-12_COMMITMENT_V2_ARTIFACTS.md** - Historical deterministic receipt/event shadow artifact and indexer contract
+- **docs/blockchain/WORKLOG_2026-08-21_COMMITMENT_V2_CONSENSUS_ACTIVATION.md** - V5 block/QC activation, storage/recovery boundaries, performance, and remaining proof-serving work
+- **docs/blockchain/WORKLOG_2026-08-12_FULL_STATE_ROOT_SHADOW.md** - Versioned full-state shadow root, atomic restart verification, coverage audit, benchmark, and activation gates
+- **docs/blockchain/WORKLOG_2026-08-13_DERIVED_INDEX_INVARIANTS.md** - Atomic derived-index rebuild, execution-time invariant guards, state-root schema v2, regressions, benchmark, and remaining activation gates
+- **docs/blockchain/WORKLOG_2026-08-13_PRIMARY_STATE_INVARIANTS.md** - Primary state semantic validation, snapshot fail-closed boundaries, runtime mutation guards, performance tradeoffs, and remaining activation gates
+- **docs/blockchain/WORKLOG_2026-08-23_SPECULATIVE_STATE_COW.md** - Bounded speculative application snapshots, COW/sharding benchmark, and remaining memory work
+- **docs/blockchain/WORKLOG_2026-08-24_EQUIVOCATION_EVIDENCE_PIPELINE.md** - Deterministic double-vote evidence, durable delivery, curated committee binding, and remaining PoS work
+- **docs/blockchain/WORKLOG_2026-08-25_STATIC_CURATED_STAKING_HARDENING.md** - HYCK bonded power, top-21/static epoch safety, recovery checks, and unstake isolation
+- **docs/blockchain/WORKLOG_2026-08-25_HYCK_FIXED_SUPPLY_AND_TRANSITION_STAGING.md** - Fixed 1B HYCK supply, reserve-backed staking rewards, native accounting, and authenticated staged committee transitions
+- **docs/blockchain/WORKLOG_2026-08-26_VERIFIED_STATE_SYNC.md** - Replay-first HTTP bootstrap, terminal finality proof, authenticated roots, crash-resumable prefix import, and current limits
+- **docs/blockchain/HISTORICAL_COMMITTEE_AND_EPOCH_TRANSITION_PLAN.md** - Cross-epoch transition proof, historical evidence, and atomic activation plan
 
 ## Tech Stack
 

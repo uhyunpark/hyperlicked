@@ -5,20 +5,27 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! // Generate key pair
-//! let sk = BlsSecretKey::generate();
-//! let pk = sk.public_key();
+//! ```
+//! use hyperlicked::crypto::bls::{
+//!     aggregate_signatures, verify_aggregate, BlsSecretKey,
+//! };
 //!
-//! // Sign a message
-//! let sig = sk.sign(b"vote for block");
+//! # fn main() -> Result<(), hyperlicked::crypto::bls::BlsError> {
+//! let sk1 = BlsSecretKey::from_seed(&[1u8; 32]);
+//! let sk2 = BlsSecretKey::from_seed(&[2u8; 32]);
+//! let pk1 = sk1.public_key();
+//! let pk2 = sk2.public_key();
+//! let message = b"vote for block";
 //!
-//! // Verify
-//! assert!(pk.verify(b"vote for block", &sig));
+//! let sig1 = sk1.sign(message);
+//! let sig2 = sk2.sign(message);
+//! assert!(pk1.verify(message, &sig1));
+//! assert!(pk2.verify(message, &sig2));
 //!
-//! // Aggregate multiple signatures
-//! let agg_sig = aggregate_signatures(&[sig1, sig2, sig3])?;
-//! assert!(verify_aggregate(message, &agg_sig, &[pk1, pk2, pk3]));
+//! let aggregate = aggregate_signatures(&[sig1, sig2])?;
+//! assert!(verify_aggregate(message, &aggregate, &[pk1, pk2]));
+//! # Ok(())
+//! # }
 //! ```
 
 use blst::min_pk::{AggregatePublicKey, AggregateSignature, PublicKey, SecretKey, Signature};
@@ -26,6 +33,39 @@ use blst::BLST_ERROR;
 
 /// Domain separation tag for BLS signatures
 const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_HYPERLICKED_";
+
+/// Domain separation tag for proof-of-possession signatures.
+///
+/// This is intentionally different from [`DST`].  A proof of possession is
+/// a registration statement, not a consensus vote, and must never be
+/// interchangeable with an ordinary BLS signature.
+const POP_DST: &[u8] = b"HYPERLICKED_BLS_POP_V1";
+
+/// Fixed, versioned prefix for the proof-of-possession statement.
+///
+/// The remaining fields are fixed-width as well, so the signed message has no
+/// length ambiguity: prefix || chain domain || node id || compressed pubkey.
+const POP_MAGIC_VERSION: &[u8; 22] = b"HYPERLICKED_BLS_POP_V1";
+const POP_MESSAGE_LEN: usize = 22 + 32 + 32 + 48;
+
+fn proof_of_possession_message(
+    chain_domain: &[u8; 32],
+    node_id: &[u8; 32],
+    public_key: &[u8; 48],
+) -> [u8; POP_MESSAGE_LEN] {
+    let mut message = [0u8; POP_MESSAGE_LEN];
+    let mut offset = 0;
+
+    message[offset..offset + POP_MAGIC_VERSION.len()].copy_from_slice(POP_MAGIC_VERSION);
+    offset += POP_MAGIC_VERSION.len();
+    message[offset..offset + chain_domain.len()].copy_from_slice(chain_domain);
+    offset += chain_domain.len();
+    message[offset..offset + node_id.len()].copy_from_slice(node_id);
+    offset += node_id.len();
+    message[offset..offset + public_key.len()].copy_from_slice(public_key);
+
+    message
+}
 
 /// BLS secret key wrapper
 #[derive(Clone)]
@@ -61,6 +101,20 @@ impl BlsSecretKey {
         BlsSignature { inner: sig }
     }
 
+    /// Create a proof that this key controls the supplied node identity on a
+    /// specific chain domain.
+    pub fn create_proof_of_possession(
+        &self,
+        chain_domain: &[u8; 32],
+        node_id: &[u8; 32],
+    ) -> BlsProofOfPossession {
+        let public_key = self.public_key().to_bytes();
+        let message = proof_of_possession_message(chain_domain, node_id, &public_key);
+        let signature = self.inner.sign(&message, POP_DST, &[]);
+
+        BlsProofOfPossession { inner: signature }
+    }
+
     /// Serialize to 32 bytes
     pub fn to_bytes(&self) -> [u8; 32] {
         self.inner.to_bytes()
@@ -90,6 +144,22 @@ impl BlsPublicKey {
         signature
             .inner
             .verify(true, message, DST, &[], &self.inner, true)
+            == BLST_ERROR::BLST_SUCCESS
+    }
+
+    /// Verify a proof of possession for this key, node identity, and chain.
+    pub fn verify_proof_of_possession(
+        &self,
+        chain_domain: &[u8; 32],
+        node_id: &[u8; 32],
+        proof: &BlsProofOfPossession,
+    ) -> bool {
+        let public_key = self.to_bytes();
+        let message = proof_of_possession_message(chain_domain, node_id, &public_key);
+
+        proof
+            .inner
+            .verify(true, &message, POP_DST, &[], &self.inner, true)
             == BLST_ERROR::BLST_SUCCESS
     }
 }
@@ -123,6 +193,38 @@ impl BlsSignature {
     }
 }
 
+/// BLS proof-of-possession signature (96 bytes compressed G2 point).
+#[derive(Clone, Debug)]
+pub struct BlsProofOfPossession {
+    inner: Signature,
+}
+
+impl BlsProofOfPossession {
+    /// Serialize to 96 bytes.
+    pub fn to_bytes(&self) -> [u8; 96] {
+        self.inner.to_bytes()
+    }
+
+    /// Deserialize from exactly 96 bytes, preserving blst encoding and
+    /// subgroup validation.
+    pub fn from_bytes(bytes: &[u8; 96]) -> Result<Self, BlsError> {
+        let signature =
+            Signature::from_bytes(bytes).map_err(|_| BlsError::InvalidProofOfPossession)?;
+        Ok(Self { inner: signature })
+    }
+
+    /// Deserialize from a slice.  Any length other than 96 bytes is invalid.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, BlsError> {
+        if bytes.len() != 96 {
+            return Err(BlsError::InvalidProofOfPossession);
+        }
+
+        let mut serialized = [0u8; 96];
+        serialized.copy_from_slice(bytes);
+        Self::from_bytes(&serialized)
+    }
+}
+
 /// Aggregate multiple BLS signatures into one
 ///
 /// All signatures must be over the same message for the aggregated
@@ -133,7 +235,8 @@ pub fn aggregate_signatures(signatures: &[BlsSignature]) -> Result<BlsSignature,
     }
 
     let sigs: Vec<&Signature> = signatures.iter().map(|s| &s.inner).collect();
-    let agg = AggregateSignature::aggregate(&sigs, true).map_err(|_| BlsError::AggregationFailed)?;
+    let agg =
+        AggregateSignature::aggregate(&sigs, true).map_err(|_| BlsError::AggregationFailed)?;
 
     Ok(BlsSignature {
         inner: agg.to_signature(),
@@ -241,7 +344,13 @@ pub fn verify_individually(
         .iter()
         .zip(public_keys.iter())
         .enumerate()
-        .filter_map(|(i, (sig, pk))| if pk.verify(message, *sig) { Some(i) } else { None })
+        .filter_map(|(i, (sig, pk))| {
+            if pk.verify(message, *sig) {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -298,13 +407,15 @@ pub fn verify_multi_message(
         .zip(public_keys.iter())
         .zip(messages.iter())
         .enumerate()
-        .filter_map(|(i, ((sig, pk), msg))| {
-            if pk.verify(msg, sig) {
-                Some(i)
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(i, ((sig, pk), msg))| {
+                if pk.verify(msg, sig) {
+                    Some(i)
+                } else {
+                    None
+                }
+            },
+        )
         .collect()
 }
 
@@ -327,7 +438,11 @@ pub fn verify_multi_message(
             Use verify_aggregate_same_message for same-message verification, or \
             verify individual signatures before aggregation."
 )]
-pub fn batch_verify(_public_keys: &[BlsPublicKey], _messages: &[Vec<u8>], _agg_sig: &BlsSignature) -> bool {
+pub fn batch_verify(
+    _public_keys: &[BlsPublicKey],
+    _messages: &[Vec<u8>],
+    _agg_sig: &BlsSignature,
+) -> bool {
     // BLS aggregate signatures CANNOT be verified against different messages.
     // This function previously returned `true` unconditionally, which was a security bug.
     //
@@ -345,6 +460,8 @@ pub enum BlsError {
     InvalidPublicKey,
     #[error("invalid signature")]
     InvalidSignature,
+    #[error("invalid proof of possession")]
+    InvalidProofOfPossession,
     #[error("no signatures to aggregate")]
     NoSignatures,
     #[error("no public keys to aggregate")]
@@ -414,6 +531,39 @@ mod tests {
         let pk2 = BlsPublicKey::from_bytes(&bytes).unwrap();
 
         assert_eq!(pk.to_bytes(), pk2.to_bytes());
+    }
+
+    #[test]
+    fn test_proof_of_possession() {
+        let sk = BlsSecretKey::from_seed(&[7u8; 32]);
+        let other_sk = BlsSecretKey::from_seed(&[8u8; 32]);
+        let pk = sk.public_key();
+        let other_pk = other_sk.public_key();
+        let chain_domain = [0x11u8; 32];
+        let other_chain_domain = [0x22u8; 32];
+        let node_id = [0x33u8; 32];
+        let other_node_id = [0x44u8; 32];
+
+        let proof = sk.create_proof_of_possession(&chain_domain, &node_id);
+        assert!(pk.verify_proof_of_possession(&chain_domain, &node_id, &proof));
+
+        let serialized = proof.to_bytes();
+        assert_eq!(serialized.len(), 96);
+        let parsed = BlsProofOfPossession::from_bytes(&serialized).unwrap();
+        assert!(pk.verify_proof_of_possession(&chain_domain, &node_id, &parsed));
+
+        assert!(!pk.verify_proof_of_possession(&other_chain_domain, &node_id, &parsed));
+        assert!(!pk.verify_proof_of_possession(&chain_domain, &other_node_id, &parsed));
+        assert!(!other_pk.verify_proof_of_possession(&chain_domain, &node_id, &parsed));
+
+        let mut corrupted = serialized;
+        corrupted[0] ^= 0x01;
+        let corrupted_result = BlsProofOfPossession::from_bytes(&corrupted);
+        assert!(!corrupted_result
+            .is_ok_and(|proof| { pk.verify_proof_of_possession(&chain_domain, &node_id, &proof) }));
+
+        assert!(BlsProofOfPossession::from_slice(&serialized[..95]).is_err());
+        assert!(BlsProofOfPossession::from_slice(&[0u8; 97]).is_err());
     }
 
     #[test]
@@ -586,9 +736,9 @@ mod tests {
 
         // Sign correctly except one signs the wrong message
         let mut signatures: Vec<BlsSignature> = vec![];
-        signatures.push(keys[0].sign(&messages[0]));        // Valid
-        signatures.push(keys[1].sign(b"WRONG MESSAGE"));    // Invalid
-        signatures.push(keys[2].sign(&messages[2]));        // Valid
+        signatures.push(keys[0].sign(&messages[0])); // Valid
+        signatures.push(keys[1].sign(b"WRONG MESSAGE")); // Invalid
+        signatures.push(keys[2].sign(&messages[2])); // Valid
 
         let valid = verify_multi_message(&signatures, &public_keys, &messages);
         assert_eq!(valid, vec![0, 2], "Only indices 0 and 2 should be valid");
@@ -610,9 +760,9 @@ mod tests {
 
         // Create valid signatures, but one for wrong message
         let mut signatures: Vec<BlsSignature> = vec![];
-        signatures.push(keys[0].sign(message));      // Valid
+        signatures.push(keys[0].sign(message)); // Valid
         signatures.push(keys[1].sign(b"wrong msg")); // Invalid
-        signatures.push(keys[2].sign(message));      // Valid
+        signatures.push(keys[2].sign(message)); // Valid
 
         let sig_refs: Vec<&BlsSignature> = signatures.iter().collect();
         let pk_refs: Vec<&BlsPublicKey> = public_keys.iter().collect();

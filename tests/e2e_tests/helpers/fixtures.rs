@@ -2,9 +2,19 @@
 //!
 //! Provides TestContext and common constants for E2E tests.
 
+use hyperlicked::app::staking::HYCK_TREASURY_ADDRESS;
 use hyperlicked::app::AppState;
+use hyperlicked::app::Transaction;
 use hyperlicked::consensus::AppHook;
-use hyperlicked::types::Block;
+use hyperlicked::types::{Block, ConsensusConfig, ConsensusContext};
+
+fn test_context() -> ConsensusContext {
+    let mut config = ConsensusConfig::single_node();
+    config.genesis_hash = [9u8; 32];
+    config
+        .context()
+        .expect("single-node config must have a canonical context")
+}
 
 // =============================================================================
 // Constants
@@ -54,6 +64,7 @@ pub struct TestContext {
     pub state: AppState,
     block_height: u64,
     current_timestamp: u64,
+    last_block: Block,
 }
 
 impl TestContext {
@@ -64,10 +75,12 @@ impl TestContext {
         // SKIP_SIG_VERIFY: all e2e tests skip real signature verification.
         std::env::set_var("ADMIN_ADDRESS", ADMIN_ADDRESS);
         std::env::set_var("SKIP_SIG_VERIFY", "true");
+        let context = test_context();
         Self {
-            state: AppState::new(),
+            state: AppState::new_with_chain_domain([9u8; 32]),
             block_height: 0,
             current_timestamp: 1000,
+            last_block: Block::genesis(context),
         }
     }
 
@@ -79,7 +92,7 @@ impl TestContext {
     /// Create a context with pre-funded traders
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// let ctx = TestContext::with_traders(&[
     ///     ("alice", 100_000_000),
     ///     ("bob", 50_000_000),
@@ -120,21 +133,44 @@ impl TestContext {
 
     /// Execute a block at a specific timestamp
     pub fn execute_block_at(&mut self, timestamp: u64) -> Block {
+        assert!(
+            timestamp >= self.current_timestamp,
+            "test time cannot regress"
+        );
+        while timestamp.saturating_sub(self.current_timestamp)
+            > hyperlicked::types::MAX_BLOCK_TIMESTAMP_STEP_MS
+        {
+            let next = self.current_timestamp + hyperlicked::types::MAX_BLOCK_TIMESTAMP_STEP_MS;
+            let empty = bincode::serialize(&Vec::<hyperlicked::app::ConsensusTransaction>::new())
+                .expect("empty payload encodes");
+            self.execute_payload_at(next, empty);
+        }
+        let payload = self.state.prepare_payload(&self.last_block);
+        self.execute_payload_at(timestamp, payload)
+    }
+
+    fn execute_payload_at(&mut self, timestamp: u64, payload: Vec<u8>) -> Block {
         self.block_height += 1;
         self.current_timestamp = timestamp;
 
+        let context = test_context();
         let block = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: self.block_height,
             height: self.block_height,
-            parent: [0u8; 32],
-            payload: vec![],
+            parent: self.last_block.hash(),
+            payload,
             proposer: [0u8; 32],
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp,
             justify: None,
         };
 
         self.state.execute(&block);
+        self.last_block = block.clone();
         block
     }
 
@@ -150,10 +186,28 @@ impl TestContext {
 
     /// Get account balance
     pub fn balance(&self, trader: &str) -> i64 {
+        self.state.account(trader).map(|a| a.balance).unwrap_or(0)
+    }
+
+    /// Get a trader's liquid native HYCK balance in base units.
+    pub fn hyck_balance(&self, trader: &str) -> i64 {
         self.state
             .account(trader)
-            .map(|a| a.balance)
+            .map(|account| account.hyck_balance)
             .unwrap_or(0)
+    }
+
+    /// Fund a trader from the protocol treasury in the local development
+    /// fixture. Staking transactions consume native HYCK, not perp margin.
+    pub fn fund_hyck(&mut self, trader: &str, amount: i64) {
+        self.state
+            .submit_tx(Transaction::TransferHyck {
+                from: HYCK_TREASURY_ADDRESS.to_string(),
+                to: trader.to_string(),
+                amount,
+            })
+            .expect("treasury HYCK funding should be admitted");
+        self.execute_block();
     }
 
     /// Get position size for a trader/symbol
@@ -186,7 +240,12 @@ impl TestContext {
     pub fn bid_depth(&self, symbol: &str, limit: usize) -> Vec<(i64, i64)> {
         self.state
             .orderbook(symbol)
-            .map(|b| b.bid_levels(limit).into_iter().map(|l| (l.price, l.size)).collect())
+            .map(|b| {
+                b.bid_levels(limit)
+                    .into_iter()
+                    .map(|l| (l.price, l.size))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -194,7 +253,12 @@ impl TestContext {
     pub fn ask_depth(&self, symbol: &str, limit: usize) -> Vec<(i64, i64)> {
         self.state
             .orderbook(symbol)
-            .map(|b| b.ask_levels(limit).into_iter().map(|l| (l.price, l.size)).collect())
+            .map(|b| {
+                b.ask_levels(limit)
+                    .into_iter()
+                    .map(|l| (l.price, l.size))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }

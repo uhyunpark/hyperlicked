@@ -80,7 +80,10 @@ impl HealthChecker {
             Ok(json) => {
                 let height = json.get("height").and_then(|v| v.as_u64());
                 let view = json.get("view").and_then(|v| v.as_u64());
-                let msg = json.get("status").and_then(|v| v.as_str()).map(String::from);
+                let msg = json
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 (height, view, msg)
             }
             Err(_) => (None, None, None),

@@ -7,10 +7,64 @@
 //! - Price: i64 in cents (100 = $1.00)
 //! - Size/Volume: i64 in satoshis (100_000_000 = 1 unit)
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use serde::{Deserialize, Serialize};
-use crate::types::{Price, Size};
 use super::Symbol;
+use crate::types::{Price, Size};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+/// Runtime-only copy-on-write owner used for nested candle state.
+///
+/// Cloning a manager shares the allocation.  A mutable access detaches with
+/// `Arc::make_mut`, keeping sibling managers isolated without cloning every
+/// candle queue up front.
+#[derive(Debug, PartialEq, Eq)]
+struct CowShared<T>(Arc<T>);
+
+impl<T> Clone for CowShared<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T: Default> Default for CowShared<T> {
+    fn default() -> Self {
+        Self(Arc::new(T::default()))
+    }
+}
+
+impl<T> From<T> for CowShared<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T> Deref for CowShared<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl<T: Clone> DerefMut for CowShared<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<'a, T> IntoIterator for &'a CowShared<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <&'a T as IntoIterator>::Item;
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.as_ref().into_iter()
+    }
+}
 
 /// Maximum number of candles to keep per symbol/interval
 const MAX_CANDLES: usize = 10_000;
@@ -119,14 +173,14 @@ impl Candle {
 }
 
 /// Manages candle aggregation for all symbols and intervals
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CandleManager {
     /// Candles indexed by (symbol, interval)
-    candles: HashMap<(Symbol, Interval), VecDeque<Candle>>,
+    candles: CowShared<HashMap<(Symbol, Interval), CowShared<VecDeque<Candle>>>>,
     /// When true, add_trade() is a no-op (used during block replay)
     paused: bool,
     /// Tracks modified candle buckets since last flush: (symbol, interval, bucket_timestamp)
-    dirty: HashSet<(Symbol, Interval, u64)>,
+    dirty: CowShared<HashSet<(Symbol, Interval, u64)>>,
 }
 
 impl Default for CandleManager {
@@ -138,9 +192,9 @@ impl Default for CandleManager {
 impl CandleManager {
     pub fn new() -> Self {
         Self {
-            candles: HashMap::new(),
+            candles: CowShared::default(),
             paused: false,
-            dirty: HashSet::new(),
+            dirty: CowShared::default(),
         }
     }
 
@@ -168,9 +222,9 @@ impl CandleManager {
     /// Look up a specific candle by (symbol, interval, bucket_timestamp)
     pub fn get_candle(&self, symbol: &str, interval: Interval, timestamp: u64) -> Option<&Candle> {
         let key = (symbol.to_string(), interval);
-        self.candles.get(&key).and_then(|deque| {
-            deque.iter().find(|c| c.time == timestamp)
-        })
+        self.candles
+            .get(&key)
+            .and_then(|deque| deque.iter().find(|c| c.time == timestamp))
     }
 
     /// Bulk load candles from storage (used on startup)
@@ -179,7 +233,7 @@ impl CandleManager {
             return;
         }
         let key = (symbol.to_string(), interval);
-        let deque = self.candles.entry(key).or_insert_with(VecDeque::new);
+        let deque = self.candles.entry(key).or_insert_with(CowShared::default);
         for candle in candles {
             deque.push_back(candle);
         }
@@ -219,7 +273,7 @@ impl CandleManager {
     ) {
         let bucket = Self::bucket_time(timestamp, interval);
         let key = (symbol.to_string(), interval);
-        let candles = self.candles.entry(key).or_insert_with(VecDeque::new);
+        let candles = self.candles.entry(key).or_insert_with(CowShared::default);
 
         // Check if we should update the last candle or create a new one
         if let Some(last) = candles.back_mut() {
@@ -263,6 +317,7 @@ impl CandleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_bucket_time() {
@@ -273,8 +328,14 @@ mod tests {
         assert_eq!(CandleManager::bucket_time(120000, Interval::Min1), 120000);
 
         // 1h interval: 3600000ms buckets
-        assert_eq!(CandleManager::bucket_time(3600000, Interval::Hour1), 3600000);
-        assert_eq!(CandleManager::bucket_time(3600001, Interval::Hour1), 3600000);
+        assert_eq!(
+            CandleManager::bucket_time(3600000, Interval::Hour1),
+            3600000
+        );
+        assert_eq!(
+            CandleManager::bucket_time(3600001, Interval::Hour1),
+            3600000
+        );
     }
 
     #[test]
@@ -304,10 +365,10 @@ mod tests {
 
         let candles = manager.get_candles("BTC-USDT", Interval::Min1, 10);
         assert_eq!(candles.len(), 1);
-        assert_eq!(candles[0].open, 5_000_000);   // First trade
-        assert_eq!(candles[0].high, 5_100_000);   // Highest
-        assert_eq!(candles[0].low, 4_900_000);    // Lowest
-        assert_eq!(candles[0].close, 4_900_000);  // Last trade
+        assert_eq!(candles[0].open, 5_000_000); // First trade
+        assert_eq!(candles[0].high, 5_100_000); // Highest
+        assert_eq!(candles[0].low, 4_900_000); // Lowest
+        assert_eq!(candles[0].close, 4_900_000); // Last trade
         assert_eq!(candles[0].volume, 175_000_000); // Sum
         assert_eq!(candles[0].trades, 3);
     }
@@ -333,5 +394,80 @@ mod tests {
         assert_eq!(Interval::from_str("5m"), Some(Interval::Min5));
         assert_eq!(Interval::from_str("1h"), Some(Interval::Hour1));
         assert_eq!(Interval::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn cloned_manager_detaches_changed_queue_and_keeps_untouched_queue_shared() {
+        let mut parent = CandleManager::new();
+        parent.add_trade("BTC-USDT", 5_000_000, 100_000_000, 60_000);
+        parent.add_trade("ETH-USDT", 300_000, 200_000_000, 60_000);
+
+        let mut child = parent.clone();
+        let btc_key = ("BTC-USDT".to_string(), Interval::Min1);
+        let eth_key = ("ETH-USDT".to_string(), Interval::Min1);
+        assert!(Arc::ptr_eq(&parent.candles.0, &child.candles.0));
+
+        child.add_trade("BTC-USDT", 5_100_000, 50_000_000, 60_500);
+
+        assert_eq!(
+            parent
+                .get_latest_candle("BTC-USDT", Interval::Min1)
+                .unwrap()
+                .trades,
+            1
+        );
+        assert_eq!(
+            child
+                .get_latest_candle("BTC-USDT", Interval::Min1)
+                .unwrap()
+                .trades,
+            2
+        );
+        assert_eq!(
+            parent
+                .get_latest_candle("ETH-USDT", Interval::Min1)
+                .map(|candle| candle.trades),
+            child
+                .get_latest_candle("ETH-USDT", Interval::Min1)
+                .map(|candle| candle.trades)
+        );
+        assert!(!Arc::ptr_eq(
+            &parent.candles.get(&btc_key).unwrap().0,
+            &child.candles.get(&btc_key).unwrap().0
+        ));
+        assert!(Arc::ptr_eq(
+            &parent.candles.get(&eth_key).unwrap().0,
+            &child.candles.get(&eth_key).unwrap().0
+        ));
+
+        let sibling = parent.clone();
+        assert_eq!(
+            sibling
+                .get_latest_candle("BTC-USDT", Interval::Min1)
+                .unwrap()
+                .trades,
+            1
+        );
+    }
+
+    #[test]
+    fn cloned_manager_dirty_set_is_isolated() {
+        let mut parent = CandleManager::new();
+        parent.add_trade("BTC-USDT", 5_000_000, 100_000_000, 60_000);
+        let mut child = parent.clone();
+
+        child.add_trade("ETH-USDT", 300_000, 200_000_000, 60_000);
+
+        let parent_dirty = parent.take_dirty();
+        let child_dirty = child.take_dirty();
+        assert!(parent_dirty
+            .iter()
+            .all(|(symbol, _, _)| symbol == "BTC-USDT"));
+        assert!(child_dirty
+            .iter()
+            .any(|(symbol, _, _)| symbol == "ETH-USDT"));
+        assert!(parent_dirty
+            .iter()
+            .all(|(symbol, _, _)| symbol != "ETH-USDT"));
     }
 }

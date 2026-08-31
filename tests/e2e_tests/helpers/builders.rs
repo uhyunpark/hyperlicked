@@ -2,12 +2,13 @@
 //!
 //! Fluent builders for creating test transactions.
 
-use hyperlicked::app::{MarketConfig, OrderType, Side, Transaction, TriggerType};
 use hyperlicked::app::staking::{Evidence, EvidenceType};
+use hyperlicked::app::{MarketConfig, OrderType, Side, Transaction, TriggerType};
 use hyperlicked::crypto::bls::BlsSecretKey;
-use hyperlicked::types::Certificate;
+use hyperlicked::types::{Certificate, ConsensusContext};
 
 use super::fixtures::{BTC_SYMBOL, DEFAULT_BTC_PRICE, ONE_BTC};
+use hyperlicked::app::staking::HYCK_TREASURY_ADDRESS;
 
 // =============================================================================
 // OrderBuilder
@@ -136,6 +137,45 @@ impl DepositBuilder {
     pub fn build(self) -> Transaction {
         Transaction::Deposit {
             trader: self.trader,
+            amount: self.amount,
+        }
+    }
+}
+
+// =============================================================================
+// NativeHyckTransferBuilder
+// =============================================================================
+
+/// Fluent builder for local-dev treasury-funded native HYCK transfers.
+///
+/// Staking tests must fund the native HYCK ledger rather than perp collateral.
+/// The treasury is protocol-owned, so this remains an explicit system-path
+/// transaction in the development fixture.
+pub struct NativeHyckTransferBuilder {
+    to: String,
+    amount: i64,
+}
+
+impl NativeHyckTransferBuilder {
+    /// Create a treasury-funded transfer for a recipient.
+    pub fn new(to: &str) -> Self {
+        Self {
+            to: to.into(),
+            amount: 0,
+        }
+    }
+
+    /// Set the transfer amount in native HYCK base units.
+    pub fn amount(mut self, amount: i64) -> Self {
+        self.amount = amount;
+        self
+    }
+
+    /// Build the native HYCK transfer transaction.
+    pub fn build(self) -> Transaction {
+        Transaction::TransferHyck {
+            from: HYCK_TREASURY_ADDRESS.to_string(),
+            to: self.to,
             amount: self.amount,
         }
     }
@@ -297,9 +337,32 @@ impl TriggerOrderBuilder {
 pub struct ValidatorBuilder {
     operator: String,
     node_id: [u8; 32],
+    bls_secret_key: BlsSecretKey,
     bls_pubkey: Vec<u8>,
     self_stake: i64,
     commission_bps: i64,
+}
+
+fn deterministic_bls_secret_key(node_id: [u8; 32]) -> BlsSecretKey {
+    // Test-only deterministic credentials.  The seed convention matches
+    // `test_bls_keypair`, while the PoP still binds the complete node ID and
+    // the local development chain domain.
+    let mut seed = [0u8; 32];
+    seed[0] = node_id[0].max(1);
+    BlsSecretKey::from_seed(&seed)
+}
+
+/// Return valid test credentials for a validator on the local development
+/// chain. The proof binds the non-zero test chain domain used by
+/// `TestContext`.
+pub fn test_validator_credentials(node_id: [u8; 32]) -> (Vec<u8>, Vec<u8>) {
+    let secret_key = deterministic_bls_secret_key(node_id);
+    let public_key = secret_key.public_key().to_bytes().to_vec();
+    let proof = secret_key
+        .create_proof_of_possession(&[9u8; 32], &node_id)
+        .to_bytes()
+        .to_vec();
+    (public_key, proof)
 }
 
 impl ValidatorBuilder {
@@ -307,13 +370,16 @@ impl ValidatorBuilder {
     pub fn new(operator: &str) -> Self {
         let mut node_id = [0u8; 32];
         node_id[0] = operator.len() as u8;
+        let bls_secret_key = deterministic_bls_secret_key(node_id);
+        let bls_pubkey = bls_secret_key.public_key().to_bytes().to_vec();
 
         Self {
             operator: operator.into(),
             node_id,
-            bls_pubkey: vec![0u8; 48], // Dummy BLS pubkey
-            self_stake: 10_000_000,     // $100k default
-            commission_bps: 1000,       // 10% default
+            bls_secret_key,
+            bls_pubkey,
+            self_stake: 10_000_000, // $100k default
+            commission_bps: 1000,   // 10% default
         }
     }
 
@@ -332,11 +398,18 @@ impl ValidatorBuilder {
     /// Set a specific node ID
     pub fn with_node_id(mut self, node_id: [u8; 32]) -> Self {
         self.node_id = node_id;
+        self.bls_secret_key = deterministic_bls_secret_key(node_id);
+        self.bls_pubkey = self.bls_secret_key.public_key().to_bytes().to_vec();
         self
     }
 
     /// Set BLS public key bytes
     pub fn with_bls_pubkey(mut self, bls_pubkey: Vec<u8>) -> Self {
+        assert_eq!(
+            bls_pubkey,
+            self.bls_secret_key.public_key().to_bytes().to_vec(),
+            "test validator public key must match the deterministic test secret"
+        );
         self.bls_pubkey = bls_pubkey;
         self
     }
@@ -347,6 +420,11 @@ impl ValidatorBuilder {
             operator: self.operator,
             node_id: self.node_id,
             bls_pubkey: self.bls_pubkey,
+            bls_proof_of_possession: self
+                .bls_secret_key
+                .create_proof_of_possession(&[9u8; 32], &self.node_id)
+                .to_bytes()
+                .to_vec(),
             self_stake: self.self_stake,
             commission_bps: self.commission_bps,
         }
@@ -467,13 +545,19 @@ pub fn test_bls_keypair(seed: u8) -> (BlsSecretKey, Vec<u8>, [u8; 32]) {
 }
 
 /// Create valid double-vote evidence with real BLS signatures
-pub fn create_valid_evidence(sk: &BlsSecretKey, node_id: [u8; 32], height: u64) -> Evidence {
+pub fn create_valid_evidence(
+    context: ConsensusContext,
+    sk: &BlsSecretKey,
+    node_id: [u8; 32],
+    view: u64,
+) -> Evidence {
     let hash_a = [1u8; 32];
     let hash_b = [2u8; 32];
-    let zero_app_hash = [0u8; 32];
+    let app_hash_a = [0x11u8; 32];
+    let app_hash_b = [0x22u8; 32];
 
-    let msg_a = Certificate::build_signing_message(height, &hash_a, &zero_app_hash);
-    let msg_b = Certificate::build_signing_message(height, &hash_b, &zero_app_hash);
+    let msg_a = Certificate::build_signing_message(context, view, &hash_a, &app_hash_a);
+    let msg_b = Certificate::build_signing_message(context, view, &hash_b, &app_hash_b);
 
     let sig_a = sk.sign(&msg_a);
     let sig_b = sk.sign(&msg_b);
@@ -481,10 +565,13 @@ pub fn create_valid_evidence(sk: &BlsSecretKey, node_id: [u8; 32], height: u64) 
     Evidence {
         evidence_type: EvidenceType::DoubleVote,
         offender: node_id,
-        height,
-        timestamp: 1000,
+        view,
+        timestamp: 0,
+        context,
         hash_a,
+        app_hash_a,
         hash_b,
+        app_hash_b,
         signature_a: sig_a.to_bytes().to_vec(),
         signature_b: sig_b.to_bytes().to_vec(),
     }

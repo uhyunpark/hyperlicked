@@ -15,10 +15,18 @@ fn test_withdraw_blocked_when_undermargined() {
 
     // Fund Alice with small deposit and open a position
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(SMALL_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(SMALL_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -50,7 +58,11 @@ fn test_withdraw_blocked_when_undermargined() {
 
     // Try to withdraw most of the remaining balance (should fail due to margin req)
     ctx.state
-        .submit_tx(WithdrawBuilder::new(TRADER_ALICE).amount(balance_before).build())
+        .submit_tx(
+            WithdrawBuilder::new(TRADER_ALICE)
+                .amount(balance_before)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -91,7 +103,11 @@ fn test_withdraw_allowed_when_well_margined() {
     let small_withdraw = 1000; // $10
     let balance_before = ctx.balance(TRADER_ALICE);
     ctx.state
-        .submit_tx(WithdrawBuilder::new(TRADER_ALICE).amount(small_withdraw).build())
+        .submit_tx(
+            WithdrawBuilder::new(TRADER_ALICE)
+                .amount(small_withdraw)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -105,7 +121,11 @@ fn test_withdraw_no_positions_always_ok() {
 
     let withdraw_amount = DEFAULT_DEPOSIT / 2;
     ctx.state
-        .submit_tx(WithdrawBuilder::new(TRADER_ALICE).amount(withdraw_amount).build())
+        .submit_tx(
+            WithdrawBuilder::new(TRADER_ALICE)
+                .amount(withdraw_amount)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 

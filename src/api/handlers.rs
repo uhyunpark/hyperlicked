@@ -22,10 +22,12 @@ pub async fn register_delegation(
     Json(req): Json<RegisterDelegationRequest>,
 ) -> Result<Json<RegisterDelegationResponse>, (StatusCode, String)> {
     // Parse addresses
-    let wallet: Address = req
-        .wallet
-        .parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid wallet address".to_string()))?;
+    let wallet: Address = req.wallet.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet address".to_string(),
+        )
+    })?;
     let agent: Address = req
         .agent
         .parse()
@@ -114,7 +116,11 @@ pub async fn submit_order_legacy(
         reduce_only: false,
     };
 
-    let mut app = state.shared.app.write().await;
+    let mut app = state
+        .shared
+        .app
+        .write()
+        .expect("application state lock poisoned");
     match app.submit_tx(tx) {
         Ok(hash) => Json(serde_json::json!({
             "success": true,
@@ -136,7 +142,11 @@ pub async fn deposit(
         amount: req.amount,
     };
 
-    let mut app = state.shared.app.write().await;
+    let mut app = state
+        .shared
+        .app
+        .write()
+        .expect("application state lock poisoned");
     match app.submit_tx(tx) {
         Ok(_) => Json(serde_json::json!({"success": true})),
         Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),
@@ -152,7 +162,11 @@ pub async fn withdraw(
         amount: req.amount,
     };
 
-    let mut app = state.shared.app.write().await;
+    let mut app = state
+        .shared
+        .app
+        .write()
+        .expect("application state lock poisoned");
     match app.submit_tx(tx) {
         Ok(_) => Json(serde_json::json!({"success": true})),
         Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),

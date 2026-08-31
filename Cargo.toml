@@ -3,12 +3,15 @@ name = "hyperlicked"
 version = "0.1.0"
 edition = "2021"
 description = "Hyperlicked - high-performance perpetual futures exchange"
+default-run = "hl-node"
 
 [features]
 default = ["bls_batch_verify"]
 parallel_matching = ["rayon"]
-incremental_hash = []
 bls_batch_verify = []
+# Compatibility-only in-memory consensus engine. Production runtimes use
+# `ConsensusRunner`; keep this opt-in so the legacy API is absent by default.
+legacy-engine = []
 
 [[bin]]
 name = "hl-node"
@@ -19,12 +22,16 @@ name = "multinode"
 path = "src/bin/multinode.rs"
 
 [[bin]]
-name = "hl-server"
-path = "src/bin/server.rs"
-
-[[bin]]
 name = "hl-visor"
 path = "src/bin/visor.rs"
+
+[[bench]]
+name = "commitment_v2"
+harness = false
+
+[[bench]]
+name = "state_cow"
+harness = false
 
 [dependencies]
 # Async runtime

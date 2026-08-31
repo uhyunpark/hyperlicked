@@ -1,27 +1,32 @@
-import { useTradingStore } from '../store'
-import { convertPrice, convertSize } from '../api'
 import { toast } from '@/components/ui/Toast'
+import { convertPrice, convertSize } from '../api'
+import { useTradingStore } from '../store'
 import type { OrderbookData } from '../types'
+import type { PendingSubscription } from './subscriptionAuth'
 import type {
-  WSOrderbookUpdate,
-  WSTradeUpdate,
-  WSUserFill,
-  WSPositionUpdate,
+  WSAssetCtx,
+  WSAutoDeleveraged,
   WSFundingPayment,
   WSLiquidated,
-  WSAutoDeleveraged,
   WSMarkPriceUpdate,
-  WSAssetCtx,
+  WSOrderbookUpdate,
+  WSOrderClosed,
+  WSPositionUpdate,
+  WSSubscribed,
+  WSSubscriptionError,
+  WSTradeUpdate,
+  WSTransactionFinalized,
+  WSTriggerOrderCancelled,
   WSTriggerOrderPlaced,
   WSTriggerOrderTriggered,
-  WSTriggerOrderCancelled,
-  WSOrderClosed,
-  WSSubscribed,
+  WSUserFill,
 } from './types'
 
 interface HandlerDependencies {
   fetchUserData: (address: string) => Promise<void>
   subscribedAddressRef: React.MutableRefObject<string | null>
+  pendingSubscriptionRef: React.MutableRefObject<PendingSubscription | null>
+  socket: WebSocket
 }
 
 export function handleOrderbook(data: WSOrderbookUpdate) {
@@ -55,6 +60,8 @@ export function handleUserFill(
   data: WSUserFill,
   deps: HandlerDependencies
 ) {
+  if (!deps.subscribedAddressRef.current) return
+
   useTradingStore.getState().addUserFill({
     id: data.orderId,
     symbol: data.symbol,
@@ -65,6 +72,24 @@ export function handleUserFill(
     isMaker: data.isMaker,
     timestamp: data.timestamp,
   })
+  if (deps.subscribedAddressRef.current) {
+    deps.fetchUserData(deps.subscribedAddressRef.current)
+  }
+}
+
+/**
+ * Refresh user state only after the node has durably committed the receipt.
+ * The receipt itself remains available to clients through the transaction API;
+ * this notification deliberately does not infer a semantic UI event.
+ */
+export function handleTransactionFinalized(
+  data: WSTransactionFinalized,
+  deps: HandlerDependencies
+) {
+  if (!deps.subscribedAddressRef.current) return
+
+  console.log('[ws] Transaction finalized:', data.tx_hash)
+  useTradingStore.getState().triggerBalanceRefresh()
   if (deps.subscribedAddressRef.current) {
     deps.fetchUserData(deps.subscribedAddressRef.current)
   }
@@ -223,7 +248,27 @@ export function handleSubscribed(
   deps: HandlerDependencies
 ) {
   if (data.channel === 'user') {
+    const pending = deps.pendingSubscriptionRef.current
+    if (!pending || pending.socket !== deps.socket || pending.address !== data.address.toLowerCase()) {
+      return
+    }
+
+    deps.pendingSubscriptionRef.current = null
     deps.subscribedAddressRef.current = data.address
     deps.fetchUserData(data.address)
   }
+}
+
+export function handleSubscriptionError(
+  data: WSSubscriptionError,
+  deps: HandlerDependencies,
+) {
+  if (data.code !== 'AUTH_REQUIRED') return
+
+  const pending = deps.pendingSubscriptionRef.current
+  if (pending && pending.socket !== deps.socket) return
+
+  deps.pendingSubscriptionRef.current = null
+  deps.subscribedAddressRef.current = null
+  toast.error('Private updates unavailable', data.message || 'Wallet signature was rejected or expired')
 }

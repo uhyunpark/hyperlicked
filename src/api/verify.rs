@@ -5,15 +5,14 @@
 
 use alloy_primitives::{Address, U256};
 
-use crate::config::Config;
 use crate::crypto::{
     verify_agent_order, AddMarketEIP712, AgentSigner, CancelEIP712, CancelTriggerOrderEIP712,
     EIP712Signer, OrderEIP712, TriggerOrderEIP712,
 };
 
 use super::types::{
-    AddMarketRequest, CancelTriggerOrderRequest, OrderDetails, PlaceTriggerOrderRequest,
-    SignedTransaction, StoredDelegation,
+    AddMarketRequest, ApiSecurityPolicy, CancelTriggerOrderRequest, OrderDetails,
+    PlaceTriggerOrderRequest, SignedTransaction, StoredDelegation,
 };
 
 /// Result of successful order verification
@@ -25,6 +24,8 @@ pub struct VerifiedOrder {
     pub price: i64,
     pub size: i64,
     pub nonce: u64,
+    pub valid_after: u64,
+    pub valid_until: u64,
     pub reduce_only: bool,
 }
 
@@ -33,6 +34,11 @@ pub struct VerifiedCancel {
     pub owner: Address,
     pub order_id: String,
     pub nonce: u64,
+    pub valid_after: u64,
+    /// Legacy cancel messages have no expiry field.  A canonical envelope
+    /// therefore must provide a separate canonical signature path; this is
+    /// zero for legacy verification and is rejected before consensus submit.
+    pub valid_until: u64,
 }
 
 /// Result of successful trigger order verification
@@ -45,6 +51,8 @@ pub struct VerifiedTriggerOrder {
     pub limit_price: Option<i64>,
     #[allow(dead_code)] // Used for verification only, not consumed by route
     pub nonce: u64,
+    pub valid_after: u64,
+    pub valid_until: u64,
     pub cloid: Option<String>,
 }
 
@@ -56,6 +64,8 @@ pub struct VerifiedCancelTriggerOrder {
     pub cloid: Option<String>,
     #[allow(dead_code)] // Used for verification only, not consumed by route
     pub nonce: u64,
+    pub valid_after: u64,
+    pub valid_until: u64,
 }
 
 /// Verification errors
@@ -85,6 +95,21 @@ pub enum VerifyError {
     DelegationNotFound,
     #[error("agent error: {0}")]
     AgentError(String),
+    #[error("unsupported signature scheme: {0}; use eip712-v1")]
+    UnsupportedSignatureScheme(String),
+}
+
+pub fn uses_canonical_signature(scheme: Option<&str>) -> bool {
+    matches!(scheme, Some("eip712-v1"))
+}
+
+fn validate_signature_scheme(scheme: Option<&str>) -> Result<(), VerifyError> {
+    if let Some(scheme) = scheme {
+        if scheme != "eip712-v1" {
+            return Err(VerifyError::UnsupportedSignatureScheme(scheme.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Verify an order signature and extract verified data
@@ -97,7 +122,9 @@ pub fn verify_order(
     agent_signer: &AgentSigner,
     delegation: Option<&StoredDelegation>,
     block_timestamp_ms: u64,
+    security_policy: &ApiSecurityPolicy,
 ) -> Result<VerifiedOrder, VerifyError> {
+    validate_signature_scheme(tx.signature_scheme.as_deref())?;
     let order = tx.order.as_ref().ok_or(VerifyError::MissingOrder)?;
 
     // Parse signature
@@ -111,11 +138,20 @@ pub fn verify_order(
     let order_eip712 = build_order_eip712(order, owner)?;
 
     // Verify based on mode (direct or agent)
-    if tx.agent_mode.unwrap_or(false) {
-        verify_agent_order_sig(&order_eip712, &signature, delegation, eip712, agent_signer, block_timestamp_ms)?;
+    if tx.agent_mode.unwrap_or(false) && !uses_canonical_signature(tx.signature_scheme.as_deref()) {
+        verify_agent_order_sig(
+            &order_eip712,
+            &signature,
+            delegation,
+            eip712,
+            agent_signer,
+            block_timestamp_ms,
+        )?;
     } else {
         // Skip verification in dev mode if configured
-        if !Config::global().skip_signature_verification {
+        if !uses_canonical_signature(tx.signature_scheme.as_deref())
+            && !security_policy.skip_signature_verification
+        {
             let valid = eip712
                 .verify_order_signature(&order_eip712, &signature)
                 .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
@@ -127,8 +163,21 @@ pub fn verify_order(
 
     // Parse numeric fields
     let price: i64 = order.price.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let size: i64 = order.qty.parse().map_err(|_| VerifyError::InvalidQuantity)?;
+    let size: i64 = order
+        .qty
+        .parse()
+        .map_err(|_| VerifyError::InvalidQuantity)?;
     let nonce: u64 = order.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_after = order
+        .valid_after
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_until: u64 = order
+        .deadline
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
 
     Ok(VerifiedOrder {
         owner,
@@ -138,6 +187,8 @@ pub fn verify_order(
         price,
         size,
         nonce,
+        valid_after,
+        valid_until,
         reduce_only: order.reduce_only.unwrap_or(false),
     })
 }
@@ -146,7 +197,9 @@ pub fn verify_order(
 pub fn verify_cancel(
     tx: &SignedTransaction,
     eip712: &EIP712Signer,
+    security_policy: &ApiSecurityPolicy,
 ) -> Result<VerifiedCancel, VerifyError> {
+    validate_signature_scheme(tx.signature_scheme.as_deref())?;
     let cancel = tx.cancel.as_ref().ok_or(VerifyError::MissingCancel)?;
 
     // Parse signature
@@ -154,7 +207,10 @@ pub fn verify_cancel(
     let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
 
     // Parse owner address
-    let owner: Address = cancel.owner.parse().map_err(|_| VerifyError::InvalidOwner)?;
+    let owner: Address = cancel
+        .owner
+        .parse()
+        .map_err(|_| VerifyError::InvalidOwner)?;
 
     // Build CancelEIP712
     let cancel_eip712 = CancelEIP712 {
@@ -165,7 +221,9 @@ pub fn verify_cancel(
     };
 
     // Skip verification in dev mode if configured
-    if !Config::global().skip_signature_verification {
+    if !uses_canonical_signature(tx.signature_scheme.as_deref())
+        && !security_policy.skip_signature_verification
+    {
         let valid = eip712
             .verify_cancel_signature(&cancel_eip712, &signature)
             .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
@@ -174,12 +232,29 @@ pub fn verify_cancel(
         }
     }
 
-    let nonce: u64 = cancel.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+    let nonce: u64 = cancel
+        .nonce
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_after = cancel
+        .valid_after
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_until = cancel
+        .deadline
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
 
     Ok(VerifiedCancel {
         owner,
         order_id: cancel.order_id.clone(),
         nonce,
+        valid_after,
+        valid_until,
     })
 }
 
@@ -205,7 +280,9 @@ pub fn verify_trigger_order(
     agent_signer: &AgentSigner,
     delegation: Option<&StoredDelegation>,
     block_timestamp_ms: u64,
+    security_policy: &ApiSecurityPolicy,
 ) -> Result<VerifiedTriggerOrder, VerifyError> {
+    validate_signature_scheme(req.signature_scheme.as_deref())?;
     let trigger = &req.trigger;
 
     // Parse signature
@@ -213,7 +290,10 @@ pub fn verify_trigger_order(
     let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
 
     // Parse owner address
-    let owner: Address = trigger.owner.parse().map_err(|_| VerifyError::InvalidOwner)?;
+    let owner: Address = trigger
+        .owner
+        .parse()
+        .map_err(|_| VerifyError::InvalidOwner)?;
 
     // Build TriggerOrderEIP712 for verification
     let trigger_eip712 = TriggerOrderEIP712 {
@@ -221,21 +301,27 @@ pub fn verify_trigger_order(
         trigger_type: trigger.trigger_type,
         trigger_price: U256::from_str_radix(&trigger.trigger_price, 10)
             .map_err(|_| VerifyError::InvalidTriggerPrice)?,
-        size: U256::from_str_radix(&trigger.size, 10)
-            .map_err(|_| VerifyError::InvalidSize)?,
+        size: U256::from_str_radix(&trigger.size, 10).map_err(|_| VerifyError::InvalidSize)?,
         limit_price: U256::from_str_radix(&trigger.limit_price, 10)
             .map_err(|_| VerifyError::InvalidPrice)?,
-        nonce: U256::from_str_radix(&trigger.nonce, 10)
-            .map_err(|_| VerifyError::InvalidNonce)?,
+        nonce: U256::from_str_radix(&trigger.nonce, 10).map_err(|_| VerifyError::InvalidNonce)?,
         owner,
     };
 
     // Verify based on mode (direct or agent)
-    if req.agent_mode.unwrap_or(false) {
+    if req.agent_mode.unwrap_or(false) && !uses_canonical_signature(req.signature_scheme.as_deref())
+    {
         verify_agent_trigger_order_sig(
-            &trigger_eip712, &signature, delegation, eip712, agent_signer, block_timestamp_ms,
+            &trigger_eip712,
+            &signature,
+            delegation,
+            eip712,
+            agent_signer,
+            block_timestamp_ms,
         )?;
-    } else if !Config::global().skip_signature_verification {
+    } else if !uses_canonical_signature(req.signature_scheme.as_deref())
+        && !security_policy.skip_signature_verification
+    {
         let valid = eip712
             .verify_trigger_order_signature(&trigger_eip712, &signature)
             .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
@@ -245,11 +331,36 @@ pub fn verify_trigger_order(
     }
 
     // Parse numeric fields
-    let trigger_price: i64 = trigger.trigger_price.parse().map_err(|_| VerifyError::InvalidTriggerPrice)?;
+    let trigger_price: i64 = trigger
+        .trigger_price
+        .parse()
+        .map_err(|_| VerifyError::InvalidTriggerPrice)?;
     let size: i64 = trigger.size.parse().map_err(|_| VerifyError::InvalidSize)?;
-    let limit_price_raw: i64 = trigger.limit_price.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let limit_price = if limit_price_raw == 0 { None } else { Some(limit_price_raw) };
-    let nonce: u64 = trigger.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+    let limit_price_raw: i64 = trigger
+        .limit_price
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let limit_price = if limit_price_raw == 0 {
+        None
+    } else {
+        Some(limit_price_raw)
+    };
+    let nonce: u64 = trigger
+        .nonce
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_after = trigger
+        .valid_after
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_until = trigger
+        .deadline
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
 
     Ok(VerifiedTriggerOrder {
         owner,
@@ -259,6 +370,8 @@ pub fn verify_trigger_order(
         size,
         limit_price,
         nonce,
+        valid_after,
+        valid_until,
         cloid: trigger.cloid.clone(),
     })
 }
@@ -267,7 +380,9 @@ pub fn verify_trigger_order(
 pub fn verify_cancel_trigger_order(
     req: &CancelTriggerOrderRequest,
     eip712: &EIP712Signer,
+    security_policy: &ApiSecurityPolicy,
 ) -> Result<VerifiedCancelTriggerOrder, VerifyError> {
+    validate_signature_scheme(req.signature_scheme.as_deref())?;
     let cancel = &req.cancel;
 
     // Parse signature
@@ -275,7 +390,10 @@ pub fn verify_cancel_trigger_order(
     let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
 
     // Parse owner address
-    let owner: Address = cancel.owner.parse().map_err(|_| VerifyError::InvalidOwner)?;
+    let owner: Address = cancel
+        .owner
+        .parse()
+        .map_err(|_| VerifyError::InvalidOwner)?;
 
     // Build CancelTriggerOrderEIP712 — use trigger_order_id if present, else cloid
     let id_for_signing = cancel.trigger_order_id.clone().unwrap_or_default();
@@ -289,7 +407,9 @@ pub fn verify_cancel_trigger_order(
     };
 
     // Skip verification in dev mode if configured
-    if !Config::global().skip_signature_verification {
+    if !uses_canonical_signature(req.signature_scheme.as_deref())
+        && !security_policy.skip_signature_verification
+    {
         let valid = eip712
             .verify_cancel_trigger_order_signature(&cancel_eip712, &signature)
             .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
@@ -298,7 +418,22 @@ pub fn verify_cancel_trigger_order(
         }
     }
 
-    let nonce: u64 = cancel.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+    let nonce: u64 = cancel
+        .nonce
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_after = cancel
+        .valid_after
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_until = cancel
+        .deadline
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
 
     Ok(VerifiedCancelTriggerOrder {
         owner,
@@ -306,6 +441,8 @@ pub fn verify_cancel_trigger_order(
         symbol: cancel.symbol.clone(),
         cloid: cancel.cloid.clone(),
         nonce,
+        valid_after,
+        valid_until,
     })
 }
 
@@ -346,7 +483,9 @@ fn verify_agent_trigger_order_sig(
         .verify_delegation(&stored.delegation, &stored.signature)
         .map_err(|e| VerifyError::AgentError(e.to_string()))?;
     if !valid {
-        return Err(VerifyError::AgentError("invalid delegation signature".to_string()));
+        return Err(VerifyError::AgentError(
+            "invalid delegation signature".to_string(),
+        ));
     }
 
     // Verify trigger order owner matches delegation wallet
@@ -370,13 +509,18 @@ pub struct VerifiedAddMarket {
     pub maker_fee: i64,
     pub taker_fee: i64,
     pub initial_mark_price: i64,
+    pub nonce: u64,
+    pub valid_after: u64,
+    pub valid_until: u64,
 }
 
 /// Verify an add market request signature
 pub fn verify_add_market(
     req: &AddMarketRequest,
     eip712: &EIP712Signer,
+    security_policy: &ApiSecurityPolicy,
 ) -> Result<VerifiedAddMarket, VerifyError> {
+    validate_signature_scheme(req.signature_scheme.as_deref())?;
     // Parse signature
     let sig_hex = req.signature.strip_prefix("0x").unwrap_or(&req.signature);
     let signature = hex::decode(sig_hex).map_err(|_| VerifyError::InvalidSignature)?;
@@ -399,13 +543,14 @@ pub fn verify_add_market(
             .map_err(|_| VerifyError::InvalidPrice)?,
         initial_mark_price: U256::from_str_radix(&req.initial_mark_price, 10)
             .map_err(|_| VerifyError::InvalidPrice)?,
-        nonce: U256::from_str_radix(&req.nonce, 10)
-            .map_err(|_| VerifyError::InvalidNonce)?,
+        nonce: U256::from_str_radix(&req.nonce, 10).map_err(|_| VerifyError::InvalidNonce)?,
         owner,
     };
 
     // Skip verification in dev mode if configured
-    if !Config::global().skip_signature_verification {
+    if !uses_canonical_signature(req.signature_scheme.as_deref())
+        && !security_policy.skip_signature_verification
+    {
         let valid = eip712
             .verify_add_market_signature(&add_market_eip712, &signature)
             .map_err(|e| VerifyError::RecoveryFailed(e.to_string()))?;
@@ -415,12 +560,48 @@ pub fn verify_add_market(
     }
 
     // Parse numeric fields
-    let tick_size: i64 = req.config.tick_size.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let lot_size: i64 = req.config.lot_size.parse().map_err(|_| VerifyError::InvalidSize)?;
-    let min_notional: i64 = req.config.min_notional.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let maker_fee: i64 = req.config.maker_fee.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let taker_fee: i64 = req.config.taker_fee.parse().map_err(|_| VerifyError::InvalidPrice)?;
-    let initial_mark_price: i64 = req.initial_mark_price.parse().map_err(|_| VerifyError::InvalidPrice)?;
+    let tick_size: i64 = req
+        .config
+        .tick_size
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let lot_size: i64 = req
+        .config
+        .lot_size
+        .parse()
+        .map_err(|_| VerifyError::InvalidSize)?;
+    let min_notional: i64 = req
+        .config
+        .min_notional
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let maker_fee: i64 = req
+        .config
+        .maker_fee
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let taker_fee: i64 = req
+        .config
+        .taker_fee
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let initial_mark_price: i64 = req
+        .initial_mark_price
+        .parse()
+        .map_err(|_| VerifyError::InvalidPrice)?;
+    let nonce: u64 = req.nonce.parse().map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_after = req
+        .valid_after
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
+    let valid_until = req
+        .deadline
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| VerifyError::InvalidNonce)?;
 
     Ok(VerifiedAddMarket {
         owner,
@@ -431,6 +612,9 @@ pub fn verify_add_market(
         maker_fee,
         taker_fee,
         initial_mark_price,
+        nonce,
+        valid_after,
+        valid_until,
     })
 }
 

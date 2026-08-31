@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface EnableTradingModalProps {
   isOpen: boolean
@@ -117,9 +117,10 @@ export function EnableTradingModal({
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <h2 id="modal-title" className="text-xl font-semibold text-text-primary">
-            Enable Gasless Trading
+            Agent Delegation (Experimental)
           </h2>
           <button
+            type="button"
             onClick={onClose}
             className="text-text-muted hover:text-text-primary transition-colors"
             aria-label="Close modal"
@@ -131,21 +132,21 @@ export function EnableTradingModal({
         {/* Content */}
         <div className="mb-6">
           <p className="text-text-secondary mb-4">
-            Sign once to enable gasless trading for the next 7 days.
-            No more wallet popups for every trade!
+            Agent delegation is not used for canonical orders yet.
+            Orders still require a signature from your connected wallet.
           </p>
           <ul className="bg-bg-tertiary rounded-lg p-4 space-y-2" aria-label="Benefits of enabling trading">
             <li className="flex items-center gap-2 text-sm">
               <span className="text-success" aria-hidden="true">✓</span>
-              <span className="text-text-secondary">No transaction fees</span>
+              <span className="text-text-secondary">Delegation can be revoked anytime</span>
             </li>
             <li className="flex items-center gap-2 text-sm">
               <span className="text-success" aria-hidden="true">✓</span>
-              <span className="text-text-secondary">Instant order signing</span>
+              <span className="text-text-secondary">Canonical wallet signing remains active</span>
             </li>
             <li className="flex items-center gap-2 text-sm">
               <span className="text-success" aria-hidden="true">✓</span>
-              <span className="text-text-secondary">Revoke anytime</span>
+              <span className="text-text-secondary">Agent delegation is experimental</span>
             </li>
           </ul>
         </div>
@@ -153,6 +154,7 @@ export function EnableTradingModal({
         {/* Actions */}
         <div className="flex gap-3">
           <button
+            type="button"
             onClick={handleEnableTrading}
             disabled={isEnabling || isSubmitting}
             className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -163,10 +165,11 @@ export function EnableTradingModal({
                 Enabling...
               </span>
             ) : (
-              'Enable Trading (7d)'
+              'Enable Agent Delegation (7d)'
             )}
           </button>
           <button
+            type="button"
             onClick={handleUseMetaMask}
             disabled={isEnabling || isSubmitting}
             className="flex-1 bg-bg-tertiary hover:bg-border text-text-primary font-semibold py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -177,7 +180,7 @@ export function EnableTradingModal({
                 Signing...
               </span>
             ) : (
-              'Use MetaMask'
+              'Continue With Wallet'
             )}
           </button>
         </div>

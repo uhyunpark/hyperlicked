@@ -22,7 +22,7 @@
 //! ├── binaries/
 //! │   ├── current -> v1.0.0     # Symlink to current version
 //! │   └── v1.0.0/
-//! │       └── hl-server
+//! │       └── hl-node
 //! ├── data/
 //! │   └── visor_logs/
 //! │       ├── child_stdout.log

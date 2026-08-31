@@ -131,6 +131,12 @@ pub enum TriggerError {
     NoPosition,
     #[error("invalid trigger price for this position")]
     InvalidTriggerPrice,
+    #[error("trigger order size must be positive")]
+    InvalidSize,
+    #[error("trigger order limit price must be positive")]
+    InvalidLimitPrice,
+    #[error("trigger order client ID must not be empty")]
+    InvalidCloid,
     #[error("size exceeds current position size")]
     SizeExceedsPosition,
     #[error("duplicate client order ID")]
@@ -139,6 +145,65 @@ pub enum TriggerError {
     AlreadyProcessed,
     #[error("market not found")]
     MarketNotFound,
+}
+
+/// Structural validation failures for trigger orders retained in application
+/// state.  This is deliberately separate from [`TriggerError`]: the latter
+/// describes user transaction failures, while this error describes malformed
+/// primary state admitted through a snapshot/import boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TriggerOrderValidationError {
+    #[error("trigger order map key {map_key} does not match order ID {order_id}")]
+    OrderIdMismatch { map_key: String, order_id: String },
+    #[error("trigger order {order_id} has an invalid runtime ID")]
+    InvalidId { order_id: String },
+    #[error(
+        "trigger order {order_id} uses sequence {sequence}, but trigger sequence is only {trigger_seq}"
+    )]
+    SequenceBehind {
+        order_id: String,
+        sequence: u64,
+        trigger_seq: u64,
+    },
+    #[error("trigger order {order_id} has an empty trader")]
+    EmptyTrader { order_id: String },
+    #[error("trigger order {order_id} has an empty symbol")]
+    EmptySymbol { order_id: String },
+    #[error("trigger order {order_id} references an unknown market {symbol}")]
+    MarketNotFound { order_id: String, symbol: String },
+    #[error("trigger order {order_id} references a market without an orderbook: {symbol}")]
+    OrderbookNotFound { order_id: String, symbol: String },
+    #[error("trigger order {order_id} has an empty client order ID")]
+    EmptyCloid { order_id: String },
+    #[error("duplicate trigger client order ID {cloid} for trader {trader} and symbol {symbol}")]
+    DuplicateCloid {
+        trader: String,
+        symbol: String,
+        cloid: String,
+    },
+    #[error("trigger order {order_id} has invalid size {size}")]
+    InvalidSize { order_id: String, size: i64 },
+    #[error("trigger order {order_id} has invalid trigger price {price}")]
+    InvalidTriggerPrice { order_id: String, price: i64 },
+    #[error("trigger order {order_id} has invalid limit price {price}")]
+    InvalidLimitPrice { order_id: String, price: i64 },
+    #[error("trigger order {order_id} must be reduce-only")]
+    NotReduceOnly { order_id: String },
+    #[error(
+        "trigger order {order_id} has condition {actual:?}, expected {expected:?} for its type and side"
+    )]
+    ConditionMismatch {
+        order_id: String,
+        expected: TriggerCondition,
+        actual: TriggerCondition,
+    },
+    #[error(
+        "trigger order {order_id} has retained status {status:?}; only pending orders may remain"
+    )]
+    InvalidStatus {
+        order_id: String,
+        status: TriggerOrderStatus,
+    },
 }
 
 /// Determine the correct trigger condition based on position and trigger type

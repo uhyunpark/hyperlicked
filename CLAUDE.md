@@ -31,7 +31,7 @@ src/
 ├── storage/      # RocksDB persistence, snapshots, recovery
 ├── types/        # Block, Vote, Certificate, config types
 ├── visor/        # Process supervisor: binary upgrades, health checks (hl-visor)
-└── bin/          # hl-server, hl-node, hl-visor, multinode
+└── bin/          # hl-node, hl-visor, multinode
 web/              # Next.js trading frontend
 tests/            # Integration + E2E tests
 docs/             # Architecture decisions, roadmap
@@ -40,7 +40,7 @@ docs/             # Architecture decisions, roadmap
 ## Commands
 
 ```bash
-cargo run --bin hl-server              # API server + consensus (port 8080)
+MODE=dev cargo run --bin hl-node -- --genesis <genesis.json> --config <node.json>  # canonical REST + WebSocket + consensus
 cargo test                             # All tests
 cargo test --test e2e                  # E2E integration tests
 cd web && bun run dev                  # Frontend dev server

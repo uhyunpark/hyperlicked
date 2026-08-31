@@ -1,5 +1,5 @@
 //! Hyperlicked
-//! 
+//!
 //! A mock implementation of Hyperlicked for testing and development.
 //! A high-performance perpetual futures exchange built with HotStuff-2 consensus.
 //!
@@ -12,23 +12,11 @@
 //! - `types`: Core data types (Block, Vote, Order, etc.)
 //! - `consensus`: HotStuff-2 consensus engine
 //!
-//! ## Quick Start
+//! ## Runtime entry point
 //!
-//! ```rust
-//! use hyperlicked::consensus::{Engine, MemoryBlockStore, NoOpApp};
-//! use hyperlicked::types::ConsensusConfig;
-//!
-//! // Create single-node engine
-//! let config = ConsensusConfig::single_node();
-//! let mut engine = Engine::new(config, NoOpApp, MemoryBlockStore::new());
-//!
-//! // Produce blocks
-//! for _ in 0..10 {
-//!     if let Some(block) = engine.tick() {
-//!         println!("Committed block at height {}", block.height);
-//!     }
-//! }
-//! ```
+//! Production validators are started through the `hl-node` binary and use
+//! [`consensus::ConsensusRunner`]. The former in-memory `Engine` is retained
+//! only behind the opt-in `legacy-engine` compatibility feature.
 
 pub mod api;
 pub mod app;
@@ -36,13 +24,16 @@ pub mod config;
 pub mod consensus;
 pub mod crypto;
 pub mod network;
+pub mod node_config;
+pub mod state_sync;
 pub mod storage;
 pub mod types;
 pub mod visor;
 
 // Re-exports for convenience
-pub use api::{SharedState, create_router};
+pub use api::{create_router, SharedState};
 pub use app::AppState;
-pub use consensus::{Engine, MemoryBlockStore, NoOpApp};
+pub use consensus::{MemoryBlockStore, NoOpApp};
 pub use network::{Network, NetworkConfig, TcpNetwork};
+pub use state_sync::{import_verified_blocks, VerifiedBlockImporter};
 pub use types::*;

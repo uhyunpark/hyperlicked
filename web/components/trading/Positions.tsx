@@ -15,6 +15,11 @@ import {
   getNonce,
   type ApiTriggerOrder
 } from '@/lib/api'
+import {
+  CANONICAL_SIGNATURE_SCHEME,
+  canonicalU64,
+  createCanonicalValidity,
+} from '@/lib/wallet/canonicalAction'
 import type { TriggerOrder } from '@/lib/types'
 
 interface PositionTriggers {
@@ -130,21 +135,17 @@ function PositionsInner() {
       return
     }
 
-    if (!wallet.tradingEnabled) {
-      toast.warning('Trading Disabled', 'Please enable trading first')
-      return
-    }
-
     try {
       // Get fresh nonce from server
       const nonceData = await getNonce(wallet.address)
-      const currentNonce = nonceData.nonce
+      const currentNonce = canonicalU64(nonceData.nonce, 'nonce')
 
       // Close = market order in opposite direction with reduce_only
       // Long position (size > 0) → Sell (side = 2)
       // Short position (size < 0) → Buy (side = 1)
       const side = size > 0 ? 2 : 1
       const orderSize = Math.abs(size)
+      const { validAfter, deadline } = createCanonicalValidity()
 
       // Use sweep price to ensure execution
       // Sell: Use minimum price (0.01) to sweep all bids
@@ -157,35 +158,36 @@ function PositionsInner() {
         type: 2, // IOC (immediate-or-cancel) for market order
         price: convertToApiPrice(orderPrice).toString(),
         qty: convertToApiSize(orderSize).toString(),
-        nonce: currentNonce.toString(),
-        deadline: '0',
+        nonce: currentNonce,
+        deadline,
+        validAfter,
         leverage: 1, // Leverage doesn't matter for reduce-only
         owner: wallet.address,
         reduce_only: true
       }
 
-      const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
+      const signature = await wallet.signCanonicalOrder(orderToSign)
 
       const signedTx = {
         type: 'order' as const,
         order: orderToSign,
         signature,
-        agent_mode: agentMode,
-        delegation_id: delegationId
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
       }
 
       const response = await submitSignedTransaction(signedTx)
 
-      if (response.status === 'submitted') {
-        toast.success('Position Closed', `Closed ${orderSize.toFixed(4)} ${symbol}`)
-      } else {
-        toast.error('Close Failed', response.message || 'Unknown error')
+      if (response.status === 'pending') {
+        toast.success(
+          'Close Accepted',
+          `${orderSize.toFixed(4)} ${symbol} close is pending (${response.tx_hash.slice(0, 10)}…)`
+        )
       }
     } catch (error: any) {
       console.error('[position-close] Error:', error)
       toast.error('Close Failed', error.message || 'Unknown error')
     }
-  }, [wallet.address, wallet.tradingEnabled, wallet.signOrderSmart])
+  }, [wallet.address, wallet.signCanonicalOrder])
 
   const handleCancelTrigger = useCallback(async (triggerOrderId: string, symbol: string, type: 'tp' | 'sl') => {
     if (!wallet.address) return
@@ -193,31 +195,37 @@ function PositionsInner() {
     try {
       // Get fresh nonce for signature
       const nonceData = await getNonce(wallet.address)
+      const currentNonce = canonicalU64(nonceData.nonce, 'nonce')
       const cancelToSign: CancelTriggerOrderToSign = {
         triggerOrderId,
         symbol,
-        nonce: nonceData.nonce.toString(),
+        nonce: currentNonce,
         owner: wallet.address,
+        ...createCanonicalValidity(),
       }
-      const { signature, agentMode, delegationId } = await wallet.signCancelTriggerOrderSmart(cancelToSign)
-      await cancelTriggerOrder({
+      const signature = await wallet.signCanonicalCancelTriggerOrder(cancelToSign)
+      const response = await cancelTriggerOrder({
         cancel: {
           triggerOrderId,
           symbol,
-          nonce: nonceData.nonce.toString(),
+          nonce: currentNonce,
           owner: wallet.address,
+          deadline: cancelToSign.deadline,
+          validAfter: cancelToSign.validAfter,
         },
         signature,
-        agent_mode: agentMode,
-        delegation_id: delegationId,
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
       })
-      toast.success(`${type.toUpperCase()} Cancelled`, `Cancelled ${type === 'tp' ? 'Take Profit' : 'Stop Loss'} for ${symbol}`)
-      // WebSocket will handle the removal, but also update local state immediately
-      useTradingStore.getState().removeTriggerOrder(triggerOrderId)
+      if (response.status === 'pending') {
+        toast.success(
+          `${type.toUpperCase()} Cancel Accepted`,
+          `Transaction ${response.tx_hash.slice(0, 10)}… is pending`,
+        )
+      }
     } catch (err: any) {
       toast.error('Cancel Failed', err.message)
     }
-  }, [wallet.address, wallet.signCancelTriggerOrderSmart])
+  }, [wallet.address, wallet.signCanonicalCancelTriggerOrder])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">

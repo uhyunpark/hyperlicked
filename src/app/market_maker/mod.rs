@@ -10,11 +10,11 @@
 //! - Configurable intensity presets (low/medium/high)
 //! - Deterministic address generation from seed
 //!
-//! ## Usage
+//! ## Runtime integration
 //!
-//! ```bash
-//! MM_ENABLED=true MM_INTENSITY=low cargo run --bin hl-server
-//! ```
+//! The market maker is a library component. A future transactionized service
+//! attached to the canonical `hl-node` runtime will submit its activity; there
+//! is no standalone API server binary to launch.
 
 pub mod account;
 pub mod config;
@@ -23,7 +23,7 @@ pub mod types;
 
 pub use account::MakerAccount;
 pub use config::{Intensity, MarketMakerConfig};
-pub use strategy::{Strategy, create_strategy};
+pub use strategy::{create_strategy, Strategy};
 pub use types::{MarketMakerAction, MarketSnapshot, StrategyType};
 
 use std::collections::VecDeque;

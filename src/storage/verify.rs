@@ -69,6 +69,7 @@ pub fn verify_block_chain(blocks: &[Block], starting_hash: Hash) -> ChainVerifyR
 
     // Verify first block's parent
     let first = &blocks[0];
+    let context = first.context();
     if first.parent != starting_hash {
         return ChainVerifyResult::err(
             0,
@@ -86,6 +87,14 @@ pub fn verify_block_chain(blocks: &[Block], starting_hash: Hash) -> ChainVerifyR
 
     // Verify chain linkage
     for (i, block) in blocks.iter().enumerate().skip(1) {
+        if block.context() != context {
+            return ChainVerifyResult::err(
+                i,
+                block.height,
+                "Consensus context changed within block chain".to_string(),
+            );
+        }
+
         // Check parent hash
         if block.parent != prev_hash {
             return ChainVerifyResult::err(
@@ -130,10 +139,19 @@ pub fn verify_block_chain_internal(blocks: &[Block]) -> ChainVerifyResult {
     }
 
     let first = &blocks[0];
+    let context = first.context();
     let mut prev_hash = first.hash();
     let mut prev_height = first.height;
 
     for (i, block) in blocks.iter().enumerate().skip(1) {
+        if block.context() != context {
+            return ChainVerifyResult::err(
+                i,
+                block.height,
+                "Consensus context changed within block chain".to_string(),
+            );
+        }
+
         if block.parent != prev_hash {
             return ChainVerifyResult::err(
                 i,
@@ -177,7 +195,7 @@ pub fn verify_block_chain_internal(blocks: &[Block]) -> ChainVerifyResult {
 /// # Returns
 /// - `true` if hash matches, `false` otherwise
 pub fn verify_snapshot(snapshot: &AppSnapshot, expected_hash: &Hash) -> bool {
-    match serde_json::to_vec(snapshot) {
+    match snapshot.to_bounded_json() {
         Ok(bytes) => hash(&bytes) == *expected_hash,
         Err(_) => false,
     }
@@ -187,7 +205,7 @@ pub fn verify_snapshot(snapshot: &AppSnapshot, expected_hash: &Hash) -> bool {
 ///
 /// Returns the SHA-256 hash of the JSON-serialized snapshot.
 pub fn compute_snapshot_hash(snapshot: &AppSnapshot) -> Option<Hash> {
-    serde_json::to_vec(snapshot).ok().map(|bytes| hash(&bytes))
+    snapshot.to_bounded_json().ok().map(|bytes| hash(&bytes))
 }
 
 /// Verify that a snapshot height is consistent with a block
@@ -205,6 +223,7 @@ pub fn verify_snapshot_height(snapshot: &AppSnapshot, block: &Block) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ConsensusContext;
 
     fn create_chain(start_height: u64, count: usize) -> Vec<Block> {
         let mut blocks = Vec::with_capacity(count);
@@ -212,11 +231,15 @@ mod tests {
 
         for i in 0..count {
             let block = Block {
+                epoch: 0,
+                committee_hash: ConsensusContext::new(0, [7u8; 32]).committee_hash,
+                genesis_hash: [0u8; 32],
                 view: (start_height + i as u64) * 2,
                 height: start_height + i as u64,
                 parent,
                 payload: vec![],
                 proposer: [1u8; 32],
+                commitment_root: [0u8; 32],
                 app_hash: [0u8; 32],
                 timestamp: 1000 + i as u64,
                 justify: None,
@@ -254,7 +277,10 @@ mod tests {
         assert!(!result.valid);
         assert_eq!(result.verified_count, 0);
         assert_eq!(result.invalid_height, Some(1));
-        assert!(result.error.unwrap().contains("First block parent mismatch"));
+        assert!(result
+            .error
+            .unwrap()
+            .contains("First block parent mismatch"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "chain_id": "hyperlicked-local-single-v1",
+  "epoch": 0,
+  "view_timeout_ms": 3000,
+  "validators": [
+    {
+      "node_id": "0101010101010101010101010101010101010101010101010101010101010101",
+      "voting_power": 1,
+      "bls_public_key": "83e8d85cad9f339a8797d495327a6aeb163263b2f0a289cc45c443e4e0b14a141c4a0077e4ca090dbf1d714a86a3bf8b",
+      "bls_proof_of_possession": "90b6b6647a05de45944f6e9aeb1fa6828eb488ab87c605eb8e255a6dce2d388cb5ff705af449120b3f23a3ffd0c0ebf007315cc840898c89d0fe3c68f265e474a794abc599c64cfa93f9fe4666071a9b4a775f1b970698ac6bc33caef3fcca36"
+    }
+  ]
+}

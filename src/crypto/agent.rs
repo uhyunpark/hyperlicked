@@ -53,7 +53,7 @@ impl AgentDelegation {
     /// Compute the struct hash for this delegation
     pub fn struct_hash(&self) -> B256 {
         let type_hash = keccak256(
-            b"AgentDelegation(address wallet,address agent,uint256 expiration,uint256 nonce)"
+            b"AgentDelegation(address wallet,address agent,uint256 expiration,uint256 nonce)",
         );
 
         let mut encoded = Vec::new();
@@ -98,7 +98,11 @@ impl AgentSigner {
     }
 
     /// Sign a delegation with wallet key
-    pub fn sign_delegation(&self, wallet_signer: &Signer, delegation: &AgentDelegation) -> [u8; 65] {
+    pub fn sign_delegation(
+        &self,
+        wallet_signer: &Signer,
+        delegation: &AgentDelegation,
+    ) -> [u8; 65] {
         let hash = self.hash_delegation(delegation);
         wallet_signer.sign(&hash.into())
     }
@@ -254,7 +258,9 @@ mod tests {
         let delegation_sig = agent_signer.sign_delegation(&wallet, &delegation);
 
         // Step 5: Verify delegation
-        let valid = agent_signer.verify_delegation(&delegation, &delegation_sig).unwrap();
+        let valid = agent_signer
+            .verify_delegation(&delegation, &delegation_sig)
+            .unwrap();
         assert!(valid);
 
         // Step 6: Agent signs order (on behalf of wallet)
@@ -304,7 +310,7 @@ mod tests {
 
         // Test is_expired_at with block timestamp
         assert!(delegation.is_expired_at(200_000)); // 200 seconds in ms > 100s expiration
-        assert!(!delegation.is_expired_at(50_000));  // 50 seconds in ms < 100s expiration
+        assert!(!delegation.is_expired_at(50_000)); // 50 seconds in ms < 100s expiration
 
         let agent_signer = AgentSigner::default_domain();
         let delegation_sig = agent_signer.sign_delegation(&wallet, &delegation);

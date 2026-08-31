@@ -4,13 +4,25 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! let mut agg = VoteAggregator::new(quorum, use_bls);
+//! ```
+//! use hyperlicked::consensus::VoteAggregator;
+//! use hyperlicked::types::{ConsensusContext, Vote};
 //!
-//! // Add votes as they arrive
-//! if let Some(cert) = agg.add_vote(vote) {
-//!     // Quorum reached, cert is ready
-//! }
+//! let context = ConsensusContext::new(0, [7u8; 32]);
+//! let block_hash = [1u8; 32];
+//! let app_hash = [2u8; 32];
+//! let mut aggregator = VoteAggregator::new_with_context(context, 2, false);
+//!
+//! let first_vote = Vote::new(context, 1, block_hash, app_hash, [3u8; 32]);
+//! let second_vote = Vote::new(context, 1, block_hash, app_hash, [4u8; 32]);
+//!
+//! assert!(aggregator.add_vote(first_vote).is_none());
+//! let certificate = aggregator
+//!     .add_vote(second_vote)
+//!     .expect("the second vote reaches quorum");
+//! assert_eq!(certificate.context(), context);
+//! assert_eq!(certificate.view, 1);
+//! assert_eq!(aggregator.vote_count(1, &block_hash), 2);
 //! ```
 
 use std::collections::{HashMap, VecDeque};
@@ -18,7 +30,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::crypto::bls::{aggregate_signatures, BlsSignature};
-use crate::types::{Certificate, Hash, NodeId, View, Vote};
+use crate::types::{Certificate, ConsensusContext, Hash, NodeId, View, Vote};
 
 use super::metrics::ConsensusMetrics;
 use super::MAX_VOTES_PER_VALIDATOR_PER_SECOND;
@@ -109,6 +121,9 @@ impl VoteRateLimiter {
 
 /// Collects votes and aggregates signatures
 pub struct VoteAggregator {
+    /// Static consensus context all collected votes and certificates must use.
+    context: ConsensusContext,
+
     /// Votes per (view, block_hash)
     votes: HashMap<(View, Hash), HashMap<NodeId, Vote>>,
 
@@ -131,7 +146,13 @@ pub struct VoteAggregator {
 impl VoteAggregator {
     /// Create a new aggregator
     pub fn new(quorum: usize, use_bls: bool) -> Self {
+        Self::new_with_context(ConsensusContext::new(0, [0u8; 32]), quorum, use_bls)
+    }
+
+    /// Create an aggregator bound to a consensus context.
+    pub fn new_with_context(context: ConsensusContext, quorum: usize, use_bls: bool) -> Self {
         Self {
+            context,
             votes: HashMap::new(),
             quorum,
             use_bls,
@@ -143,7 +164,23 @@ impl VoteAggregator {
 
     /// Create aggregator with verification control
     pub fn new_with_options(quorum: usize, use_bls: bool, skip_verification: bool) -> Self {
+        Self::new_with_options_and_context(
+            ConsensusContext::new(0, [0u8; 32]),
+            quorum,
+            use_bls,
+            skip_verification,
+        )
+    }
+
+    /// Create a context-bound aggregator with verification control.
+    pub fn new_with_options_and_context(
+        context: ConsensusContext,
+        quorum: usize,
+        use_bls: bool,
+        skip_verification: bool,
+    ) -> Self {
         Self {
+            context,
             votes: HashMap::new(),
             quorum,
             use_bls,
@@ -163,6 +200,14 @@ impl VoteAggregator {
     /// Verifies BLS signature unless skip_verification is set.
     /// Enforces rate limiting (CRITICAL-7).
     pub fn add_vote(&mut self, vote: Vote) -> Option<Certificate> {
+        if vote.validate_context(self.context).is_err() {
+            tracing::warn!(
+                view = vote.view,
+                voter = %crate::types::hash_short(&vote.voter),
+                "Rejecting vote with mismatched consensus context"
+            );
+            return None;
+        }
         let key = (vote.view, vote.block_hash);
         let voter = vote.voter;
 
@@ -214,7 +259,7 @@ impl VoteAggregator {
             if self.use_bls && votes.iter().all(|v| v.is_bls()) {
                 self.aggregate_bls(key.0, key.1, votes)
             } else {
-                Some(Certificate::new(key.0, key.1, votes))
+                Certificate::new(self.context, key.0, key.1, votes).ok()
             }
         } else {
             None
@@ -240,7 +285,7 @@ impl VoteAggregator {
                 if let Some(ref metrics) = self.metrics {
                     metrics.record_signature_parse_failure();
                 }
-                return Some(Certificate::new(view, block_hash, votes));
+                return Certificate::new(self.context, view, block_hash, votes).ok();
             }
         };
 
@@ -257,16 +302,15 @@ impl VoteAggregator {
 
             for (vote, sig) in votes.iter().zip(signatures.iter()) {
                 // Parse public key
-                let pk = vote.bls_pubkey.as_ref()
-                    .and_then(|bytes| {
-                        if bytes.len() == 48 {
-                            let mut arr = [0u8; 48];
-                            arr.copy_from_slice(bytes);
-                            BlsPublicKey::from_bytes(&arr).ok()
-                        } else {
-                            None
-                        }
-                    });
+                let pk = vote.bls_pubkey.as_ref().and_then(|bytes| {
+                    if bytes.len() == 48 {
+                        let mut arr = [0u8; 48];
+                        arr.copy_from_slice(bytes);
+                        BlsPublicKey::from_bytes(&arr).ok()
+                    } else {
+                        None
+                    }
+                });
 
                 let pk = match pk {
                     Some(pk) => pk,
@@ -334,11 +378,11 @@ impl VoteAggregator {
                 if let Some(ref metrics) = self.metrics {
                     metrics.record_aggregation_failure();
                 }
-                return Some(Certificate::new(view, block_hash, votes));
+                return Certificate::new(self.context, view, block_hash, votes).ok();
             }
         };
 
-        Some(Certificate::new_bls(view, block_hash, votes, agg_sig))
+        Certificate::new_bls(self.context, view, block_hash, votes, agg_sig).ok()
     }
 
     /// Get current vote count for a block
@@ -385,8 +429,15 @@ impl VoteAggregator {
 mod tests {
     use super::*;
 
+    fn test_context() -> ConsensusContext {
+        ConsensusContext::new(0, [0u8; 32])
+    }
+
     fn make_vote(view: View, block_hash: Hash, voter: u8) -> Vote {
         Vote {
+            epoch: test_context().epoch,
+            committee_hash: test_context().committee_hash,
+            genesis_hash: test_context().genesis_hash,
             view,
             block_hash,
             app_hash: [0u8; 32],
@@ -482,7 +533,7 @@ mod tests {
         let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
 
         // Create valid BLS-signed vote
-        let vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+        let vote = Vote::new_bls(test_context(), 1, hash, [0u8; 32], [1u8; 32], &bls_sk);
 
         // Should accept valid vote
         let cert = agg.add_vote(vote);
@@ -499,12 +550,17 @@ mod tests {
         let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
 
         // Create valid vote then tamper with it
-        let mut tampered_vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+        let mut tampered_vote =
+            Vote::new_bls(test_context(), 1, hash, [0u8; 32], [1u8; 32], &bls_sk);
         tampered_vote.block_hash[0] ^= 1; // Tamper with block hash
 
         // Should reject tampered vote
         agg.add_vote(tampered_vote);
-        assert_eq!(agg.vote_count(1, &hash), 0, "Tampered vote should be rejected");
+        assert_eq!(
+            agg.vote_count(1, &hash),
+            0,
+            "Tampered vote should be rejected"
+        );
     }
 
     #[test]
@@ -518,7 +574,8 @@ mod tests {
         let bls_sk = BlsSecretKey::from_seed(&[42u8; 32]);
 
         // Create valid vote then tamper with it
-        let mut tampered_vote = Vote::new_bls(1, hash, [0u8; 32], [1u8; 32], &bls_sk);
+        let mut tampered_vote =
+            Vote::new_bls(test_context(), 1, hash, [0u8; 32], [1u8; 32], &bls_sk);
         tampered_vote.block_hash[0] ^= 1; // Tamper
         let tampered_hash = tampered_vote.block_hash;
 
@@ -526,7 +583,11 @@ mod tests {
         let cert = agg.add_vote(tampered_vote);
         assert!(cert.is_none(), "Quorum not reached yet");
         // Vote is stored under tampered_hash (because that's what's in the vote)
-        assert_eq!(agg.vote_count(1, &tampered_hash), 1, "Should accept when verification skipped");
+        assert_eq!(
+            agg.vote_count(1, &tampered_hash),
+            1,
+            "Should accept when verification skipped"
+        );
     }
 
     // ==========================================================================
@@ -559,7 +620,11 @@ mod tests {
         // 6th should fail
         let result = limiter.check_and_record(&voter);
         assert!(result.is_err());
-        if let Err(RateLimitError::RateLimitExceeded { votes_in_window, max }) = result {
+        if let Err(RateLimitError::RateLimitExceeded {
+            votes_in_window,
+            max,
+        }) = result
+        {
             assert_eq!(votes_in_window, 5);
             assert_eq!(max, 5);
         }
@@ -593,6 +658,9 @@ mod tests {
         // Send MAX_VOTES_PER_VALIDATOR_PER_SECOND votes
         for i in 0..MAX_VOTES_PER_VALIDATOR_PER_SECOND {
             let vote = Vote {
+                epoch: test_context().epoch,
+                committee_hash: test_context().committee_hash,
+                genesis_hash: test_context().genesis_hash,
                 view: i as u64,
                 block_hash: hash,
                 app_hash: [0u8; 32],
@@ -606,6 +674,9 @@ mod tests {
 
         // Next vote should be rate limited (returns None, not added)
         let rate_limited_vote = Vote {
+            epoch: test_context().epoch,
+            committee_hash: test_context().committee_hash,
+            genesis_hash: test_context().genesis_hash,
             view: 1000,
             block_hash: hash,
             app_hash: [0u8; 32],
@@ -618,6 +689,10 @@ mod tests {
         assert!(result.is_none(), "Rate limited vote should return None");
 
         // Verify the vote wasn't stored
-        assert_eq!(agg.vote_count(1000, &hash), 0, "Rate limited vote should not be stored");
+        assert_eq!(
+            agg.vote_count(1000, &hash),
+            0,
+            "Rate limited vote should not be stored"
+        );
     }
 }

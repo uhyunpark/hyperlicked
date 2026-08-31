@@ -227,7 +227,10 @@ impl Strategy for TrendFollower {
             } else {
                 // Passive bid below oracle
                 let offset = rng.gen_range(5..15);
-                (Side::Bid, oracle - ((oracle as i128 * offset as i128) / 10000) as i64)
+                (
+                    Side::Bid,
+                    oracle - ((oracle as i128 * offset as i128) / 10000) as i64,
+                )
             }
         } else {
             // Downtrend - sell
@@ -239,7 +242,10 @@ impl Strategy for TrendFollower {
             } else {
                 // Passive ask above oracle
                 let offset = rng.gen_range(5..15);
-                (Side::Ask, oracle + ((oracle as i128 * offset as i128) / 10000) as i64)
+                (
+                    Side::Ask,
+                    oracle + ((oracle as i128 * offset as i128) / 10000) as i64,
+                )
             }
         };
 
@@ -325,11 +331,17 @@ impl Strategy for MeanReverter {
         let (side, price) = if deviation_bps > 0 {
             // Price above MA - sell
             let offset = rng.gen_range(5..20);
-            (Side::Ask, oracle + ((oracle as i128 * offset as i128) / 10000) as i64)
+            (
+                Side::Ask,
+                oracle + ((oracle as i128 * offset as i128) / 10000) as i64,
+            )
         } else {
             // Price below MA - buy
             let offset = rng.gen_range(5..20);
-            (Side::Bid, oracle - ((oracle as i128 * offset as i128) / 10000) as i64)
+            (
+                Side::Bid,
+                oracle - ((oracle as i128 * offset as i128) / 10000) as i64,
+            )
         };
 
         MarketMakerAction::PlaceOrder {
@@ -373,7 +385,11 @@ impl Strategy for NoiseTrader {
         }
 
         // Always place orders (high frequency for stress test)
-        let side = if rng.gen_bool(0.5) { Side::Bid } else { Side::Ask };
+        let side = if rng.gen_bool(0.5) {
+            Side::Bid
+        } else {
+            Side::Ask
+        };
 
         // 50% chance to cross spread for actual fills
         let cross_spread = rng.gen_bool(0.5);
@@ -393,7 +409,11 @@ impl Strategy for NoiseTrader {
                 Side::Bid => oracle - offset,
                 Side::Ask => oracle + offset,
             };
-            let typ = if rng.gen_bool(0.7) { OrderType::Gtc } else { OrderType::Ioc };
+            let typ = if rng.gen_bool(0.7) {
+                OrderType::Gtc
+            } else {
+                OrderType::Ioc
+            };
             (passive_price, typ)
         };
 
@@ -454,7 +474,11 @@ impl Strategy for AggressiveTaker {
         }
 
         // Randomly buy or sell
-        let side = if rng.gen_bool(0.5) { Side::Bid } else { Side::Ask };
+        let side = if rng.gen_bool(0.5) {
+            Side::Bid
+        } else {
+            Side::Ask
+        };
 
         // Cross the spread - bid at ask price, ask at bid price
         let price = match side {
@@ -485,17 +509,15 @@ impl Strategy for AggressiveTaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     fn test_snapshot() -> MarketSnapshot {
         MarketSnapshot {
             oracle_price: 10_000_000, // $100,000 in cents
             best_bid: Some(9_999_000),
             best_ask: Some(10_001_000),
-            price_history: vec![
-                9_990_000, 9_995_000, 10_000_000, 10_005_000, 10_010_000,
-            ],
+            price_history: vec![9_990_000, 9_995_000, 10_000_000, 10_005_000, 10_010_000],
             timestamp: 1_000_000,
         }
     }

@@ -58,7 +58,9 @@ impl OrderBook {
         // Find crossing ask price levels using take_while for early termination
         // BTreeMap iterates keys in ascending order, so we take while price <= limit
         // We must collect because we modify the map during the loop
-        let crossing_levels: Vec<_> = self.asks.keys()
+        let crossing_levels: Vec<_> = self
+            .asks
+            .keys()
             .copied()
             .take_while(|&p| p <= order.price)
             .collect();
@@ -123,8 +125,16 @@ impl OrderBook {
                     let removed = level.remove(maker_idx).unwrap();
                     let trader_lower = removed.trader.to_lowercase();
                     self.order_index.remove(&removed.id);
-                    if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
-                        *count = count.saturating_sub(1);
+                    let remove_trader_count = self
+                        .trader_order_counts
+                        .get_mut(&trader_lower)
+                        .map(|count| {
+                            *count = count.saturating_sub(1);
+                            *count == 0
+                        })
+                        .unwrap_or(false);
+                    if remove_trader_count {
+                        self.trader_order_counts.remove(&trader_lower);
                     }
 
                     if level.is_empty() {
@@ -149,7 +159,9 @@ impl OrderBook {
         // BTreeMap with Reverse<Price> iterates highest price first (descending),
         // so we take while price >= limit
         // We must collect because we modify the map during the loop
-        let crossing_levels: Vec<_> = self.bids.keys()
+        let crossing_levels: Vec<_> = self
+            .bids
+            .keys()
             .map(|r| r.0)
             .take_while(|&p| p >= order.price)
             .collect();
@@ -214,8 +226,16 @@ impl OrderBook {
                     let removed = level.remove(maker_idx).unwrap();
                     let trader_lower = removed.trader.to_lowercase();
                     self.order_index.remove(&removed.id);
-                    if let Some(count) = self.trader_order_counts.get_mut(&trader_lower) {
-                        *count = count.saturating_sub(1);
+                    let remove_trader_count = self
+                        .trader_order_counts
+                        .get_mut(&trader_lower)
+                        .map(|count| {
+                            *count = count.saturating_sub(1);
+                            *count == 0
+                        })
+                        .unwrap_or(false);
+                    if remove_trader_count {
+                        self.trader_order_counts.remove(&trader_lower);
                     }
 
                     if level.is_empty() {
@@ -335,7 +355,43 @@ mod tests {
         assert!(book.cancel("bid1").is_some());
         assert!(book.best_bid().is_none());
 
+        book.place(make_order("ask1", Side::Ask, 50000, 100), &config)
+            .unwrap();
+        assert!(book.cancel("ask1").is_some());
+        assert!(book.best_ask().is_none());
+        assert!(book.validate_derived_indexes().is_ok());
+
         assert!(book.cancel("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_validate_after_full_maker_fill() {
+        let mut book = OrderBook::new("BTC-USDT");
+        let config = test_config();
+
+        book.place(
+            make_order_with_trader("ask-maker", "maker-ask", Side::Ask, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        book.place(
+            make_order_with_trader("bid-taker", "taker-bid", Side::Bid, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        assert!(book.validate_derived_indexes().is_ok());
+
+        book.place(
+            make_order_with_trader("bid-maker", "maker-bid", Side::Bid, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        book.place(
+            make_order_with_trader("ask-taker", "taker-ask", Side::Ask, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        assert!(book.validate_derived_indexes().is_ok());
     }
 
     #[test]
@@ -476,9 +532,15 @@ mod tests {
         let config = test_config();
 
         // Place bids at different prices (out of order)
-        bid_book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
-        bid_book.place(make_order("bid2", Side::Bid, 51000, 100), &config).unwrap();
-        bid_book.place(make_order("bid3", Side::Bid, 50000, 100), &config).unwrap();
+        bid_book
+            .place(make_order("bid1", Side::Bid, 49000, 100), &config)
+            .unwrap();
+        bid_book
+            .place(make_order("bid2", Side::Bid, 51000, 100), &config)
+            .unwrap();
+        bid_book
+            .place(make_order("bid3", Side::Bid, 50000, 100), &config)
+            .unwrap();
 
         // Best bid should be highest price
         assert_eq!(bid_book.best_bid(), Some(51000));
@@ -491,9 +553,24 @@ mod tests {
 
         // Place asks at different prices (out of order)
         // Using same trader to prevent matching
-        ask_book.place(make_order_with_trader("ask1", "maker", Side::Ask, 53000, 100), &config).unwrap();
-        ask_book.place(make_order_with_trader("ask2", "maker", Side::Ask, 51000, 100), &config).unwrap();
-        ask_book.place(make_order_with_trader("ask3", "maker", Side::Ask, 52000, 100), &config).unwrap();
+        ask_book
+            .place(
+                make_order_with_trader("ask1", "maker", Side::Ask, 53000, 100),
+                &config,
+            )
+            .unwrap();
+        ask_book
+            .place(
+                make_order_with_trader("ask2", "maker", Side::Ask, 51000, 100),
+                &config,
+            )
+            .unwrap();
+        ask_book
+            .place(
+                make_order_with_trader("ask3", "maker", Side::Ask, 52000, 100),
+                &config,
+            )
+            .unwrap();
 
         // Best ask should be lowest price
         assert_eq!(ask_book.best_ask(), Some(51000));
@@ -512,14 +589,19 @@ mod tests {
         let config = test_config();
 
         // Place bids
-        book.place(make_order("bid1", Side::Bid, 49000, 100), &config).unwrap();
-        book.place(make_order("bid2", Side::Bid, 51000, 100), &config).unwrap();
-        book.place(make_order("bid3", Side::Bid, 50000, 100), &config).unwrap();
+        book.place(make_order("bid1", Side::Bid, 49000, 100), &config)
+            .unwrap();
+        book.place(make_order("bid2", Side::Bid, 51000, 100), &config)
+            .unwrap();
+        book.place(make_order("bid3", Side::Bid, 50000, 100), &config)
+            .unwrap();
 
         assert_eq!(book.best_bid(), Some(51000));
 
         // Place ask that crosses the bid at 51k
-        let fills = book.place(make_order("ask1", Side::Ask, 51000, 100), &config).unwrap();
+        let fills = book
+            .place(make_order("ask1", Side::Ask, 51000, 100), &config)
+            .unwrap();
 
         // Should match at 51000
         assert_eq!(fills.len(), 1);
@@ -545,7 +627,10 @@ mod tests {
         let result = book.place(large_order, &config);
         assert!(matches!(
             result,
-            Err(OrderBookError::OrderSizeTooLarge { max: 1000, got: 2000 })
+            Err(OrderBookError::OrderSizeTooLarge {
+                max: 1000,
+                got: 2000
+            })
         ));
     }
 
@@ -557,14 +642,23 @@ mod tests {
 
         // Place orders up to the limit
         for i in 0..3 {
-            let order = make_order_with_trader(&format!("bid_{}", i), "alice", Side::Bid, 50000 - i as i64, 100);
+            let order = make_order_with_trader(
+                &format!("bid_{}", i),
+                "alice",
+                Side::Bid,
+                50000 - i as i64,
+                100,
+            );
             assert!(book.place(order, &config).is_ok());
         }
 
         // Next order should fail
         let excess_order = make_order_with_trader("bid_3", "alice", Side::Bid, 49997, 100);
         let result = book.place(excess_order, &config);
-        assert!(matches!(result, Err(OrderBookError::TooManyOpenOrders { max: 3 })));
+        assert!(matches!(
+            result,
+            Err(OrderBookError::TooManyOpenOrders { max: 3 })
+        ));
 
         // IOC orders should still work (don't rest on book)
         let mut ioc_order = make_order_with_trader("ioc_1", "alice", Side::Bid, 49996, 100);
@@ -580,11 +674,23 @@ mod tests {
         let config = test_config();
 
         // Place asks at two price levels - all from alice at 50000
-        book.place(make_order_with_trader("ask1", "alice", Side::Ask, 50000, 100), &config).unwrap();
-        book.place(make_order_with_trader("ask2", "alice", Side::Ask, 50000, 100), &config).unwrap();
+        book.place(
+            make_order_with_trader("ask1", "alice", Side::Ask, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        book.place(
+            make_order_with_trader("ask2", "alice", Side::Ask, 50000, 100),
+            &config,
+        )
+        .unwrap();
 
         // Place ask from bob at 51000 (higher price = worse for taker)
-        book.place(make_order_with_trader("ask3", "bob", Side::Ask, 51000, 50), &config).unwrap();
+        book.place(
+            make_order_with_trader("ask3", "bob", Side::Ask, 51000, 50),
+            &config,
+        )
+        .unwrap();
 
         // Alice places a bid that crosses both levels
         // Should skip the 50000 level (all self-trades) and match at 51000 with bob
@@ -609,11 +715,23 @@ mod tests {
         let config = test_config();
 
         // Place bids at two price levels - all from alice at 50000
-        book.place(make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100), &config).unwrap();
-        book.place(make_order_with_trader("bid2", "alice", Side::Bid, 50000, 100), &config).unwrap();
+        book.place(
+            make_order_with_trader("bid1", "alice", Side::Bid, 50000, 100),
+            &config,
+        )
+        .unwrap();
+        book.place(
+            make_order_with_trader("bid2", "alice", Side::Bid, 50000, 100),
+            &config,
+        )
+        .unwrap();
 
         // Place bid from bob at 49000 (lower price = worse for taker)
-        book.place(make_order_with_trader("bid3", "bob", Side::Bid, 49000, 50), &config).unwrap();
+        book.place(
+            make_order_with_trader("bid3", "bob", Side::Bid, 49000, 50),
+            &config,
+        )
+        .unwrap();
 
         // Alice places an ask that crosses both levels
         // Should skip the 50000 level (all self-trades) and match at 49000 with bob
@@ -635,7 +753,13 @@ mod tests {
 
         // Place orders at different price levels until we hit the limit
         for i in 0..3 {
-            let order = make_order_with_trader(&format!("bid_{}", i), "maker", Side::Bid, 50000 - i as i64, 100);
+            let order = make_order_with_trader(
+                &format!("bid_{}", i),
+                "maker",
+                Side::Bid,
+                50000 - i as i64,
+                100,
+            );
             assert!(book.place(order, &config).is_ok());
         }
 
@@ -645,7 +769,10 @@ mod tests {
         // Next order at a NEW price level should fail
         let excess_order = make_order_with_trader("bid_excess", "maker", Side::Bid, 49996, 100);
         let result = book.place(excess_order, &config);
-        assert!(matches!(result, Err(OrderBookError::DepthLimitReached { max: 3 })));
+        assert!(matches!(
+            result,
+            Err(OrderBookError::DepthLimitReached { max: 3 })
+        ));
 
         // But an order at an EXISTING price level should succeed
         let same_price_order = make_order_with_trader("bid_same", "maker2", Side::Bid, 50000, 100);
@@ -675,7 +802,10 @@ mod tests {
         // price=50000, size=100 => notional = 0 < 1000
         let small_order = make_order("bid2", Side::Bid, 50000, 100);
         let result = book.place(small_order, &config);
-        assert!(matches!(result, Err(OrderBookError::BelowMinNotional { min: 1000, .. })));
+        assert!(matches!(
+            result,
+            Err(OrderBookError::BelowMinNotional { min: 1000, .. })
+        ));
     }
 
     #[test]
@@ -685,13 +815,24 @@ mod tests {
         config.max_price_levels = 2;
 
         // Place asks at different price levels
-        book.place(make_order_with_trader("ask1", "maker", Side::Ask, 51000, 100), &config).unwrap();
-        book.place(make_order_with_trader("ask2", "maker", Side::Ask, 52000, 100), &config).unwrap();
+        book.place(
+            make_order_with_trader("ask1", "maker", Side::Ask, 51000, 100),
+            &config,
+        )
+        .unwrap();
+        book.place(
+            make_order_with_trader("ask2", "maker", Side::Ask, 52000, 100),
+            &config,
+        )
+        .unwrap();
 
         // Next ask at a new price should fail
         let excess_ask = make_order_with_trader("ask3", "maker", Side::Ask, 53000, 100);
         let result = book.place(excess_ask, &config);
-        assert!(matches!(result, Err(OrderBookError::DepthLimitReached { max: 2 })));
+        assert!(matches!(
+            result,
+            Err(OrderBookError::DepthLimitReached { max: 2 })
+        ));
 
         // Bid side should still have room
         let bid = make_order_with_trader("bid1", "maker", Side::Bid, 50000, 100);

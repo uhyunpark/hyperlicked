@@ -2,8 +2,6 @@
 //!
 //! Full flow scenarios testing multiple features together.
 
-use hyperlicked::app::Transaction;
-
 use crate::e2e::helpers::*;
 
 /// Test full trade lifecycle: deposit → trade → close → withdraw
@@ -13,10 +11,18 @@ fn test_full_trade_lifecycle() {
 
     // === Phase 1: Deposits ===
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -89,11 +95,7 @@ fn test_full_trade_lifecycle() {
         )
         .unwrap();
     ctx.state
-        .submit_tx(
-            WithdrawBuilder::new(TRADER_BOB)
-                .amount(bob_balance)
-                .build(),
-        )
+        .submit_tx(WithdrawBuilder::new(TRADER_BOB).amount(bob_balance).build())
         .unwrap();
     ctx.execute_block();
 
@@ -116,7 +118,11 @@ fn test_liquidation_cascade() {
 
     // Market maker with lots of capital
     ctx.state
-        .submit_tx(DepositBuilder::new("market_maker").amount(10 * DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new("market_maker")
+                .amount(10 * DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -200,11 +206,7 @@ fn test_funding_over_intervals() {
         ctx.execute_block_at(ctx.timestamp() + funding_interval + 1000);
 
         let last_funding = ctx.state.last_funding_time(BTC_SYMBOL);
-        assert!(
-            last_funding > 0,
-            "Funding should occur at interval {}",
-            i
-        );
+        assert!(last_funding > 0, "Funding should occur at interval {}", i);
     }
 
     // Positions should still exist
@@ -329,7 +331,11 @@ fn test_mempool_ordering_in_block() {
 
     // Deposit last
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
 
     // Execute block - deposit should process first, enabling the order
@@ -339,7 +345,8 @@ fn test_mempool_ordering_in_block() {
     // Balance is reduced by locked margin for the resting GTC order
     let account = ctx.state.account(TRADER_ALICE).unwrap();
     assert_eq!(
-        account.balance + account.locked, DEFAULT_DEPOSIT,
+        account.balance + account.locked,
+        DEFAULT_DEPOSIT,
         "Balance + locked should equal deposit (no fees for resting order)"
     );
     assert!(account.locked > 0, "Resting order should lock margin");

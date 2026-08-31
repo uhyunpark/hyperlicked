@@ -1,11 +1,35 @@
 'use client'
 
-import { useEffect, useRef, useCallback, useMemo } from 'react'
-import { useTradingStore, useWalletStore } from '../store'
+import { BrowserProvider, type Eip1193Provider, type JsonRpcSigner } from 'ethers'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { toast } from '@/components/ui/Toast'
 import { convertPrice, convertSize, getOrders, getPositions } from '../api'
+import { isDevelopment } from '../config'
+import { useTradingStore, useWalletStore } from '../store'
+import { normalizeAddress } from '../wallet/canonicalAction'
 import * as handlers from './handlers'
+import {
+  buildAuthenticatedSubscriptionFrame,
+  createSubscriptionAuth,
+  type PendingSubscription,
+} from './subscriptionAuth'
+import type { WSMessage } from './types'
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080/ws'
+const PRIVATE_EVENT_TYPES = new Set([
+  'userFill',
+  'transactionFinalized',
+  'orderUpdate',
+  'orderClosed',
+  'positionUpdate',
+  'balanceUpdate',
+  'fundingPayment',
+  'liquidated',
+  'adl',
+  'triggerOrderPlaced',
+  'triggerOrderTriggered',
+  'triggerOrderCancelled',
+])
 
 /**
  * Hook for WebSocket connection lifecycle and message handling
@@ -25,6 +49,77 @@ export function useWebSocketConnection() {
 
   const walletConnected = useWalletStore((s) => s.isConnected)
   const address = useWalletStore((s) => s.address)
+  const pendingSubscriptionRef = useRef<PendingSubscription | null>(null)
+
+  const getConnectedSigner = useCallback(async (): Promise<JsonRpcSigner> => {
+    if (typeof window === 'undefined') {
+      throw new Error('Wallet signing is only available in a browser')
+    }
+
+    const ethereum = (window as Window & { ethereum?: Eip1193Provider }).ethereum
+    if (!ethereum) {
+      throw new Error('No connected wallet was found')
+    }
+
+    return new BrowserProvider(ethereum).getSigner()
+  }, [])
+
+  const subscribeToUser = useCallback(async (ws: WebSocket, requestedAddress: string) => {
+    let normalizedAddress: string
+    try {
+      normalizedAddress = normalizeAddress(requestedAddress)
+    } catch {
+      toast.error('Private updates unavailable', 'The connected wallet address is invalid')
+      return
+    }
+
+    // Do not start a second signature request for the same socket/address.
+    const pending = pendingSubscriptionRef.current
+    if (pending?.socket === ws && pending.address === normalizedAddress) return
+    pendingSubscriptionRef.current = { socket: ws, address: normalizedAddress }
+
+    try {
+      const frame = isDevelopment
+        ? { op: 'subscribe' as const, address: normalizedAddress }
+        : buildAuthenticatedSubscriptionFrame(
+            await createSubscriptionAuth(
+              await getConnectedSigner(),
+              normalizedAddress,
+            ),
+          )
+
+      // The wallet or socket may have changed while the user approved the
+      // signature. Never send an old signature to a new connection/address.
+      const currentAddress = useWalletStore.getState().address
+      const isCurrent = wsRef.current === ws
+        && ws.readyState === WebSocket.OPEN
+        && currentAddress !== null
+        && normalizeAddress(currentAddress) === normalizedAddress
+
+      if (!isCurrent) {
+        const currentPending = pendingSubscriptionRef.current
+        if (currentPending?.socket === ws && currentPending.address === normalizedAddress) {
+          pendingSubscriptionRef.current = null
+        }
+        return
+      }
+
+      ws.send(JSON.stringify(frame))
+    } catch (error) {
+      const currentPending = pendingSubscriptionRef.current
+      const isCurrentRequest = currentPending?.socket === ws
+        && currentPending.address === normalizedAddress
+      if (isCurrentRequest) pendingSubscriptionRef.current = null
+
+      if (wsRef.current === ws) {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : 'Wallet signature is required for private updates'
+        toast.error('Private updates unavailable', message)
+        console.error('[ws] User subscription authentication failed:', error)
+      }
+    }
+  }, [getConnectedSigner])
 
   // Fetch user data (orders and positions)
   const fetchUserData = useCallback(async (userAddress: string) => {
@@ -66,13 +161,17 @@ export function useWebSocketConnection() {
         leverage: p.leverage
       }))
       setPositions(positions)
-    } catch (error) {
+    } catch (_error) {
       // Silently fail - user data fetch is best effort
     }
   }, [setOpenOrders, setPositions])
 
   // Handler dependencies (memoized to avoid re-creating every render)
-  const deps = useMemo(() => ({ fetchUserData, subscribedAddressRef }), [fetchUserData])
+  const deps = useMemo(() => ({
+    fetchUserData,
+    subscribedAddressRef,
+    pendingSubscriptionRef,
+  }), [fetchUserData])
 
   useEffect(() => {
     function connect() {
@@ -92,19 +191,17 @@ export function useWebSocketConnection() {
 
         // Subscribe to user events if wallet connected
         if (walletConnected && address) {
-          ws.send(JSON.stringify({
-            op: 'subscribe',
-            address: address
-          }))
-          subscribedAddressRef.current = address
+          void subscribeToUser(ws, address)
         }
       }
 
       ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return
+
         try {
           const data = JSON.parse(event.data)
-          handleMessage(data, deps)
-        } catch (err) {
+          handleMessage(data, { ...deps, socket: ws })
+        } catch (_err) {
           // Silently ignore parse errors
         }
       }
@@ -115,9 +212,12 @@ export function useWebSocketConnection() {
 
       ws.onclose = (event) => {
         console.log('[ws] Connection closed. Code:', event.code, 'Reason:', event.reason)
+        if (wsRef.current !== ws) return
+
         setWsConnected(false)
         wsRef.current = null
         subscribedAddressRef.current = null
+        pendingSubscriptionRef.current = null
 
         // Reconnect after 3 seconds
         console.log('[ws] Reconnecting in 3 seconds...')
@@ -135,16 +235,31 @@ export function useWebSocketConnection() {
         wsRef.current.close()
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletConnected, address])
+  }, [walletConnected, address, subscribeToUser, deps, setWsConnected])
 
   // Subscribe/unsubscribe when wallet connection changes
   useEffect(() => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
 
-    if (walletConnected && address && subscribedAddressRef.current !== address) {
-      ws.send(JSON.stringify({ op: 'subscribe', address }))
+    if (walletConnected && address) {
+      let normalizedAddress: string
+      try {
+        normalizedAddress = normalizeAddress(address)
+      } catch {
+        toast.error('Private updates unavailable', 'The connected wallet address is invalid')
+        return
+      }
+
+      if (
+        subscribedAddressRef.current !== normalizedAddress
+        && !(
+          pendingSubscriptionRef.current?.socket === ws
+          && pendingSubscriptionRef.current.address === normalizedAddress
+        )
+      ) {
+        void subscribeToUser(ws, normalizedAddress)
+      }
     } else if (!walletConnected && subscribedAddressRef.current) {
       ws.send(JSON.stringify({ op: 'unsubscribe', address: subscribedAddressRef.current }))
       subscribedAddressRef.current = null
@@ -153,17 +268,23 @@ export function useWebSocketConnection() {
       clearUserFills()
       clearTriggerOrders()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletConnected, address])
+  }, [walletConnected, address, subscribeToUser, setOpenOrders, setPositions, clearUserFills, clearTriggerOrders])
 
   return wsRef.current
 }
 
 // Message router
 function handleMessage(
-  data: any,
-  deps: { fetchUserData: (address: string) => Promise<void>; subscribedAddressRef: React.MutableRefObject<string | null> }
+  data: WSMessage,
+  deps: {
+    fetchUserData: (address: string) => Promise<void>
+    subscribedAddressRef: React.MutableRefObject<string | null>
+    pendingSubscriptionRef: React.MutableRefObject<PendingSubscription | null>
+    socket: WebSocket
+  }
 ) {
+  if (PRIVATE_EVENT_TYPES.has(data.type) && !deps.subscribedAddressRef.current) return
+
   switch (data.type) {
     case 'orderbook':
       handlers.handleOrderbook(data)
@@ -173,6 +294,9 @@ function handleMessage(
       break
     case 'userFill':
       handlers.handleUserFill(data, deps)
+      break
+    case 'transactionFinalized':
+      handlers.handleTransactionFinalized(data, deps)
       break
     case 'orderUpdate':
       if (deps.subscribedAddressRef.current) {
@@ -214,6 +338,9 @@ function handleMessage(
       break
     case 'subscribed':
       handlers.handleSubscribed(data, deps)
+      break
+    case 'error':
+      handlers.handleSubscriptionError(data, deps)
       break
   }
 }

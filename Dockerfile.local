@@ -1,0 +1,35 @@
+# Local-only validator harness image. This is not a production image.
+FROM rust:1.97.1-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        ca-certificates \
+        clang \
+        libclang-dev \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src ./src
+
+RUN cargo build --locked --release --all-features --bin hl-node
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        libgcc-s1 \
+        libssl3 \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build /build/target/release/hl-node /usr/local/bin/hl-node
+
+# A production image must use a dedicated non-root entrypoint and independently
+# audited filesystem permissions.
+ENTRYPOINT ["/usr/local/bin/hl-node"]

@@ -1,0 +1,94 @@
+services:
+  validator0:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: ["--genesis", "/app/config/local/genesis.json", "--config", "/app/config/local/docker-4/node0.json", "--data-dir", "/app/data", "--blocks", "3", "--peer-wait-ms", "5000"]
+    environment:
+      MODE: "dev"
+      NODE_ROLE: "validator"
+      RUST_LOG: "info"
+      GOSSIP_ENABLED: "true"
+      SKIP_SIG_VERIFY: "false"
+      SKIP_QC_VERIFY: "false"
+      HL_LOCAL_BLS_SEED_1: "01000000000000000000000000000000000000000000000000000000000000be"
+    volumes:
+      - ./config/local:/app/config/local:ro
+      - validator0-data:/app/data
+    ports:
+      - "18080:8080"
+      - "19001:9000"
+    networks: [consensus]
+
+  validator1:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: ["--genesis", "/app/config/local/genesis.json", "--config", "/app/config/local/docker-4/node1.json", "--data-dir", "/app/data", "--blocks", "3", "--peer-wait-ms", "5000"]
+    environment:
+      MODE: "dev"
+      NODE_ROLE: "validator"
+      RUST_LOG: "info"
+      GOSSIP_ENABLED: "true"
+      SKIP_SIG_VERIFY: "false"
+      SKIP_QC_VERIFY: "false"
+      HL_LOCAL_BLS_SEED_2: "02000000000000000000000000000000000000000000000000000000000000be"
+    volumes:
+      - ./config/local:/app/config/local:ro
+      - validator1-data:/app/data
+    ports:
+      - "18081:8080"
+      - "19002:9000"
+    networks: [consensus]
+
+  validator2:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: ["--genesis", "/app/config/local/genesis.json", "--config", "/app/config/local/docker-4/node2.json", "--data-dir", "/app/data", "--blocks", "3", "--peer-wait-ms", "5000"]
+    environment:
+      MODE: "dev"
+      NODE_ROLE: "validator"
+      RUST_LOG: "info"
+      GOSSIP_ENABLED: "true"
+      SKIP_SIG_VERIFY: "false"
+      SKIP_QC_VERIFY: "false"
+      HL_LOCAL_BLS_SEED_3: "03000000000000000000000000000000000000000000000000000000000000be"
+    volumes:
+      - ./config/local:/app/config/local:ro
+      - validator2-data:/app/data
+    ports:
+      - "18082:8080"
+      - "19003:9000"
+    networks: [consensus]
+
+  validator3:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command: ["--genesis", "/app/config/local/genesis.json", "--config", "/app/config/local/docker-4/node3.json", "--data-dir", "/app/data", "--blocks", "3", "--peer-wait-ms", "5000"]
+    environment:
+      MODE: "dev"
+      NODE_ROLE: "validator"
+      RUST_LOG: "info"
+      GOSSIP_ENABLED: "true"
+      SKIP_SIG_VERIFY: "false"
+      SKIP_QC_VERIFY: "false"
+      HL_LOCAL_BLS_SEED_4: "04000000000000000000000000000000000000000000000000000000000000be"
+    volumes:
+      - ./config/local:/app/config/local:ro
+      - validator3-data:/app/data
+    ports:
+      - "18083:8080"
+      - "19004:9000"
+    networks: [consensus]
+
+networks:
+  consensus:
+    driver: bridge
+
+volumes:
+  validator0-data:
+  validator1-data:
+  validator2-data:
+  validator3-data:

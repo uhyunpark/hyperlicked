@@ -15,6 +15,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::Price;
 
 use super::accounts::AccountManager;
@@ -37,7 +39,7 @@ pub enum LiquidationError {
 }
 
 /// Result of a liquidation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiquidationResult {
     /// Account address that was liquidated
     pub address: String,
@@ -138,11 +140,7 @@ pub fn check_and_liquidate_limited(
                 "Liquidation limit reached - more accounts pending"
             );
         } else {
-            tracing::info!(
-                count = results.len(),
-                total_pnl,
-                "Liquidations processed"
-            );
+            tracing::info!(count = results.len(), total_pnl, "Liquidations processed");
         }
     }
 
@@ -252,7 +250,8 @@ fn liquidate_account_partial(
                 None => break,
             };
             let equity = account.equity(mark_prices);
-            let maintenance = account.maintenance_margin_required(mark_prices, MAINTENANCE_MARGIN_BPS);
+            let maintenance =
+                account.maintenance_margin_required(mark_prices, MAINTENANCE_MARGIN_BPS);
 
             if equity >= maintenance {
                 tracing::info!(
@@ -449,7 +448,10 @@ mod tests {
         // Price drops to $46,000 - should be liquidatable
         mark_prices.insert("BTC-USDT".to_string(), 4_600_000);
 
-        assert!(accounts.get("trader").unwrap().is_liquidatable(&mark_prices, 500));
+        assert!(accounts
+            .get("trader")
+            .unwrap()
+            .is_liquidatable(&mark_prices, 500));
 
         // Run liquidation
         let results = check_and_liquidate(&mut accounts, &mark_prices);
@@ -480,7 +482,10 @@ mod tests {
         // Price rises to $54,000 - should be liquidatable
         mark_prices.insert("BTC-USDT".to_string(), 5_400_000);
 
-        assert!(accounts.get("trader").unwrap().is_liquidatable(&mark_prices, 500));
+        assert!(accounts
+            .get("trader")
+            .unwrap()
+            .is_liquidatable(&mark_prices, 500));
 
         // Run liquidation
         let results = check_and_liquidate(&mut accounts, &mark_prices);
@@ -506,7 +511,10 @@ mod tests {
         let mut mark_prices = HashMap::new();
         mark_prices.insert("BTC-USDT".to_string(), 4_900_000); // Small drop
 
-        assert!(!accounts.get("trader").unwrap().is_liquidatable(&mark_prices, 500));
+        assert!(!accounts
+            .get("trader")
+            .unwrap()
+            .is_liquidatable(&mark_prices, 500));
 
         let results = check_and_liquidate(&mut accounts, &mark_prices);
         assert!(results.is_empty());
@@ -587,7 +595,10 @@ mod tests {
         mark_prices.insert("BTC-USDT".to_string(), 3_500_000);
         mark_prices.insert("ETH-USDT".to_string(), 3_500_000);
 
-        assert!(accounts.get("trader").unwrap().is_liquidatable(&mark_prices, 500));
+        assert!(accounts
+            .get("trader")
+            .unwrap()
+            .is_liquidatable(&mark_prices, 500));
 
         // Run partial liquidation
         let results = check_and_liquidate(&mut accounts, &mark_prices);

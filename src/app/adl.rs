@@ -14,6 +14,7 @@
 
 use crate::app::accounts::AccountManager;
 use crate::types::Price;
+use serde::{Deserialize, Serialize};
 
 /// ADL-specific errors
 #[derive(Debug, Clone, thiserror::Error)]
@@ -44,7 +45,7 @@ pub struct ADLCandidate {
 }
 
 /// Result of a single ADL operation against one counterparty
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ADLResult {
     /// Account that was deleveraged
     pub address: String,
@@ -272,7 +273,7 @@ pub fn execute_adl(
 pub fn process_adl_if_needed(
     accounts: &mut AccountManager,
     symbol: &str,
-    liquidation_pnl: i64,      // Negative value = loss
+    liquidation_pnl: i64, // Negative value = loss
     insurance_fund: i64,
     mark_price: Price,
     liquidated_was_long: bool, // true = liquidated position was long
@@ -418,8 +419,8 @@ mod tests {
         let candidates = find_adl_candidates(
             &accounts,
             "BTC-USDT",
-            5_000_000, // mark price $50k
-            false,      // target longs
+            5_000_000,    // mark price $50k
+            false,        // target longs
             "liquidator", // exclude
         );
 
@@ -433,7 +434,7 @@ mod tests {
         // small_high_pct: (50k - 40k) * 0.1 BTC / (40k * 0.1 BTC) = 25%
         // large_low_pct: (50k - 49k) * 10 BTC / (49k * 10 BTC) ≈ 2%
         assert!(candidates[0].profit_pct_bps > 2000); // > 20%
-        assert!(candidates[1].profit_pct_bps < 500);  // < 5%
+        assert!(candidates[1].profit_pct_bps < 500); // < 5%
     }
 
     #[test]
@@ -441,13 +442,7 @@ mod tests {
         let accounts = setup_accounts();
 
         // Price rose to $55k - shorts are losing, shouldn't be candidates
-        let candidates = find_adl_candidates(
-            &accounts,
-            "BTC-USDT",
-            5_500_000,
-            true,
-            "liquidated",
-        );
+        let candidates = find_adl_candidates(&accounts, "BTC-USDT", 5_500_000, true, "liquidated");
 
         assert!(candidates.is_empty());
     }
@@ -481,7 +476,11 @@ mod tests {
             .map(|(_, size)| size * 4_500_000 / 100_000_000)
             .sum();
         // Allow 1% variance due to integer rounding
-        assert!(total_value >= 49_000, "Total value {} should be close to 50,000", total_value);
+        assert!(
+            total_value >= 49_000,
+            "Total value {} should be close to 50,000",
+            total_value
+        );
     }
 
     #[test]
@@ -508,8 +507,22 @@ mod tests {
         let mut accounts = setup_accounts();
 
         // Record original sizes
-        let short1_original = accounts.get("short1").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
-        let short2_original = accounts.get("short2").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+        let short1_original = accounts
+            .get("short1")
+            .unwrap()
+            .positions
+            .get("BTC-USDT")
+            .unwrap()
+            .size
+            .abs();
+        let short2_original = accounts
+            .get("short2")
+            .unwrap()
+            .positions
+            .get("BTC-USDT")
+            .unwrap()
+            .size
+            .abs();
 
         // Large loss that exceeds insurance
         let result = process_adl_if_needed(
@@ -530,13 +543,30 @@ mod tests {
 
         // Verify at least one position was reduced
         // With percentage-based ranking, both shorts have same %, so either could be hit first
-        let short1_now = accounts.get("short1").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
-        let short2_now = accounts.get("short2").unwrap().positions.get("BTC-USDT").unwrap().size.abs();
+        let short1_now = accounts
+            .get("short1")
+            .unwrap()
+            .positions
+            .get("BTC-USDT")
+            .unwrap()
+            .size
+            .abs();
+        let short2_now = accounts
+            .get("short2")
+            .unwrap()
+            .positions
+            .get("BTC-USDT")
+            .unwrap()
+            .size
+            .abs();
 
         let total_original = short1_original + short2_original;
         let total_now = short1_now + short2_now;
 
         // Total position size should be reduced
-        assert!(total_now < total_original, "Total position size should be reduced");
+        assert!(
+            total_now < total_original,
+            "Total position size should be reduced"
+        );
     }
 }

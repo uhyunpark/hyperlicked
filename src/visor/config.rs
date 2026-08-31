@@ -8,7 +8,7 @@ use thiserror::Error;
 
 /// Default configuration values
 pub mod defaults {
-    pub const DAEMON_NAME: &str = "hl-server";
+    pub const DAEMON_NAME: &str = "hl-node";
     pub const RESTART_DELAY_MS: u64 = 1000;
     pub const MAX_RESTART_ATTEMPTS: u32 = 5;
     pub const HEALTH_CHECK_INTERVAL_MS: u64 = 5000;
@@ -29,7 +29,7 @@ pub enum ConfigError {
 /// Visor configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisorConfig {
-    /// Name of the daemon binary (default: hl-server)
+    /// Name of the daemon binary (default: hl-node)
     #[serde(default = "default_daemon_name")]
     pub daemon_name: String,
 
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = VisorConfig::default();
-        assert_eq!(config.daemon_name, "hl-server");
+        assert_eq!(config.daemon_name, "hl-node");
         assert_eq!(config.max_restart_attempts, 5);
         assert!(!config.auto_download);
     }
