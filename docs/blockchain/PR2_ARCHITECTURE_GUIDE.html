@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Hyperlicked PR #2의 전체 구조 변화와 보완 내용을 누구나 이해할 수 있도록 설명한 문서">
+  <title>Hyperlicked PR #2 — 전체 구조 변화 설명서</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --surface-2: #eef2f7;
+      --ink: #172033;
+      --muted: #5a667a;
+      --line: #d7deea;
+      --brand: #3157d5;
+      --brand-soft: #e9eeff;
+      --good: #08775c;
+      --good-soft: #e3f7f0;
+      --warn: #9a5a00;
+      --warn-soft: #fff3d7;
+      --danger: #b42335;
+      --danger-soft: #ffeaed;
+      --violet: #7048c8;
+      --violet-soft: #f0eaff;
+      --shadow: 0 14px 40px rgba(35, 50, 85, 0.09);
+      --radius: 18px;
+      --max: 1180px;
+    }
+
+    [data-theme="dark"] {
+      --bg: #0d1320;
+      --surface: #151d2d;
+      --surface-2: #1c2638;
+      --ink: #edf2fb;
+      --muted: #a9b5c9;
+      --line: #2f3b50;
+      --brand: #8da7ff;
+      --brand-soft: #202e55;
+      --good: #61d7b4;
+      --good-soft: #123b33;
+      --warn: #ffc766;
+      --warn-soft: #493616;
+      --danger: #ff8795;
+      --danger-soft: #4d2029;
+      --violet: #c1a8ff;
+      --violet-soft: #342853;
+      --shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", sans-serif;
+      line-height: 1.72;
+      letter-spacing: -0.012em;
+    }
+    a { color: var(--brand); }
+    code {
+      padding: 0.12em 0.35em;
+      border-radius: 5px;
+      background: var(--surface-2);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9em;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-2);
+      line-height: 1.55;
+    }
+    pre code { padding: 0; background: transparent; }
+    strong { font-weight: 700; }
+    .skip-link {
+      position: absolute;
+      z-index: 100;
+      top: -80px;
+      left: 16px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: var(--ink);
+      color: var(--bg);
+    }
+    .skip-link:focus { top: 12px; }
+
+    .topbar {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+      background: color-mix(in srgb, var(--bg) 90%, transparent);
+      backdrop-filter: blur(14px);
+    }
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      width: min(var(--max), calc(100% - 32px));
+      min-height: 62px;
+      margin: auto;
+    }
+    .brand {
+      flex: 0 0 auto;
+      color: var(--ink);
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .brand span { color: var(--brand); }
+    .topnav {
+      display: flex;
+      flex: 1;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .topnav::-webkit-scrollbar { display: none; }
+    .topnav a {
+      padding: 7px 10px;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .topnav a:hover,
+    .topnav a[aria-current="true"] {
+      background: var(--brand-soft);
+      color: var(--brand);
+    }
+    .theme-button {
+      flex: 0 0 auto;
+      min-width: 42px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    main,
+    footer {
+      width: min(var(--max), calc(100% - 32px));
+      margin-inline: auto;
+    }
+    .hero { padding: 76px 0 44px; scroll-margin-top: 118px; }
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--brand);
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -0.035em; }
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-size: clamp(2.2rem, 6vw, 4.7rem);
+    }
+    h2 { margin: 0 0 16px; font-size: clamp(1.7rem, 3vw, 2.6rem); }
+    h3 { margin: 0 0 9px; font-size: 1.1rem; }
+    .hero-lede {
+      max-width: 820px;
+      margin: 24px 0 26px;
+      color: var(--muted);
+      font-size: clamp(1.08rem, 2vw, 1.3rem);
+    }
+    .status-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 11px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--ink);
+      font-size: 0.84rem;
+      font-weight: 700;
+    }
+    .badge.good { background: var(--good-soft); color: var(--good); }
+    .badge.warn { background: var(--warn-soft); color: var(--warn); }
+    .badge.danger { background: var(--danger-soft); color: var(--danger); }
+    .hero-grid,
+    .grid-2,
+    .grid-3,
+    .grid-4 { display: grid; gap: 18px; }
+    .hero-grid { grid-template-columns: 1.4fr 0.9fr; align-items: end; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .card.flat { box-shadow: none; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      padding: 14px;
+      border-radius: 12px;
+      background: var(--surface-2);
+    }
+    .metric b { display: block; color: var(--brand); font-size: 1.42rem; }
+    .metric span { color: var(--muted); font-size: 0.82rem; }
+    .callout {
+      margin-top: 22px;
+      padding: 18px 20px;
+      border-left: 5px solid var(--danger);
+      border-radius: 0 14px 14px 0;
+      background: var(--danger-soft);
+    }
+    .callout strong { color: var(--danger); }
+    section { padding: 68px 0; scroll-margin-top: 76px; }
+    section + section { border-top: 1px solid var(--line); }
+    .section-lede { max-width: 840px; margin: 0 0 30px; color: var(--muted); font-size: 1.05rem; }
+    .kicker { margin: 0 0 8px; color: var(--brand); font-weight: 800; font-size: 0.83rem; letter-spacing: 0.07em; }
+
+    .promise { position: relative; padding-top: 58px; }
+    .promise-number {
+      position: absolute;
+      top: 18px;
+      left: 22px;
+      color: var(--brand);
+      font-size: 1.6rem;
+      font-weight: 900;
+    }
+    .plain { color: var(--muted); }
+    .plain strong { color: var(--ink); }
+
+    .before-after {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    .architecture {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .architecture.before { border-top: 5px solid var(--warn); }
+    .architecture.after { border-top: 5px solid var(--good); }
+    .architecture ul { margin: 16px 0 0; padding-left: 20px; }
+    .architecture li + li { margin-top: 10px; }
+    .arch-stack { display: grid; gap: 9px; margin-top: 18px; }
+    .arch-box {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-2);
+      text-align: center;
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+    .split-stack { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .split-stack .arch-box { min-height: 74px; }
+    .down-arrow { color: var(--muted); text-align: center; font-size: 1.35rem; line-height: 1; }
+    .big-arrow { display: grid; place-items: center; color: var(--brand); font-size: 2rem; font-weight: 900; }
+    .meaning {
+      margin-top: 22px;
+      padding: 18px;
+      border-radius: 14px;
+      background: var(--good-soft);
+      color: var(--good);
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
+    th, td { padding: 14px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 0.82rem; letter-spacing: 0.02em; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .col-before { color: var(--warn); font-weight: 700; }
+    .col-after { color: var(--good); font-weight: 700; }
+
+    .journey {
+      position: relative;
+      display: grid;
+      gap: 0;
+      margin-top: 28px;
+    }
+    .journey::before {
+      position: absolute;
+      top: 24px;
+      bottom: 24px;
+      left: 23px;
+      width: 2px;
+      background: var(--line);
+      content: "";
+    }
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 16px;
+      padding: 0 0 24px;
+    }
+    .step:last-child { padding-bottom: 0; }
+    .step-marker {
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border: 3px solid var(--bg);
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      font-weight: 900;
+    }
+    .step-body {
+      padding: 14px 17px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface);
+    }
+    .step-body p { margin: 5px 0 0; color: var(--muted); }
+    .step-body .why { margin-top: 9px; color: var(--ink); font-size: 0.92rem; }
+    .step.final .step-marker { background: var(--good); }
+    .step.final .step-body { border-color: color-mix(in srgb, var(--good) 50%, var(--line)); }
+
+    .root-figure {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .root-figure svg { display: block; width: 100%; height: auto; }
+    .root-figure text { font-family: inherit; fill: var(--ink); }
+    .root-figure .muted-svg { fill: var(--muted); }
+    .root-figure .node { fill: var(--surface-2); stroke: var(--line); stroke-width: 2; }
+    .root-figure .state-node { fill: var(--brand-soft); stroke: var(--brand); }
+    .root-figure .event-node { fill: var(--violet-soft); stroke: var(--violet); }
+    .root-figure .wire { stroke: var(--muted); stroke-width: 2; fill: none; }
+    .component-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .component-grid span {
+      padding: 10px 8px;
+      border-radius: 9px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-size: 0.84rem;
+      font-weight: 700;
+      text-align: center;
+    }
+    .analogy {
+      margin: 16px 0 0;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: var(--violet-soft);
+      color: var(--violet);
+    }
+
+    .guard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .guard {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .guard-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      margin-bottom: 12px;
+      border-radius: 10px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-weight: 900;
+    }
+    .guard p { margin: 6px 0 0; color: var(--muted); }
+    .guard small { display: block; margin-top: 10px; color: var(--ink); }
+
+    .limit-bar { margin-top: 15px; }
+    .limit-bar + .limit-bar { margin-top: 17px; }
+    .limit-label { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 6px; font-size: 0.88rem; }
+    .bar-track { height: 11px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
+    .bar-fill { height: 100%; border-radius: inherit; background: var(--brand); }
+
+    .sync-flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      align-items: center;
+      margin: 24px 0;
+    }
+    .sync-box {
+      min-height: 114px;
+      padding: 14px 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      text-align: center;
+    }
+    .sync-box b { display: block; margin-bottom: 5px; color: var(--brand); }
+    .sync-box span { color: var(--muted); font-size: 0.84rem; }
+    .sync-arrow { color: var(--muted); text-align: center; font-size: 1.4rem; }
+
+    .supply {
+      overflow: hidden;
+      display: flex;
+      height: 64px;
+      margin: 24px 0 12px;
+      border-radius: 14px;
+      background: var(--surface-2);
+    }
+    .supply > div { display: grid; place-items: center; padding: 8px; color: #fff; text-align: center; }
+    .supply .alloc { width: 61.112%; background: #3157d5; }
+    .supply .reserve { width: 38.888%; background: #7048c8; }
+    .supply strong { display: block; line-height: 1.2; }
+    .supply small { opacity: 0.88; }
+    .equation {
+      padding: 18px;
+      border: 1px dashed var(--brand);
+      border-radius: 13px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      text-align: center;
+      font-weight: 800;
+    }
+    .cadence { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+    .cadence div { padding: 14px; border-radius: 12px; background: var(--surface-2); }
+    .cadence b { display: block; color: var(--violet); }
+    .cadence span { color: var(--muted); font-size: 0.84rem; }
+
+    .topology { min-height: 100%; }
+    .node-map { display: grid; place-items: center; min-height: 220px; margin: 18px 0; }
+    .single-node {
+      display: grid;
+      place-items: center;
+      width: 126px;
+      height: 126px;
+      border: 8px solid var(--brand-soft);
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      text-align: center;
+      font-weight: 800;
+    }
+    .four-nodes {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      width: min(330px, 100%);
+    }
+    .four-nodes::before,
+    .four-nodes::after {
+      position: absolute;
+      z-index: 0;
+      background: var(--line);
+      content: "";
+    }
+    .four-nodes::before { top: 50%; left: 16%; width: 68%; height: 2px; }
+    .four-nodes::after { top: 16%; left: 50%; width: 2px; height: 68%; }
+    .mini-node {
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1;
+      border: 5px solid var(--brand-soft);
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .status-column { border-top: 5px solid var(--line); }
+    .status-column.done { border-top-color: var(--good); }
+    .status-column.staged { border-top-color: var(--warn); }
+    .status-column.todo { border-top-color: var(--danger); }
+    .status-column ul { margin: 16px 0 0; padding-left: 20px; }
+    .status-column li + li { margin-top: 10px; }
+    .status-column.done h3 { color: var(--good); }
+    .status-column.staged h3 { color: var(--warn); }
+    .status-column.todo h3 { color: var(--danger); }
+
+    .test-card b { display: block; color: var(--brand); font-size: 2rem; line-height: 1.1; }
+    .test-card span { color: var(--muted); font-size: 0.88rem; }
+    .test-note { margin-top: 18px; color: var(--muted); font-size: 0.9rem; }
+
+    .roadmap { counter-reset: road; display: grid; gap: 12px; }
+    .roadmap-item {
+      counter-increment: road;
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .roadmap-item::before {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-weight: 900;
+      content: counter(road);
+    }
+    .roadmap-item p { margin: 5px 0 0; color: var(--muted); }
+
+    details {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    summary { padding: 13px 16px; cursor: pointer; font-weight: 700; }
+    details > div { padding: 0 16px 16px; color: var(--muted); }
+    details ul { margin-bottom: 0; }
+
+    .glossary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
+    .term { padding: 13px 0; border-bottom: 1px solid var(--line); }
+    .term dt { font-weight: 800; }
+    .term dd { margin: 4px 0 0; color: var(--muted); }
+    .sources li + li { margin-top: 7px; }
+    footer { padding: 32px 0 54px; color: var(--muted); font-size: 0.9rem; }
+
+    @media (max-width: 900px) {
+      .hero-grid, .grid-3, .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .before-after { grid-template-columns: 1fr; }
+      .big-arrow { transform: rotate(90deg); min-height: 42px; }
+      .sync-flow { grid-template-columns: 1fr; }
+      .sync-box { min-height: 0; }
+      .sync-arrow { transform: rotate(90deg); }
+      .topbar-inner { align-items: flex-start; flex-wrap: wrap; gap: 6px 12px; padding: 10px 0; }
+      .topnav { order: 3; flex-basis: 100%; }
+    }
+    @media (max-width: 660px) {
+      main, footer, .topbar-inner { width: min(100% - 22px, var(--max)); }
+      .hero { padding-top: 46px; }
+      .hero-grid, .grid-2, .grid-3, .grid-4, .guard-grid, .glossary { grid-template-columns: 1fr; }
+      .metric-grid, .component-grid, .cadence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      section { padding: 48px 0; }
+      .card, .architecture { padding: 18px; }
+      .card.promise { padding-top: 58px; }
+      .supply { height: 88px; }
+      .supply > div { font-size: 0.78rem; }
+      th, td { min-width: 180px; }
+      .step { gap: 10px; }
+      .journey::before { left: 19px; }
+      .step-marker { width: 40px; height: 40px; }
+      .step { grid-template-columns: 40px minmax(0, 1fr); }
+    }
+    @media print {
+      :root,
+      [data-theme="dark"] {
+        --bg: #fff;
+        --surface: #fff;
+        --surface-2: #f3f5f8;
+        --ink: #111827;
+        --muted: #4b5563;
+        --line: #d1d5db;
+        --brand: #3157d5;
+        --brand-soft: #e9eeff;
+        --good: #08775c;
+        --good-soft: #e3f7f0;
+        --warn: #9a5a00;
+        --warn-soft: #fff3d7;
+        --danger: #b42335;
+        --danger-soft: #ffeaed;
+        --violet: #7048c8;
+        --violet-soft: #f0eaff;
+      }
+      body { font-size: 10.5pt; }
+      .topbar, .skip-link, .theme-button { display: none !important; }
+      main, footer { width: 100%; }
+      .hero { padding-top: 20px; }
+      .hero-grid { grid-template-columns: 1fr; }
+      h1 { font-size: 42pt; }
+      .hero-grid aside { max-width: 420px; }
+      .before-after { grid-template-columns: repeat(2, minmax(0, 1fr)); break-inside: avoid; }
+      .big-arrow { display: none; }
+      .architecture { padding: 14px; }
+      .arch-box { padding: 8px; }
+      section { padding: 28px 0; break-inside: avoid; }
+      .card, .architecture, .root-figure, .guard, .roadmap-item { box-shadow: none; break-inside: avoid; }
+      details:not([open]) > *:not(summary) { display: block !important; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 바로가기</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top">Hyperlicked <span>PR #2</span></a>
+      <nav class="topnav" aria-label="문서 목차">
+        <a href="#why">핵심</a>
+        <a href="#architecture">전후 구조</a>
+        <a href="#transaction">거래 흐름</a>
+        <a href="#integrity">합의·상태</a>
+        <a href="#economy">HYCK</a>
+        <a href="#local">로컬 실행</a>
+        <a href="#status">현재 수준</a>
+        <a href="#next">다음 단계</a>
+      </nav>
+      <button class="theme-button" id="theme-toggle" type="button" aria-label="색상 테마 전환">◐</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <header class="hero" id="top">
+      <div class="hero-grid">
+        <div>
+          <p class="eyebrow">Architecture guide · 2026-09-01</p>
+          <h1>개발용 체인에서<br>하나의 합의 시스템으로</h1>
+          <p class="hero-lede">
+            이 문서는 PR #2 전후의 차이를 코드 순서가 아니라 <strong>사람이 이해하는 순서</strong>로 설명합니다.
+            핵심은 기능을 많이 추가했다는 것이 아니라, 거래 접수부터 합의·저장·조회까지 하나의 신뢰 경로로 묶었다는 점입니다.
+          </p>
+          <div class="status-row" aria-label="현재 프로젝트 상태">
+            <span class="badge good">✓ Near-full-feature showcase</span>
+            <span class="badge warn">정적 curated validator</span>
+            <span class="badge danger">✕ NOT MAINNET READY</span>
+          </div>
+        </div>
+        <aside class="card" aria-label="PR 규모와 핵심 숫자">
+          <div class="metric-grid">
+            <div class="metric"><b>1</b><span>canonical node runtime</span></div>
+            <div class="metric"><b>2</b><span>합의가 인증하는 root</span></div>
+            <div class="metric"><b>21</b><span>validator 최대치</span></div>
+            <div class="metric"><b>1B</b><span>HYCK 고정 공급량</span></div>
+          </div>
+        </aside>
+      </div>
+      <div class="callout" role="note">
+        <strong>중요:</strong> 이 PR은 로컬·쇼케이스 체인의 안전 경계를 크게 보완했지만, 실자산 보관·공개 validator 운영·실제 Ethereum bridge를 허가하는 출시 승인이 아닙니다.
+      </div>
+    </header>
+
+    <section id="why">
+      <p class="kicker">01 · 먼저 이해할 것</p>
+      <h2>이번 PR이 만든 세 가지 약속</h2>
+      <p class="section-lede">블록체인의 복잡한 용어를 잠시 내려놓으면, 이번 변화는 다음 세 문장으로 요약됩니다.</p>
+      <div class="grid-3">
+        <article class="card promise">
+          <span class="promise-number">01</span>
+          <h3>모든 노드가 같은 거래를 실행한다</h3>
+          <p class="plain">제안 블록에 들어 있는 <strong>정확한 payload</strong>만 실행합니다. 각 노드의 로컬 메모리 상태로 빈칸을 추측하지 않습니다.</p>
+        </article>
+        <article class="card promise">
+          <span class="promise-number">02</span>
+          <h3>합의한 결과를 재시작 후에도 증명한다</h3>
+          <p class="plain">상태·영수증·합의 안전정보를 RocksDB에 묶어서 기록하고, 복구 시 같은 hash가 나오는지 다시 확인합니다.</p>
+        </article>
+        <article class="card promise">
+          <span class="promise-number">03</span>
+          <h3>Canonical 거래의 “접수”와 “확정”을 구분한다</h3>
+          <p class="plain">주문·trigger API는 먼저 <strong>pending</strong>을 알리고, 합의와 디스크 저장이 끝난 뒤에만 <strong>finalized</strong> 영수증과 알림을 제공합니다.</p>
+        </article>
+      </div>
+      <p class="analogy"><strong>비유:</strong> 이전에는 접수 창구, 심사실, 장부가 서로 다른 복사본을 볼 수 있었습니다. 지금은 하나의 원본 문서가 접수 → 심사 → 도장 → 금고 보관을 순서대로 통과합니다.</p>
+    </section>
+
+    <section id="architecture">
+      <p class="kicker">02 · 전체 그림</p>
+      <h2>PR 전후: 두 실행 경로를 하나로 합쳤다</h2>
+      <p class="section-lede">가장 큰 구조적 문제는 <code>hl-server</code>와 <code>hl-node</code>가 같은 체인의 두 모드가 아니라, 서로 다른 실행·저장 경로였다는 점입니다.</p>
+
+      <div class="before-after" role="group" aria-label="PR 전후 전체 구조 비교">
+        <article class="architecture before">
+          <span class="badge warn">PR 이전</span>
+          <h3>분리된 두 세계</h3>
+          <div class="arch-stack">
+            <div class="split-stack">
+              <div class="arch-box">hl-server<br><small>REST · WebSocket</small></div>
+              <div class="arch-box">hl-node<br><small>합의 테스트</small></div>
+            </div>
+            <div class="down-arrow">↓</div>
+            <div class="split-stack">
+              <div class="arch-box">별도 상태·루프</div>
+              <div class="arch-box">MemoryBlockStore</div>
+            </div>
+          </div>
+          <ul>
+            <li>API가 보여주는 상태와 실제 QC가 확정한 상태가 갈라질 수 있음</li>
+            <li>싱글노드와 멀티노드가 서로 다른 실행 계약을 사용</li>
+            <li>제출 성공이 체인 확정처럼 보일 수 있음</li>
+          </ul>
+        </article>
+
+        <div class="big-arrow" aria-hidden="true">→</div>
+
+        <article class="architecture after">
+          <span class="badge good">PR 이후</span>
+          <h3>하나의 canonical runtime</h3>
+          <div class="arch-stack">
+            <div class="arch-box">Web / Client</div>
+            <div class="down-arrow">↓</div>
+            <div class="arch-box">hl-node · API / WS / Mempool</div>
+            <div class="down-arrow">↓</div>
+            <div class="arch-box">ConsensusRunner + CanonicalAppHook</div>
+            <div class="down-arrow">↓</div>
+            <div class="arch-box">Atomic RocksDB + finalized query</div>
+          </div>
+          <ul>
+            <li>N=1과 N=4가 같은 binary·genesis loader·합의 경로를 사용</li>
+            <li>오직 합의 transaction만 canonical state를 변경</li>
+            <li>디스크 확정 뒤에만 API와 WebSocket에 결과 공개</li>
+          </ul>
+        </article>
+      </div>
+      <div class="meaning">결과: “어느 프로세스의 상태가 진짜인가?”라는 질문의 답이 <code>hl-node</code> 하나로 고정되었습니다.</div>
+
+      <div class="table-wrap" style="margin-top: 28px">
+        <table>
+          <thead><tr><th>관점</th><th>PR 이전</th><th>PR 이후</th><th>사용자에게 생기는 차이</th></tr></thead>
+          <tbody>
+            <tr><td>실행 주체</td><td class="col-before">서버와 노드가 분리</td><td class="col-after">hl-node 하나</td><td>조회 상태와 합의 상태가 같은 경로에서 나옴</td></tr>
+            <tr><td>거래 응답</td><td class="col-before">임시 order ID가 성공처럼 보임</td><td class="col-after">pending tx hash → finalized receipt</td><td>접수와 확정을 구분할 수 있음</td></tr>
+            <tr><td>블록 실행</td><td class="col-before">로컬 상태 fallback 가능</td><td class="col-after">제안된 exact payload만 실행</td><td>노드마다 다른 거래를 실행할 위험 감소</td></tr>
+            <tr><td>저장·복구</td><td class="col-before">메모리 중심·경계 불명확</td><td class="col-after">원자적 RocksDB commit과 재검증</td><td>재시작 뒤에도 확정 결과를 이어감</td></tr>
+            <tr><td>로컬 토폴로지</td><td class="col-before">서로 다른 실행 방식</td><td class="col-after">같은 binary로 1개/4개 노드</td><td>로컬 테스트가 실제 네트워크 구조에 더 가까워짐</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="transaction">
+      <p class="kicker">03 · 거래 한 건 따라가기</p>
+      <h2>주문 버튼을 누른 뒤 “확정”되기까지</h2>
+      <p class="section-lede">이 흐름을 이해하면 canonical 서명, gossip, QC, root, receipt가 왜 필요한지 한 번에 연결됩니다.</p>
+
+      <div class="journey">
+        <article class="step">
+          <div class="step-marker">1</div>
+          <div class="step-body"><h3>지갑이 정확한 행동에 서명</h3><p>프론트는 주문·취소·포지션 종료·TP/SL을 canonical EIP-712 v1 envelope으로 만듭니다.</p><p class="why"><strong>왜?</strong> 다른 체인에서 서명을 재사용하거나, 서명 뒤 행동을 바꾸는 것을 막습니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">2</div>
+          <div class="step-body"><h3>Canonical 주문·trigger API가 입구에서 검증</h3><p>chain domain, signer, nonce, 유효시간, action hash와 크기를 확인한 뒤 mempool에 넣고 <code>{status: "pending", tx_hash}</code>를 반환합니다.</p><p class="why"><strong>의미:</strong> pending은 “접수됨”이지 “체인에 확정됨”이 아닙니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">3</div>
+          <div class="step-body"><h3>validator 네트워크로 전파</h3><p>첫 gossip이 끊겨도 2초마다 최대 32건·2 MiB 범위에서 미확정 envelope을 재전파합니다.</p><p class="why"><strong>왜?</strong> 거래를 받은 노드가 현재 leader가 아니거나 순간적으로 연결이 끊긴 경우를 복구합니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">4</div>
+          <div class="step-body"><h3>leader가 결정적인 순서로 블록 제안</h3><p>우선순위 bucket을 사용하되, 같은 signer의 nonce는 반드시 끊김 없이 순서대로 배치합니다.</p><p class="why"><strong>왜?</strong> 미래 nonce는 기다릴 수 있지만, 합의 실행 순서는 모든 노드에서 같아야 합니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">5</div>
+          <div class="step-body"><h3>모든 validator가 독립 실행</h3><p>부모 block, proposer, QC, payload를 검증한 뒤 private candidate 상태에서 같은 거래를 실행합니다.</p><p class="why"><strong>왜?</strong> leader의 결과를 믿는 것이 아니라 각 노드가 직접 계산해 확인합니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">6</div>
+          <div class="step-body"><h3>두 개의 결과 지문 생성</h3><p><code>app_hash</code>는 최종 상태, <code>commitment_root</code>는 거래 영수증과 이벤트의 지문입니다.</p><p class="why"><strong>왜?</strong> “잔액이 무엇인가”와 “이번 블록에서 무슨 일이 있었나”를 각각 검증합니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">7</div>
+          <div class="step-body"><h3>stake-weighted BLS 투표와 QC</h3><p>현재 위원회의 voting power가 엄격한 2/3 초과에 도달하면 QC(정족수 인증서)가 만들어집니다.</p><p class="why"><strong>비유:</strong> QC는 충분한 지분을 가진 검증자들이 같은 문서에 찍은 압축 공증 도장입니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">8</div>
+          <div class="step-body"><h3>HotStuff-2 two-chain finality</h3><p>인증된 자식 block까지 연결되면 적절한 조상 block이 되돌릴 수 없는 확정 상태가 됩니다.</p><p class="why"><strong>왜?</strong> 단지 제안되거나 한 번 투표된 상태를 확정이라고 부르지 않습니다.</p></div>
+        </article>
+        <article class="step">
+          <div class="step-marker">9</div>
+          <div class="step-body"><h3>RocksDB에 원자적으로 기록</h3><p>block, 높이 index, 합의 safety state, roots, receipts/events, commit marker를 동기화된 batch로 저장합니다.</p><p class="why"><strong>왜?</strong> 중간에 전원이 꺼져도 절반만 저장된 “유령 확정”을 만들지 않습니다.</p></div>
+        </article>
+        <article class="step final">
+          <div class="step-marker">✓</div>
+          <div class="step-body"><h3>사용자에게 finalized 공개</h3><p><code>GET /api/v1/transactions/:tx_hash</code> 조회와 private WebSocket <code>transactionFinalized</code> 알림이 이 시점에만 나갑니다. Non-dev 정책에서는 private 구독 서명이 필수이고, 현재 dev fixture에서는 인증을 생략할 수 있습니다.</p><p class="why"><strong>결과:</strong> 알림을 놓쳐도 영구 receipt index에서 다시 조회할 수 있습니다.</p></div>
+        </article>
+      </div>
+
+      <p class="callout" style="border-left-color: var(--warn); background: var(--warn-soft)"><strong style="color: var(--warn)">Canonical 경로의 범위:</strong> 위 흐름은 서명된 주문·취소·trigger·position-close 경로를 설명합니다. Dev-only simulated deposit/withdraw와 일부 legacy route는 아직 이 pending tx-hash 계약을 사용하지 않으며, mainnet 자산 경로로 간주하면 안 됩니다.</p>
+
+      <details>
+        <summary>기술 상세: canonical EIP-712 envelope에 무엇이 들어가나?</summary>
+        <div>
+          <p><code>chainDomain</code>, <code>signer</code>, <code>nonce</code>, <code>validAfter</code>, <code>validUntil</code>, <code>actionHash</code>가 서명 대상입니다. <code>chainDomain</code>은 단순 EVM chain ID가 아니라 genesis와 protocol 설정에 묶인 hash입니다.</p>
+          <p>같은 envelope을 API ingress, mempool, block 실행, validator replay에서 반복 검증합니다. 프론트와 Rust는 golden vector 테스트로 동일한 action encoding을 확인합니다.</p>
+        </div>
+      </details>
+    </section>
+
+    <section id="integrity">
+      <p class="kicker">04 · 합의와 상태 무결성</p>
+      <h2>블록에는 결과를 증명하는 두 개의 봉인이 있다</h2>
+      <p class="section-lede">모든 상태를 한 덩어리로 취급하지 않고, “현재 상태”와 “이번 블록의 실행 기록”을 분리해서 각각 인증합니다.</p>
+
+      <div class="grid-2">
+        <figure class="root-figure">
+          <svg viewBox="0 0 680 420" role="img" aria-labelledby="root-title root-desc">
+            <title id="root-title">블록의 두 루트 구조</title>
+            <desc id="root-desc">V5 블록 해시는 payload와 app hash, commitment root를 묶고, app hash는 9개 상태 영역을, commitment root는 영수증과 이벤트를 인증한다.</desc>
+            <path class="wire" d="M340 92 V138 M340 138 H172 V182 M340 138 H508 V182"/>
+            <rect class="node" x="210" y="24" width="260" height="68" rx="14"/>
+            <text x="340" y="52" text-anchor="middle" font-weight="700">V5 Block Hash</text>
+            <text class="muted-svg" x="340" y="75" text-anchor="middle" font-size="14">payload + context + 두 root</text>
+            <rect class="node state-node" x="62" y="182" width="220" height="82" rx="14"/>
+            <text x="172" y="214" text-anchor="middle" font-weight="700">app_hash</text>
+            <text class="muted-svg" x="172" y="239" text-anchor="middle" font-size="14">현재 상태의 지문</text>
+            <rect class="node event-node" x="398" y="182" width="220" height="82" rx="14"/>
+            <text x="508" y="214" text-anchor="middle" font-weight="700">commitment_root</text>
+            <text class="muted-svg" x="508" y="239" text-anchor="middle" font-size="14">영수증·이벤트의 지문</text>
+            <path class="wire" d="M172 264 V305 M508 264 V305"/>
+            <rect class="node" x="42" y="305" width="260" height="84" rx="14"/>
+            <text x="172" y="337" text-anchor="middle" font-weight="700">9개 state component</text>
+            <text class="muted-svg" x="172" y="362" text-anchor="middle" font-size="14">계정 · 주문장 · staking 등</text>
+            <rect class="node" x="378" y="305" width="260" height="84" rx="14"/>
+            <text x="508" y="337" text-anchor="middle" font-weight="700">Commitment v2</text>
+            <text class="muted-svg" x="508" y="362" text-anchor="middle" font-size="14">receipt · tx event · system event</text>
+          </svg>
+          <figcaption class="plain">두 root 모두 block hash, proposer 서명, validator vote와 QC에 포함됩니다.</figcaption>
+        </figure>
+
+        <article class="card flat">
+          <h3><code>app_hash</code>: 장부의 현재 페이지</h3>
+          <p class="plain">Schema v5는 상태를 고정된 9개 영역으로 나누고 chain domain과 함께 hash합니다.</p>
+          <div class="component-grid" aria-label="상태 루트의 9개 구성요소">
+            <span>metadata</span><span>accounts</span><span>orderbooks</span>
+            <span>market configs</span><span>prices</span><span>funding</span>
+            <span>staking</span><span>triggers</span><span>oracle</span>
+          </div>
+          <h3 style="margin-top: 22px"><code>commitment_root</code>: 그 페이지를 만든 영수증철</h3>
+          <p class="plain">각 transaction의 성공·실패 상태, 안정적인 error code, 거래 이벤트와 reward 같은 system event를 순서대로 인증합니다.</p>
+        </article>
+      </div>
+
+      <h3 style="margin-top: 36px">무엇을 어떻게 막았나</h3>
+      <div class="guard-grid" style="margin-top: 14px">
+        <article class="guard"><span class="guard-icon">ID</span><h3>Chain / genesis / committee binding</h3><p>vote·QC·timeout·view change에 epoch, committee hash, genesis hash를 묶습니다.</p><small><strong>막는 문제:</strong> 다른 devnet·옛 위원회의 메시지 재사용</small></article>
+        <article class="guard"><span class="guard-icon">PK</span><h3>BLS Proof of Possession</h3><p>validator가 등록한 BLS 공개키의 비밀키를 실제로 소유하는지 증명합니다.</p><small><strong>막는 문제:</strong> rogue-key 방식의 집계서명 공격</small></article>
+        <article class="guard"><span class="guard-icon">QC</span><h3>Stake-weighted quorum</h3><p>사람 수가 아니라 bonded HYCK에서 나온 voting power로 strict &gt;2/3를 계산합니다.</p><small><strong>의미:</strong> 지분과 합의 영향력이 같은 단위를 사용</small></article>
+        <article class="guard"><span class="guard-icon">≠</span><h3>Equivocation evidence</h3><p>같은 view에 서로 다른 block을 투표한 양쪽 서명·state hash를 보존하고 앱에 전달합니다.</p><small><strong>한계:</strong> static epoch 0에서는 slash가 합의 위원회를 즉시 교체하지 않음</small></article>
+        <article class="guard"><span class="guard-icon">↗</span><h3>검증 후 gossip relay</h3><p>context·proposer·signature·QC 의미 검사를 통과한 메시지만 seen-cache와 relay에 넣습니다.</p><small><strong>막는 문제:</strong> 악성 메시지를 검사 전에 네트워크 전체로 증폭</small></article>
+        <article class="guard"><span class="guard-icon">⛁</span><h3>Crash-safe vote / commit</h3><p>투표 의도를 전송보다 먼저 저장하고, 확정 데이터는 synced atomic batch로 기록합니다.</p><small><strong>막는 문제:</strong> 재시작 후 이중투표 또는 절반짜리 commit</small></article>
+      </div>
+
+      <div class="grid-2" style="margin-top: 28px">
+        <article class="card flat">
+          <h3>자원 상한: 공격 비용도 합의 규칙의 일부</h3>
+          <p class="plain">유효해 보이는 큰 데이터나 수많은 fork가 메모리·디스크를 끝없이 차지하지 못하도록 경계를 둡니다.</p>
+          <div class="limit-bar"><div class="limit-label"><span>Block payload</span><strong>10 MB</strong></div><div class="bar-track"><div class="bar-fill" style="width: 31%"></div></div></div>
+          <div class="limit-bar"><div class="limit-label"><span>Sync / TCP response</span><strong>32 MiB</strong></div><div class="bar-track"><div class="bar-fill" style="width: 55%"></div></div></div>
+          <div class="limit-bar"><div class="limit-label"><span>Snapshot JSON</span><strong>64 MiB</strong></div><div class="bar-track"><div class="bar-fill" style="width: 82%"></div></div></div>
+          <p class="test-note">막대 길이는 상대적 시각화이며 목표 사용량이 아닙니다. ActiveSync window는 최대 1,000 blocks, 누적 128 MiB로 제한됩니다.</p>
+        </article>
+        <article class="card flat">
+          <h3>Speculative state: 확정 전 후보를 안전하게 다루기</h3>
+          <p class="plain">HotStuff는 여러 view와 늦게 도착한 QC 때문에 확정 전 branch를 잠시 보관해야 합니다. Block·pending·journal 저장에는 개수·깊이·byte 상한과 진행용 여유 공간을 둡니다.</p>
+          <p class="plain">Application state는 copy-on-write를 사용해 branch마다 전체 장부를 즉시 깊은 복사하지 않고, 실제로 바뀐 부분만 분리합니다. 다만 모든 application candidate를 합친 hard byte cap은 아직 후속 과제입니다.</p>
+          <div class="analogy"><strong>비유:</strong> 문서 초안마다 책 전체를 복사하지 않고, 원본을 함께 보다가 수정한 페이지만 별도 복사하는 방식입니다.</div>
+        </article>
+      </div>
+
+      <h3 style="margin-top: 38px">검증된 시작 동기화와 복구</h3>
+      <div class="sync-flow" role="group" aria-label="피어 다운로드부터 consensus runner 시작까지의 검증 순서">
+        <div class="sync-box"><b>1. Download</b><span>Block batch와 별도 finality endpoint의 proof를 받음</span></div>
+        <div class="sync-arrow" aria-hidden="true">→</div>
+        <div class="sync-box"><b>2. Verify</b><span>로컬 trusted committee로 parent·QC·two-chain 확인</span></div>
+        <div class="sync-arrow" aria-hidden="true">→</div>
+        <div class="sync-box"><b>3. Private replay</b><span>공개 상태를 건드리지 않고 roots 재계산</span></div>
+        <div class="sync-arrow" aria-hidden="true">→</div>
+        <div class="sync-box"><b>4. Atomic import</b><span>성공한 전체 prefix만 RocksDB에 반영</span></div>
+        <div class="sync-arrow" aria-hidden="true">→</div>
+        <div class="sync-box"><b>5. Start</b><span>정확한 head·domain·root handshake 뒤 합의 시작</span></div>
+      </div>
+      <p class="callout" style="border-left-color: var(--warn); background: var(--warn-soft)"><strong style="color: var(--warn)">범위 구분:</strong> finality proof를 검증하는 HTTP block-replay bootstrap은 구현됐습니다. 그러나 완전한 authenticated snapshot manifest/chunk proof, 범용 P2P state sync, 다중 peer failover는 아직 아닙니다.</p>
+    </section>
+
+    <section id="economy">
+      <p class="kicker">05 · HYCK와 staking</p>
+      <h2>보상은 새로 찍지 않고, 이미 발행한 reserve에서 이동한다</h2>
+      <p class="section-lede">이번 PR은 native token과 거래 collateral을 분리하고, staking voting power·보상·공급량 보존을 하나의 결정적 회계 규칙으로 묶었습니다.</p>
+
+      <div class="grid-2">
+        <article class="card flat">
+          <h3>Genesis에서 정확히 10억 HYCK</h3>
+          <div class="supply" role="group" aria-label="총 10억 HYCK 공급 구성">
+            <div class="alloc"><span><strong>611.12M</strong><small>초기 배분 가능</small></span></div>
+            <div class="reserve"><span><strong>388.88M</strong><small>reward reserve</small></span></div>
+          </div>
+          <p class="plain">6 decimals: <code>1 HYCK = 1,000,000 base units</code>. Validator bond와 사용자 allocation은 이미 발행된 treasury 몫에서 옮깁니다.</p>
+          <div class="equation">liquid + bonded + unbonding + pending rewards + reserve = 1,000,000,000 HYCK</div>
+        </article>
+        <article class="card flat">
+          <h3>Reward clock</h3>
+          <p class="plain">총 eligible stake가 커질수록 APY가 낮아지는 정수 inverse-square-root 곡선을 사용합니다. 400M HYCK가 stake된 지점의 연 환산 anchor는 2.37%입니다.</p>
+          <div class="cadence">
+            <div><b>매 block</b><span>경계 확인은 O(1)</span></div>
+            <div><b>90분</b><span>reward accrual</span></div>
+            <div><b>24시간</b><span>자동 compound</span></div>
+          </div>
+          <p class="plain">Reserve가 소진되면 지급은 0이 되며, 빚이나 무담보 신규 mint를 만들지 않습니다.</p>
+        </article>
+      </div>
+
+      <div class="grid-3" style="margin-top: 18px">
+        <article class="card flat"><h3>Voting power</h3><p class="plain">Whole bonded HYCK를 voting power로 변환합니다. Active set은 stake 내림차순 최대 21명입니다.</p></article>
+        <article class="card flat"><h3>Curated epoch 0</h3><p class="plain">현재 genesis에 넣은 소수 validator가 운영합니다. 2~3개로 시작할 수 있지만, 3 equal-power 구성은 한 노드 장애도 견디지 못합니다.</p></article>
+        <article class="card flat"><h3>Dynamic PoS는 staged</h3><p class="plain">다음 top-21과 transition proof 구조는 준비했지만, historical committee와 원자적 context 교체 전에는 활성화하지 않습니다.</p></article>
+      </div>
+      <p class="analogy"><strong>주의:</strong> Slashing은 application의 stake를 treasury로 돌릴 수 있지만, 현재 static epoch-0 consensus 위원회의 voting power를 즉시 낮추거나 validator를 퇴출시키지는 않습니다.</p>
+    </section>
+
+    <section id="local">
+      <p class="kicker">06 · 로컬에서 무엇을 띄우나</p>
+      <h2>싱글노드와 4-validator 모두 같은 체인 코드다</h2>
+      <p class="section-lede">싱글노드는 합의를 생략한 별도 모드가 아니라, validator가 한 명인 정상적인 N=1 네트워크입니다.</p>
+      <div class="grid-2">
+        <article class="card topology">
+          <span class="badge good">가장 빠른 개발 루프</span>
+          <h3 style="margin-top: 14px">N=1 single-node</h3>
+          <div class="node-map"><div class="single-node">hl-node<br>N=1</div></div>
+          <p class="plain">API, WebSocket, mempool, 합의, 실행, RocksDB가 모두 켜집니다. 한 validator가 전체 voting power를 가지므로 분산 장애 내성은 테스트하지 않습니다.</p>
+          <details><summary>실행 명령</summary><div><pre><code>./scripts/local-node
+
+# 별도 터미널
+cd web &amp;&amp; bun run dev</code></pre><p>스크립트가 dev-only BLS seed, single genesis와 node config를 주입합니다.</p></div></details>
+        </article>
+        <article class="card topology">
+          <span class="badge good">네트워크·복구 확인</span>
+          <h3 style="margin-top: 14px">N=4 Docker validators</h3>
+          <div class="node-map">
+            <div class="four-nodes" aria-label="서로 연결된 4개 validator">
+              <div class="mini-node">V0</div><div class="mini-node">V1</div>
+              <div class="mini-node">V2</div><div class="mini-node">V3</div>
+            </div>
+          </div>
+          <p class="plain">동일 genesis, 인증된 TCP peer, gossip admission, validator별 RocksDB volume을 사용합니다. Equal-power 4개에서는 3개의 동의로 진행해 한 노드 장애를 견딜 수 있습니다.</p>
+          <details><summary>실행 명령</summary><div><pre><code>docker compose -f docker-compose.validator4.yml up --build
+
+# 종료 — volume은 기본 보존
+docker compose -f docker-compose.validator4.yml down</code></pre></div></details>
+        </article>
+      </div>
+      <div class="table-wrap" style="margin-top: 24px">
+        <table>
+          <thead><tr><th>목적</th><th>추천 구성</th><th>확인하는 것</th><th>확인하지 못하는 것</th></tr></thead>
+          <tbody>
+            <tr><td>기능 개발·프론트 연결</td><td><code>./scripts/local-node</code> + web</td><td>실제 canonical transaction/finality 경로</td><td>네트워크 장애·Byzantine 내성</td></tr>
+            <tr><td>합의·gossip·재시작</td><td>Docker N=4</td><td>인증 peer, 3/4 quorum, 별도 DB 복구</td><td>WAN latency, 여러 region, production key custody</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="status">
+      <p class="kicker">07 · 현재 수준을 정확히 말하기</p>
+      <h2>완료, 준비, 미완료를 섞지 않는다</h2>
+      <p class="section-lede">“코드가 존재한다”와 “실자산 mainnet에서 안전하다”는 전혀 다른 주장입니다.</p>
+      <div class="grid-3">
+        <article class="card status-column done">
+          <h3>✓ 로컬/dev에서 동작 확인</h3>
+          <ul>
+            <li>통합 <code>hl-node</code> local runtime</li>
+            <li>싱글노드·Docker 4-validator</li>
+            <li>Static curated stake-weighted consensus</li>
+            <li>Canonical EIP-712 web signing</li>
+            <li>거래 gossip·bounded rebroadcast</li>
+            <li>State root + Commitment v2</li>
+            <li>Atomic RocksDB commit/recovery</li>
+            <li>Finalized tx receipt 조회·WS 알림</li>
+            <li>Finality-proof HTTP startup block replay</li>
+            <li>고정 공급 HYCK reward accounting</li>
+          </ul>
+        </article>
+        <article class="card status-column staged">
+          <h3>△ 구조만 준비 / 제한적</h3>
+          <ul>
+            <li>다음 top-21 validator update 산출</li>
+            <li>Bounded epoch transition proof staging</li>
+            <li>Application-level slashing·jailing</li>
+            <li>64 MiB bounded snapshot 저장 형식</li>
+            <li>Legacy agent delegation 경계</li>
+            <li>Indexer가 읽을 receipts/events 저장 구조</li>
+          </ul>
+        </article>
+        <article class="card status-column todo">
+          <h3>✕ 출시 전 반드시 필요</h3>
+          <ul>
+            <li>Permissionless committee 전환 활성화</li>
+            <li>Historical committee·key rotation</li>
+            <li>완전한 snapshot manifest/chunk proof</li>
+            <li>Indexer bounded range/inclusion proof API</li>
+            <li>Ethereum bridge proof·reorg·pause</li>
+            <li>HSM/key custody와 genesis ceremony</li>
+            <li>Upgrade·telemetry·incident runbook</li>
+            <li>WAN chaos/long-run/load 검증</li>
+            <li>독립 consensus·crypto·회계 감사</li>
+          </ul>
+        </article>
+      </div>
+
+      <h3 style="margin-top: 38px">검증 증거</h3>
+      <div class="grid-4" style="margin-top: 14px">
+        <div class="card test-card flat"><b>773</b><span>all-feature Rust library tests passed</span></div>
+        <div class="card test-card flat"><b>13</b><span><code>hl-node</code> binary tests passed</span></div>
+        <div class="card test-card flat"><b>98</b><span>all-feature end-to-end tests passed</span></div>
+        <div class="card test-card flat"><b>11 + 5</b><span>gossip + multinode tests passed</span></div>
+      </div>
+      <p class="test-note">최신 <code>cargo test --locked --all-targets --all-features</code> 기준 실패 0이며, PR #2 GitHub CI도 같은 Rust all-target/all-feature suite를 통과했습니다. 별도 로컬 검증으로 Rust formatting, 프론트 canonical/WS golden tests, TypeScript 검사와 production build가 통과했습니다. 이 수치는 회귀 검증 증거이며 TPS·finality SLA 또는 보안 감사 결과가 아닙니다.</p>
+    </section>
+
+    <section id="next">
+      <p class="kicker">08 · 현실적인 다음 순서</p>
+      <h2>쇼케이스에서 공개 testnet으로 가는 길</h2>
+      <p class="section-lede">기능을 더 붙이기 전에 신뢰 경계를 완성하는 순서입니다.</p>
+      <div class="roadmap">
+        <article class="roadmap-item"><div><h3>Curated testnet 운영 검증</h3><p>여러 host·region에서 장시간 실행하고 rolling restart, 느린 노드, 지연 QC, network partition, Byzantine 입력을 재현합니다.</p></div></article>
+        <article class="roadmap-item"><div><h3>위원회 전환을 원자적으로 활성화</h3><p>Historical committee registry, transition certificate, key entry/exit/rotation, evidence hold를 한 번에 완성합니다. 일부만 켜면 오히려 위험합니다.</p></div></article>
+        <article class="roadmap-item"><div><h3>데이터 소비와 동기화 계약 완성</h3><p>Authenticated snapshot chunks, multi-peer failover, indexer range/cursor API와 receipt/event inclusion proof를 추가합니다.</p></div></article>
+        <article class="roadmap-item"><div><h3>실자산·운영 보안은 별도 gate로</h3><p>Ethereum testnet bridge proof부터 시작해 reorg/replay/pause/accounting을 검증하고, HSM·업그레이드·모니터링·독립 감사를 통과한 뒤에만 mainnet 후보로 올립니다.</p></div></article>
+      </div>
+
+      <div class="callout" style="margin-top: 28px">
+        <strong>최종 판단:</strong> PR #2는 “기능 데모가 되는 코드”를 “합의된 상태와 확정 결과를 설명할 수 있는 체인”으로 끌어올렸습니다. 하지만 공개 mainnet은 코드 기능 외에도 동적 위원회, 브리지, 운영 절차, 장기 검증과 독립 감사까지 모두 통과해야 합니다.
+      </div>
+    </section>
+
+    <section id="glossary">
+      <p class="kicker">09 · 용어 사전</p>
+      <h2>처음 보는 단어 빠르게 찾기</h2>
+      <dl class="glossary">
+        <div class="term"><dt>Canonical</dt><dd>여러 구현 중 체인이 진짜로 인정하는 단 하나의 규칙·경로.</dd></div>
+        <div class="term"><dt>Mempool</dt><dd>접수됐지만 아직 block에 확정되지 않은 거래의 대기실.</dd></div>
+        <div class="term"><dt>Nonce</dt><dd>사용자별 거래 순번. 같은 거래의 중복 실행과 순서 뒤집힘을 막음.</dd></div>
+        <div class="term"><dt>Validator</dt><dd>블록을 검증하고 투표하는 노드 운영자.</dd></div>
+        <div class="term"><dt>Voting power</dt><dd>합의 투표의 무게. 현재는 bonded HYCK 양에서 계산.</dd></div>
+        <div class="term"><dt>QC</dt><dd>엄격한 2/3 초과 voting power가 같은 결과에 동의했다는 BLS 집계 인증서.</dd></div>
+        <div class="term"><dt>Finality</dt><dd>해당 block이 합의 규칙상 되돌려지지 않는 확정 상태가 됨.</dd></div>
+        <div class="term"><dt>State root</dt><dd>전체 상태를 짧은 hash 하나로 요약한 지문. 한 값만 달라도 바뀜.</dd></div>
+        <div class="term"><dt>Receipt</dt><dd>한 transaction의 성공·실패, block 위치, 이벤트를 담은 확정 실행 기록.</dd></div>
+        <div class="term"><dt>PoP</dt><dd>등록한 BLS 공개키의 비밀키를 validator가 실제로 소유한다는 증명.</dd></div>
+        <div class="term"><dt>Epoch</dt><dd>같은 validator 위원회와 규칙이 적용되는 합의 기간.</dd></div>
+        <div class="term"><dt>Copy-on-write</dt><dd>복사본을 미리 전부 만들지 않고 실제 변경이 생긴 부분만 분리하는 방식.</dd></div>
+      </dl>
+
+      <details>
+        <summary>근거 문서와 주요 코드 위치</summary>
+        <div>
+          <ul class="sources">
+            <li><a href="MAINNET_READINESS.md">MAINNET_READINESS.md</a> — launch gate와 운영 한계. 일부 중간 checkpoint 문구는 아래 최신 worklog보다 이전 상태를 기록합니다.</li>
+            <li><a href="WORKLOG_2026-08-11_HL_NODE_RUNTIME_INTEGRATION.md">hl-node runtime integration worklog</a> — 통합 전후 구조</li>
+            <li><a href="WORKLOG_2026-08-11_P0_MAINNET_HARDENING.md">P0 mainnet hardening worklog</a> — chain domain, BLS PoP, persistence와 network admission</li>
+            <li><a href="WORKLOG_2026-08-21_COMMITMENT_V2_CONSENSUS_ACTIVATION.md">Commitment v2 activation worklog</a> — V5 block와 두 root의 합의 인증</li>
+            <li><a href="WORKLOG_2026-08-22_RESOURCE_AND_RECOVERY_HARDENING.md">resource/recovery worklog</a> — speculative storage와 복구 경계</li>
+            <li><a href="WORKLOG_2026-08-25_HYCK_FIXED_SUPPLY_AND_TRANSITION_STAGING.md">HYCK/transition worklog</a> — 공급·보상·위원회 staging</li>
+            <li><a href="WORKLOG_2026-08-26_VERIFIED_STATE_SYNC.md">verified state sync worklog</a> — finality proof bootstrap</li>
+            <li><a href="WORKLOG_2026-08-29_BOUNDED_TRANSACTION_REBROADCAST.md">rebroadcast worklog</a> — 거래 재전파 정책</li>
+            <li><a href="WORKLOG_2026-08-30_FINALIZED_TRANSACTION_LIFECYCLE.md">finalized transaction lifecycle</a> — tx hash, receipt, WebSocket 경계</li>
+            <li><code>src/bin/node.rs</code>, <code>src/consensus/runner.rs</code>, <code>src/api/canonical.rs</code>, <code>src/storage/rocks.rs</code></li>
+            <li><code>src/app/state/full_state_hash.rs</code>, <code>src/types/commitment.rs</code>, <code>src/state_sync.rs</code></li>
+          </ul>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer>
+    <p>Hyperlicked PR #2 architecture guide · 기준 branch <code>codex/mainnet-hardening-runtime</code> · 문서 기준일 2026-09-01</p>
+    <p><a href="https://github.com/uhyunpark/hyperlicked/pull/2">GitHub Pull Request #2 보기</a></p>
+  </footer>
+
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const button = document.getElementById('theme-toggle');
+      const saved = (() => {
+        try { return localStorage.getItem('hl-guide-theme'); } catch (_) { return null; }
+      })();
+      if (saved === 'dark' || saved === 'light') root.dataset.theme = saved;
+
+      const syncLabel = () => {
+        const dark = root.dataset.theme === 'dark' ||
+          (!root.dataset.theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        button.textContent = dark ? '☀' : '◐';
+        button.setAttribute('aria-label', dark ? '밝은 테마로 전환' : '어두운 테마로 전환');
+      };
+      syncLabel();
+      button.addEventListener('click', () => {
+        const dark = root.dataset.theme === 'dark' ||
+          (!root.dataset.theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        root.dataset.theme = dark ? 'light' : 'dark';
+        try { localStorage.setItem('hl-guide-theme', root.dataset.theme); } catch (_) {}
+        syncLabel();
+      });
+
+      let printClosedDetails = [];
+      window.addEventListener('beforeprint', () => {
+        printClosedDetails = [...document.querySelectorAll('details:not([open])')];
+        printClosedDetails.forEach((detail) => { detail.open = true; });
+      });
+      window.addEventListener('afterprint', () => {
+        printClosedDetails.forEach((detail) => { detail.open = false; });
+        printClosedDetails = [];
+      });
+
+      const links = [...document.querySelectorAll('.topnav a')];
+      const sections = links.map((link) => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+      if ('IntersectionObserver' in window) {
+        const observer = new IntersectionObserver((entries) => {
+          const visible = entries.filter((entry) => entry.isIntersecting)
+            .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+          if (!visible) return;
+          links.forEach((link) => link.removeAttribute('aria-current'));
+          const active = links.find((link) => link.getAttribute('href') === `#${visible.target.id}`);
+          if (active) active.setAttribute('aria-current', 'true');
+        }, { rootMargin: '-20% 0px -65% 0px', threshold: [0, 0.2, 0.6] });
+        sections.forEach((section) => observer.observe(section));
+      }
+    })();
+  </script>
+</body>
+</html>
