@@ -40,7 +40,9 @@ docs/             # Architecture decisions, roadmap
 ## Commands
 
 ```bash
-MODE=dev cargo run --bin hl-node -- --genesis <genesis.json> --config <node.json>  # canonical REST + WebSocket + consensus
+./scripts/local-node                    # Canonical local N=1 node: consensus + REST + WebSocket
+RUST_LOG=info ./scripts/local-node      # Same node with consensus progress logs
+curl -s http://127.0.0.1:8080/api/v1/chain/status  # Check committed height
 cargo test                             # All tests
 cargo test --test e2e                  # E2E integration tests
 cd web && bun run dev                  # Frontend dev server

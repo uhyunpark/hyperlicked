@@ -933,11 +933,16 @@
           <span class="badge good">가장 빠른 개발 루프</span>
           <h3 style="margin-top: 14px">N=1 single-node</h3>
           <div class="node-map"><div class="single-node">hl-node<br>N=1</div></div>
-          <p class="plain">API, WebSocket, mempool, 합의, 실행, RocksDB가 모두 켜집니다. 한 validator가 전체 voting power를 가지므로 분산 장애 내성은 테스트하지 않습니다.</p>
+          <p class="plain">API, WebSocket, mempool, 합의, 실행, RocksDB가 모두 켜집니다. <code>ready ... committed_height=0</code>은 시작 준비가 끝났다는 뜻이며, 그 직후 블록이 자동 생성됩니다. 기본 로그가 <code>warn</code>이라 블록별 로그만 숨겨집니다. 한 validator가 전체 voting power를 가지므로 분산 장애 내성은 테스트하지 않습니다.</p>
           <details><summary>실행 명령</summary><div><pre><code>./scripts/local-node
 
 # 별도 터미널
-cd web &amp;&amp; bun run dev</code></pre><p>스크립트가 dev-only BLS seed, single genesis와 node config를 주입합니다.</p></div></details>
+cd web
+bun install  # 최초 실행 또는 dependency 변경 후
+bun run dev
+
+# height 증가 확인 (Ctrl-C로 종료)
+while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1; done</code></pre><p>스크립트가 dev-only BLS seed, single genesis와 node config를 주입합니다. 합의 로그가 필요하면 <code>RUST_LOG=info ./scripts/local-node</code>를 사용합니다.</p></div></details>
         </article>
         <article class="card topology">
           <span class="badge good">네트워크·복구 확인</span>
@@ -948,7 +953,7 @@ cd web &amp;&amp; bun run dev</code></pre><p>스크립트가 dev-only BLS seed, 
               <div class="mini-node">V2</div><div class="mini-node">V3</div>
             </div>
           </div>
-          <p class="plain">동일 genesis, 인증된 TCP peer, gossip admission, validator별 RocksDB volume을 사용합니다. Equal-power 4개에서는 3개의 동의로 진행해 한 노드 장애를 견딜 수 있습니다.</p>
+          <p class="plain">동일 genesis, 인증된 TCP peer, gossip admission, validator별 RocksDB volume을 사용합니다. Equal-power 4개에서는 3개의 동의로 진행해 한 노드 장애를 견딜 수 있습니다. 현재 fixture는 height 3까지 commit하면 종료되는 smoke test입니다.</p>
           <details><summary>실행 명령</summary><div><pre><code>docker compose -f docker-compose.validator4.yml up --build
 
 # 종료 — volume은 기본 보존

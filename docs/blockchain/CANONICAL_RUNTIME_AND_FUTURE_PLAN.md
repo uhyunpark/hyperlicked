@@ -108,10 +108,25 @@ API financial intermediate arithmetic overflow도 방어했지만, 경제/회계
 
 launcher가 `MODE=dev`, `hl-node`, `--locked`, single genesis/config, 공개 validator-0
 fixture seed를 선택한다. `--bin hl-node`, `--locked`, `--genesis`, `--config`를 직접 입력할
-필요가 없다. web은 별도 process다.
+필요가 없다. 시작 시 보이는 `ready ... committed_height=0`은 genesis 복구와 listener 준비가
+끝났다는 뜻이다. 오류나 정지 상태가 아니며, 그 직후 N=1 consensus가 빈 블록을 포함해
+블록을 자동 생성한다. launcher의 기본 로그 수준이 `warn`이라 round별 진행이 보이지 않을
+뿐이다.
 
 ```bash
-cd web && bun run dev
+# 다른 터미널에서 committed height 증가 확인 (Ctrl-C로 종료)
+while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1; done
+
+# round별 로그가 필요하면 이렇게 시작
+RUST_LOG=info ./scripts/local-node
+```
+
+web은 별도 process다.
+
+```bash
+cd web
+bun install  # first run, or after dependency changes
+bun run dev
 ```
 
 RocksDB restart는 같은 data directory를 넘긴다.
@@ -128,6 +143,8 @@ dev fixture다. JSON/config에 seed를 저장하지 않으며 production에서�
 사용해야 한다.
 
 Docker 4-validator는 `GOSSIP_ENABLED=true`와 validator별 named RocksDB volume을 사용한다.
+현재 Compose fixture는 각 노드를 `--blocks 3`으로 실행하므로 height 3을 commit한 뒤 정상
+종료하는 유한 smoke test다. 계속 떠 있는 웹 백엔드로는 N=1 launcher를 사용한다.
 
 ```bash
 docker compose -f docker-compose.validator4.yml build --pull

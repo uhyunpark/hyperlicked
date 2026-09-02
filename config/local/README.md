@@ -13,6 +13,42 @@
 `--blocks`, `--peer-wait-ms`, `--data-dir`를 사용한다. `--bin hl-node`와 `--locked`는
 launcher가 처리하므로 일반적인 local 실행 명령에 직접 넣지 않는다.
 
+## Single-node 빠른 확인
+
+저장소 루트에서 `./scripts/local-node`만 실행하면 된다. 출력되는
+`ready ... committed_height=0`은 정상이다. `ready`는 API/network listener가 열리고
+consensus runner를 시작할 준비가 됐다는 뜻이며, height 0은 canonical genesis의 높이다.
+그 뒤 single validator가 자동으로 proposal을 만들고 2-chain 규칙에 따라 블록을 확정한다.
+`ready`에서 멈춘 것이 아니다.
+
+launcher 기본 로그 레벨은 `RUST_LOG=warn`이므로 정상적인 proposal/commit 로그가 보이지
+않는다. 진행을 눈으로 확인하려면 `RUST_LOG=info`로 실행하고, 다른 터미널에서 status를
+조회한다.
+
+```bash
+RUST_LOG=info ./scripts/local-node
+
+curl -s http://127.0.0.1:8080/api/v1/chain/status
+watch -n 1 'curl -s http://127.0.0.1:8080/api/v1/chain/status'
+```
+
+`watch`가 설치되지 않은 macOS에서는 `curl`을 반복 실행하거나 간단한 shell loop로 같은
+URL을 조회하면 된다. `--blocks N`은 목표 committed height이며, 해당 높이에 도달하면
+프로세스가 종료된다. 옵션을 생략하면 Ctrl-C까지 계속 실행한다.
+
+기본 data directory는 chain domain과 node ID에 묶인
+`.hyperlicked/data/<genesis-domain>/<node-id>`이고 RocksDB를 사용한다. 같은
+`--data-dir`를 다시 지정하면 기존 chain을 복원해 이어서 실행한다. 깨끗한 fixture가
+필요하면 임시 경로를 사용한다.
+
+```bash
+hl_fresh_dir="$(mktemp -d)"
+RUST_LOG=info ./scripts/local-node --blocks 3 --data-dir "$hl_fresh_dir"
+```
+
+`--blocks 3`처럼 실행할 때 기존 data directory의 높이가 이미 3 이상이면 즉시 종료할 수
+있으므로, 재현 가능한 smoke test에는 매번 새 `mktemp -d` 경로를 사용한다.
+
 ## 파일 구성
 
 - `genesis.json`: 4-validator, equal-power, `f=1` 하네스의 공통 genesis다.
@@ -79,7 +115,8 @@ single-validator: 7ec4f5cbcfbbefc8c1e9f70665703428558dc6947ba50901a78101d7dbfbd6
 
 호스트 4-node 실행은 네 터미널에서 같은 `genesis.json`과 각 `host-4/nodeN.json`을
 사용한다. single local run은 저장소 루트에서 `./scripts/local-node`를 실행하고,
-웹 클라이언트는 별도 터미널에서 `cd web && bun run dev`를 실행한다. `hl-node`와 web은
+웹 클라이언트는 별도 터미널에서 `cd web`, 최초 한 번 `bun install`, `bun run dev`를
+실행한다. `hl-node`와 web은
 서로 다른 프로세스이므로 web을 띄우려면 별도 터미널이 필요하다. Docker 하네스는
 저장소 루트에서 다음과 같이 실행한다.
 
@@ -90,11 +127,13 @@ docker compose -f docker-compose.validator4.yml down
 ```
 
 이 구성은 4개 프로세스의 동일 genesis, authenticated peer addressing, gossip admission,
-3-block progress를 확인하는 로컬 재현용이며 production 배포 또는 mainnet readiness
-증명이 아니다. 각 validator는 `/app/data`를 서로 다른 named RocksDB volume에 마운트하므로
-컨테이너를 재생성해도 local committed/speculative recovery를 재현할 수 있다. `down`은
-기본적으로 volume을 보존하고, 완전히 새 fixture가 필요할 때만 명시적으로 volume을
-삭제한다.
+3-block progress를 확인하는 로컬 재현용이다. Compose command가 각 validator에
+`--blocks 3`을 전달하므로 모든 validator가 committed height 3에 도달하면 컨테이너가
+정상 종료한다. 따라서 `up --build`가 계속 실행되는 장기 네트워크가 아닌 유한한 smoke
+test이며, production 배포 또는 mainnet readiness 증명이 아니다. 각 validator는
+`/app/data`를 서로 다른 named RocksDB volume에 마운트하므로 컨테이너를 재생성해도 local
+committed/speculative recovery를 재현할 수 있다. `down`은 기본적으로 volume을 보존하고,
+완전히 새 fixture가 필요할 때만 명시적으로 volume을 삭제한다.
 
 ## RocksDB 재시작 예
 
@@ -107,7 +146,9 @@ hl_restart_dir="$(mktemp -d)"
 ./scripts/local-node --blocks 5 --data-dir "$hl_restart_dir"
 ```
 
-`--data-dir`를 생략하면 `.hyperlicked/data/<genesis-domain>/<node-id>`가 기본값이다.
-multi-node에서는 validator별로 별도 경로를 사용해야 한다. BLS seed는 위원회 public
+첫 실행은 committed height 3까지 진행한 뒤 종료하고, 두 번째 실행은 같은 디렉터리에서
+복원해 height 5까지 진행한 뒤 종료한다. `--data-dir`를 생략하면
+`.hyperlicked/data/<genesis-domain>/<node-id>`가 기본값이다. multi-node에서는 validator별로
+별도 경로를 사용해야 한다. BLS seed는 위원회 public
 key를 복원하는 32-byte secret input이며, local fixture에서만 재현을 위해 사용한다.
 실제 운영에서는 seed를 환경변수나 이미지에 넣지 말고 별도 key custody/HSM을 사용한다.

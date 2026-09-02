@@ -14,7 +14,9 @@ High performance blockchain built for perpdex inspired by Hyperliquid. Can also 
 ./scripts/local-node
 
 # In another terminal, start the web client
-cd web && bun run dev
+cd web
+bun install  # first run, or after dependency changes
+bun run dev
 
 # The launcher uses the public development-only validator0 BLS fixture seed.
 # Never use HL_LOCAL_BLS_SEED_1 or any value from config/local in production.
@@ -34,9 +36,9 @@ MODE=dev cargo run --locked --bin hl-node -- \
 
 # Run the local three-node consensus demo in three terminals
 # (loopback, deterministic development keys)
-cargo run --bin multinode -- --node 0
-cargo run --bin multinode -- --node 1
-cargo run --bin multinode -- --node 2
+cargo run --locked --bin multinode -- --node 0
+cargo run --locked --bin multinode -- --node 1
+cargo run --locked --bin multinode -- --node 2
 
 # Build binaries for local testing; this is not a production release process
 cargo build --release
@@ -44,12 +46,60 @@ cargo build --release
 
 `./scripts/local-node`가 `MODE=dev`, `hl-node`, `--locked`, single-node genesis/config을
 자동으로 설정한다. 일반적인 로컬 실행에서는 사용자가 `--bin hl-node`, `--locked`,
-`--genesis`, `--config`를 직접 입력할 필요가 없다. `--data-dir`를 생략하면 chain domain과
-node ID에 묶인 `.hyperlicked/data/...` 경로가 사용된다. 4-validator Docker fixture와
-PoP/schema v2/BLS seed 설명은 [config/local README](config/local/README.md)에 있다. `--sync-peer`
-는 peer의 finalized block batch를 HTTP startup 단계에서 검증·replay하며, local genesis와
-trusted committee를 trust root로 사용한다. 잘못된 app hash, Commitment, QC 또는 incomplete
-snapshot은 fail closed한다.
+`--genesis`, `--config`를 직접 입력할 필요가 없다. `ready ... committed_height=0`은
+리스너와 consensus가 시작될 준비가 됐고, 현재 확정 높이가 canonical genesis인 상태라는
+뜻이다. 오류나 정지 상태를 뜻하지 않는다. `ready` 출력 뒤 single validator가 consensus를
+자동 실행해 블록을 제안하고 확정한다.
+
+launcher의 기본 `RUST_LOG=warn`은 정상적인 proposal/commit info 로그를 숨긴다. 블록 진행을
+터미널에서 보려면 다음처럼 실행한다.
+
+```bash
+RUST_LOG=info ./scripts/local-node
+```
+
+다른 터미널에서 높이를 확인할 수 있다.
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/chain/status
+watch -n 1 'curl -s http://127.0.0.1:8080/api/v1/chain/status'
+```
+
+`watch`가 없는 macOS에서는 다음처럼 같은 URL을 반복 조회한다.
+
+```bash
+while true; do
+  curl -s http://127.0.0.1:8080/api/v1/chain/status
+  printf '\n'
+  sleep 1
+done
+```
+
+`--blocks N`을 추가하면 committed height가
+`N`에 도달한 뒤 프로세스가 종료된다. 생략하면 Ctrl-C까지 계속 실행한다.
+
+`--data-dir`를 생략하면 chain domain과 node ID에 묶인
+`.hyperlicked/data/<genesis-domain>/<node-id>` 경로가 사용되므로 재시작 시 같은 RocksDB
+상태를 복원한다. 매번 새 체인으로 확인하려면 임시 디렉터리를 명시한다.
+
+```bash
+hl_fresh_dir="$(mktemp -d)"
+RUST_LOG=info ./scripts/local-node --blocks 3 --data-dir "$hl_fresh_dir"
+```
+
+같은 디렉터리를 다시 지정하면 이전 committed height에서 이어서 실행한다.
+
+4-validator Docker fixture와 PoP/schema v2/BLS seed 설명은
+[config/local README](config/local/README.md)에 있다. `--sync-peer`는 peer의 finalized block
+batch를 HTTP startup 단계에서 검증·replay하며, local genesis와 trusted committee를 trust
+root로 사용한다. 잘못된 app hash, Commitment, QC 또는 incomplete snapshot은 fail closed한다.
+
+4-validator Docker smoke test는 다음처럼 실행한다. 각 container가 `--blocks 3`을 받아
+committed height 3에 도달하면 종료하므로, 장기 실행 네트워크가 아니다.
+
+```bash
+docker compose -f docker-compose.validator4.yml up --build
+```
 
 `./scripts/local-node`의 single-node 설정(`:8080`)은 source와 destination으로 동시에 띄울 수
 없다. 또한 현재 startup은 모든 configured peer가 ready여야 하므로, 4-validator fixture를
@@ -60,10 +110,10 @@ snapshot은 fail closed한다.
 ### Process Supervisor (local prototype)
 ```bash
 # Development process wrapper only; not production orchestration
-cargo run --bin hl-visor run-validator
+cargo run --locked --bin hl-visor run-validator
 
 # Development process wrapper only; not production orchestration
-cargo run --bin hl-visor run-non-validator
+cargo run --locked --bin hl-visor run-non-validator
 ```
 
 ### Tests
@@ -75,6 +125,8 @@ cargo test
 
 The canonical `hl-node` startup path uses only the small runtime surface below.
 Consensus/API addresses and peers belong in the node JSON, not environment variables.
+`.env.example` is a reference list; `hl-node` does not automatically load `.env`, so overrides
+must be exported by the shell or prefixed to the launch command.
 
 | Variable | Local default | Description |
 |----------|---------------|-------------|
@@ -87,6 +139,10 @@ Legacy settings such as `PORT`, `ORACLE_ENABLED`, and `MM_ENABLED` do not start 
 services or mutation loops in the canonical node. Persistence is always enabled for
 `hl-node`; prefer the explicit `--data-dir` CLI option for local isolation. Oracle ingress
 and market-maker actions must use deterministic consensus transactions before production use.
+
+The four-validator Docker fixture passes `--blocks 3` to every container. It is a finite
+consensus smoke test: after all validators reach committed height 3, the containers exit.
+It is not a long-running local network.
 
 ## Documentation
 
