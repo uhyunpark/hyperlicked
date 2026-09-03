@@ -26,6 +26,7 @@ src/
 ├── consensus/    # HotStuff-2 engine, pacemaker, safety, aggregator
 ├── app/          # Exchange logic: orderbook, accounts, staking, oracle, funding, liquidation
 ├── crypto/       # BLS, EIP-712, ECDSA, agent keys
+├── market_maker_service/ # Dev-only external signed transaction client
 ├── api/          # axum REST + WebSocket routes
 ├── network/      # TCP transport, gossip, sync
 ├── storage/      # RocksDB persistence, snapshots, recovery
@@ -41,6 +42,7 @@ docs/             # Architecture decisions, roadmap
 
 ```bash
 ./scripts/local-node                    # Canonical local N=1 node: consensus + REST + WebSocket
+./scripts/local-mm                      # Optional separate dev/showcase liquidity service
 RUST_LOG=info ./scripts/local-node      # Same node with consensus progress logs
 curl -s http://127.0.0.1:8080/api/v1/chain/status  # Check committed height
 cargo test                             # All tests

@@ -10,10 +10,13 @@ High performance blockchain built for perpdex inspired by Hyperliquid. Can also 
 
 ### Backend (local prototype)
 ```bash
-# Start the canonical local single-node validator and API (API: 127.0.0.1:8080)
+# Terminal 1 — canonical local single-node validator and API (127.0.0.1:8080)
 ./scripts/local-node
 
-# In another terminal, start the web client
+# Terminal 2 — separate dev/showcase market maker
+./scripts/local-mm
+
+# Terminal 3 — web client
 cd web
 bun install  # first run, or after dependency changes
 bun run dev
@@ -43,6 +46,13 @@ cargo run --locked --bin multinode -- --node 2
 # Build binaries for local testing; this is not a production release process
 cargo build --release
 ```
+
+`hl-mm` is a separate dev/showcase client: it uses deterministic public secp256k1
+signer fixtures and submits canonical transactions to one validator API. The launcher
+defaults to `http://127.0.0.1:8080`; for Docker N=4, run exactly one instance against
+validator0's host API with `./scripts/local-mm --node-url http://127.0.0.1:18080`.
+Balances are simulated. Never use the fixture keys, real funds, or this service in
+production.
 
 `./scripts/local-node`가 `MODE=dev`, `hl-node`, `--locked`, single-node genesis/config을
 자동으로 설정한다. 일반적인 로컬 실행에서는 사용자가 `--bin hl-node`, `--locked`,
@@ -134,11 +144,16 @@ must be exported by the shell or prefixed to the launch command.
 | `HL_LOCAL_BLS_SEED_N` | public fixture in the launcher/Compose | 32-byte validator secret seed selected by the node JSON; never reuse the local values in production |
 | `RUST_LOG` | `warn` in `scripts/local-node` | Log filter (`info` shows every consensus round) |
 | `CONSENSUS_LOOP_DELAY_MS` | `10` | Delay between consensus rounds |
+| `MM_NODE_URL` | `http://127.0.0.1:8080` | Target API for the separate dev/showcase `hl-mm` service |
+| `MM_SEED` | `12345` | Deterministic public dev signer fixture seed; never use in production |
 
-Legacy settings such as `PORT`, `ORACLE_ENABLED`, and `MM_ENABLED` do not start separate
-services or mutation loops in the canonical node. Persistence is always enabled for
-`hl-node`; prefer the explicit `--data-dir` CLI option for local isolation. Oracle ingress
-and market-maker actions must use deterministic consensus transactions before production use.
+`MM_ENABLED` does not start a loop inside `hl-node`; use the explicit `./scripts/local-mm`
+launcher for the separate dev/showcase process. Run one MM instance against one validator
+API. For Docker N=4, use `./scripts/local-mm --node-url http://127.0.0.1:18080`.
+The service uses simulated balances only and must never be used with real funds or in
+production. Persistence is always enabled for `hl-node`; prefer the explicit `--data-dir`
+CLI option for local isolation. Oracle ingress and market-maker actions must use
+deterministic consensus transactions before production use.
 
 The four-validator Docker fixture passes `--blocks 3` to every container. It is a finite
 consensus smoke test: after all validators reach committed height 3, the containers exit.

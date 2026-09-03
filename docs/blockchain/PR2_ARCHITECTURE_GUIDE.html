@@ -934,15 +934,19 @@
           <h3 style="margin-top: 14px">N=1 single-node</h3>
           <div class="node-map"><div class="single-node">hl-node<br>N=1</div></div>
           <p class="plain">API, WebSocket, mempool, 합의, 실행, RocksDB가 모두 켜집니다. <code>ready ... committed_height=0</code>은 시작 준비가 끝났다는 뜻이며, 그 직후 블록이 자동 생성됩니다. 기본 로그가 <code>warn</code>이라 블록별 로그만 숨겨집니다. 한 validator가 전체 voting power를 가지므로 분산 장애 내성은 테스트하지 않습니다.</p>
-          <details><summary>실행 명령</summary><div><pre><code>./scripts/local-node
+          <details><summary>실행 명령</summary><div><pre><code># Terminal 1 — canonical local validator/API
+./scripts/local-node
 
-# 별도 터미널
+# Terminal 2 — optional separate dev/showcase market maker
+./scripts/local-mm
+
+# Terminal 3 — web
 cd web
 bun install  # 최초 실행 또는 dependency 변경 후
 bun run dev
 
 # height 증가 확인 (Ctrl-C로 종료)
-while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1; done</code></pre><p>스크립트가 dev-only BLS seed, single genesis와 node config를 주입합니다. 합의 로그가 필요하면 <code>RUST_LOG=info ./scripts/local-node</code>를 사용합니다.</p></div></details>
+while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1; done</code></pre><p>스크립트가 dev-only BLS seed, single genesis와 node config를 주입합니다. <code>hl-mm</code>은 deterministic public secp256k1 dev signer fixture로 canonical transaction을 제출하는 별도 서비스입니다. 기본 API target은 <code>http://127.0.0.1:8080</code>이며, 한 MM 인스턴스는 한 validator API만 대상으로 합니다. simulated balance만 사용하고 fixture key, real funds, production 사용은 금지합니다. 합의 로그가 필요하면 <code>RUST_LOG=info ./scripts/local-node</code>를 사용합니다.</p></div></details>
         </article>
         <article class="card topology">
           <span class="badge good">네트워크·복구 확인</span>
@@ -956,15 +960,18 @@ while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1;
           <p class="plain">동일 genesis, 인증된 TCP peer, gossip admission, validator별 RocksDB volume을 사용합니다. Equal-power 4개에서는 3개의 동의로 진행해 한 노드 장애를 견딜 수 있습니다. 현재 fixture는 height 3까지 commit하면 종료되는 smoke test입니다.</p>
           <details><summary>실행 명령</summary><div><pre><code>docker compose -f docker-compose.validator4.yml up --build
 
+# 별도 터미널 — MM은 validator0 API에 하나만 연결
+./scripts/local-mm --node-url http://127.0.0.1:18080
+
 # 종료 — volume은 기본 보존
-docker compose -f docker-compose.validator4.yml down</code></pre></div></details>
+docker compose -f docker-compose.validator4.yml down</code></pre><p class="plain">Docker N=4에서는 여러 validator마다 MM을 실행하지 않습니다. 하나의 <code>hl-mm</code> 인스턴스가 하나의 validator API를 대상으로 합니다.</p></div></details>
         </article>
       </div>
       <div class="table-wrap" style="margin-top: 24px">
         <table>
           <thead><tr><th>목적</th><th>추천 구성</th><th>확인하는 것</th><th>확인하지 못하는 것</th></tr></thead>
           <tbody>
-            <tr><td>기능 개발·프론트 연결</td><td><code>./scripts/local-node</code> + web</td><td>실제 canonical transaction/finality 경로</td><td>네트워크 장애·Byzantine 내성</td></tr>
+            <tr><td>기능 개발·프론트 연결</td><td><code>./scripts/local-node</code> + optional <code>./scripts/local-mm</code> + web</td><td>실제 canonical transaction/finality 경로</td><td>네트워크 장애·Byzantine 내성</td></tr>
             <tr><td>합의·gossip·재시작</td><td>Docker N=4</td><td>인증 peer, 3/4 quorum, 별도 DB 복구</td><td>WAN latency, 여러 region, production key custody</td></tr>
           </tbody>
         </table>

@@ -23,6 +23,7 @@ pub mod app;
 pub mod config;
 pub mod consensus;
 pub mod crypto;
+pub mod market_maker_service;
 pub mod network;
 pub mod node_config;
 pub mod state_sync;

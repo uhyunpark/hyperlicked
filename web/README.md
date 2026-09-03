@@ -10,14 +10,17 @@ wallet signing, and is intended for local development only.
 
 ## Quick start
 
-No environment file is required for the default local setup. Use two
+No environment file is required for the default local setup. Use three
 terminals from the repository root:
 
 ```bash
 # Terminal 1 — start the canonical local validator and API
 ./scripts/local-node
 
-# Terminal 2 — start the frontend
+# Terminal 2 — optional separate dev/showcase market maker
+./scripts/local-mm
+
+# Terminal 3 — start the frontend
 cd web
 bun install
 bun run dev
@@ -36,7 +39,12 @@ in use, Next.js prints the actual port it selected.
 - the development-only `HL_LOCAL_BLS_SEED_1` fixture
 
 There is no separate Go server or `hl-server` process. The API and WebSocket
-belong to `hl-node`.
+belong to `hl-node`; `hl-mm` is a separate client that submits canonical signed
+transactions and does not own consensus or state. It uses deterministic public
+secp256k1 dev signer fixtures and simulated balances only. The default target is
+`http://127.0.0.1:8080`; for Docker N=4, run exactly one instance against
+validator0's host API: `./scripts/local-mm --node-url http://127.0.0.1:18080`.
+Do not use fixture keys, real funds, or this service in production.
 
 To start a fresh chain without reusing the default RocksDB directory:
 
@@ -182,11 +190,11 @@ wallet signature prompt for canonical orders.
    positions, fills, and order history refresh from the node.
 
 The default page and public WebSocket subscription are currently fixed to
-`BTC-USDT`. A fresh node has no orderbook liquidity or trade history, and the
-artificial market-maker/oracle loops are not started by the canonical launcher.
-An empty orderbook, zero current price, and an empty chart are therefore
-normal until trades exist. To see a fill, fund two different wallet addresses
-and submit crossing orders; one address cannot trade against itself.
+`BTC-USDT`. A fresh node has no orderbook liquidity or trade history until a
+wallet or the optional separate `hl-mm` dev/showcase service submits transactions.
+An empty orderbook, zero current price, and an empty chart are therefore normal
+until trades exist. To see a fill, fund two different wallet addresses and
+submit crossing orders; one address cannot trade against itself.
 
 Limit orders support GTC, IOC, and Post Only (ALO). Market orders are sent as
 IOC. Reduce-only orders and optional TP/SL trigger orders are available. The

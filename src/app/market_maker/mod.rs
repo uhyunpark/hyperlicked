@@ -12,9 +12,9 @@
 //!
 //! ## Runtime integration
 //!
-//! The market maker is a library component. A future transactionized service
-//! attached to the canonical `hl-node` runtime will submit its activity; there
-//! is no standalone API server binary to launch.
+//! The strategies remain a library component. The dev-only `hl-mm` process
+//! supplies signer-derived addresses and submits their actions through the
+//! canonical `hl-node` HTTP transaction path.
 
 pub mod account;
 pub mod config;
@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-use crate::app::Transaction;
+use crate::app::{Address, Transaction};
 use crate::types::Price;
 
 /// Maximum price history length for MA calculation
@@ -51,8 +51,14 @@ pub struct MarketMakerState {
     tick_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MarketMakerStateError {
+    #[error("market maker address count mismatch: expected {expected}, got {actual}")]
+    AddressCount { expected: usize, actual: usize },
+}
+
 impl MarketMakerState {
-    /// Create new market maker state
+    /// Create new market maker state using deterministic fixture addresses.
     pub fn new(config: MarketMakerConfig) -> Self {
         let mut rng = StdRng::seed_from_u64(config.seed);
         let accounts = Self::create_accounts(&config, &mut rng);
@@ -64,6 +70,36 @@ impl MarketMakerState {
             rng,
             tick_count: 0,
         }
+    }
+
+    /// Create market maker state with caller-supplied account addresses.
+    ///
+    /// The standalone `hl-mm` process owns the private keys for its accounts,
+    /// so its strategy state must use those exact signer-derived addresses.
+    /// Keeping this constructor separate preserves the deterministic fixture
+    /// constructor above for existing unit tests.
+    pub fn new_with_addresses(
+        config: MarketMakerConfig,
+        addresses: Vec<Address>,
+    ) -> Result<Self, MarketMakerStateError> {
+        let expected = config.total_accounts();
+        if addresses.len() != expected {
+            return Err(MarketMakerStateError::AddressCount {
+                expected,
+                actual: addresses.len(),
+            });
+        }
+
+        let rng = StdRng::seed_from_u64(config.seed);
+        let accounts = Self::create_accounts_with_addresses(&config, addresses);
+
+        Ok(Self {
+            config,
+            accounts,
+            price_history: VecDeque::with_capacity(MAX_PRICE_HISTORY),
+            rng,
+            tick_count: 0,
+        })
     }
 
     /// Create accounts for all strategy types
@@ -84,6 +120,31 @@ impl MarketMakerState {
             }
         }
 
+        accounts
+    }
+
+    fn create_accounts_with_addresses(
+        config: &MarketMakerConfig,
+        addresses: Vec<Address>,
+    ) -> Vec<MakerAccount> {
+        let mut accounts = Vec::with_capacity(addresses.len());
+        let mut addresses = addresses.into_iter();
+        let accounts_per_strategy = config.intensity.accounts_per_strategy();
+
+        for strategy_type in StrategyType::all() {
+            for _ in 0..accounts_per_strategy {
+                let address = addresses
+                    .next()
+                    .expect("address count was validated before account creation");
+                accounts.push(MakerAccount::new(
+                    address,
+                    create_strategy(*strategy_type),
+                    *strategy_type,
+                ));
+            }
+        }
+
+        debug_assert!(addresses.next().is_none());
         accounts
     }
 
@@ -197,6 +258,28 @@ mod tests {
 
         // Should have 12 accounts (6 strategies * 2 accounts each)
         assert_eq!(mm.accounts.len(), 12);
+    }
+
+    #[test]
+    fn signer_address_constructor_requires_exact_strategy_account_count() {
+        let config = MarketMakerConfig {
+            enabled: true,
+            interval_ms: 100,
+            intensity: Intensity::Low,
+            seed: 12345,
+            symbol: "BTC-USDT".to_string(),
+            initial_deposit: 100_000_000,
+        };
+
+        let error = MarketMakerState::new_with_addresses(config, vec!["0x01".to_string()])
+            .expect_err("incomplete signer address set must be rejected");
+        assert_eq!(
+            error,
+            MarketMakerStateError::AddressCount {
+                expected: 12,
+                actual: 1,
+            }
+        );
     }
 
     #[test]

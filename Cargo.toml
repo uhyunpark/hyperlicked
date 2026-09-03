@@ -25,6 +25,10 @@ path = "src/bin/multinode.rs"
 name = "hl-visor"
 path = "src/bin/visor.rs"
 
+[[bin]]
+name = "hl-mm"
+path = "src/bin/mm.rs"
+
 [[bench]]
 name = "commitment_v2"
 harness = false

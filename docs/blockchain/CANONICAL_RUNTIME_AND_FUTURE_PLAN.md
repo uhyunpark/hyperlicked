@@ -19,7 +19,9 @@ Cosmos 계열과 같은 방향으로 **하나의 node runtime**을 N=1 single-va
 N-validator network에 공통 적용한다. N=1은 validator가 한 명인 별도 network로 뜨며,
 local 기능·replay·API를 확인하는 데 사용할 수 있다. N=4는 `f=1` curated BFT fixture다.
 `hl-server`의 별도 consensus/API ownership은 제거했고 API/WS는 `hl-node`가 관리하는
-canonical state만 읽는다.
+canonical state만 읽는다. `hl-mm`은 별도 dev/showcase client/service로서 state나
+consensus를 소유하지 않고, 선택한 한 validator API에 canonical signed transaction을
+제출한다.
 
 ## 2. P0에서 고정한 안전 경계
 
@@ -100,10 +102,19 @@ API financial intermediate arithmetic overflow도 방어했지만, 경제/회계
 
 ## 3. 로컬 실행 계약
 
-일반 사용자는 다음만 실행하면 된다.
+기능 쇼케이스는 다음 세 터미널에서 실행한다.
 
 ```bash
+# Terminal 1 — canonical local validator/API
 ./scripts/local-node
+
+# Terminal 2 — optional separate dev/showcase market maker
+./scripts/local-mm
+
+# Terminal 3 — web client
+cd web
+bun install  # first run, or after dependency changes
+bun run dev
 ```
 
 launcher가 `MODE=dev`, `hl-node`, `--locked`, single genesis/config, 공개 validator-0
@@ -121,7 +132,18 @@ while true; do curl -s http://127.0.0.1:8080/api/v1/chain/status; echo; sleep 1;
 RUST_LOG=info ./scripts/local-node
 ```
 
-web은 별도 process다.
+`hl-mm`은 deterministic public dev secp256k1 signer fixture와 simulated balance만 사용하는
+별도 서비스다. 기본 target은 `http://127.0.0.1:8080`이며, 한 MM 인스턴스는 한 validator
+API만 대상으로 한다. Docker N=4에서는 validator0 host API에 하나만 연결한다.
+
+```bash
+./scripts/local-mm --node-url http://127.0.0.1:18080
+```
+
+fixture key, real funds, production 사용은 금지한다. `hl-mm`은 `hl-node` 내부 loop가 아니며
+`MM_ENABLED` 환경변수로 시작되지 않는다.
+
+web은 별도 process다. 위 Terminal 3에서 실행한다.
 
 ```bash
 cd web
@@ -144,7 +166,8 @@ dev fixture다. JSON/config에 seed를 저장하지 않으며 production에서�
 
 Docker 4-validator는 `GOSSIP_ENABLED=true`와 validator별 named RocksDB volume을 사용한다.
 현재 Compose fixture는 각 노드를 `--blocks 3`으로 실행하므로 height 3을 commit한 뒤 정상
-종료하는 유한 smoke test다. 계속 떠 있는 웹 백엔드로는 N=1 launcher를 사용한다.
+종료하는 유한 smoke test다. MM showcase를 붙일 때는 Docker validator마다 실행하지 말고
+`http://127.0.0.1:18080`에 연결하는 MM 하나만 사용한다.
 
 ```bash
 docker compose -f docker-compose.validator4.yml build --pull

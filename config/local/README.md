@@ -2,8 +2,9 @@
 
 이 디렉터리는 **dev-only local harness** 전용이다. mainnet/testnet secret로 재사용하지
 않는다. 일반 사용자는 genesis/config 경로와 Cargo 옵션을 직접 조합할 필요 없이 저장소
-루트에서 `./scripts/local-node`를 실행하면 된다. launcher가 아래 파일을 선택하고
-`MODE=dev`와 `--locked`를 내부에서 설정한다.
+루트에서 `./scripts/local-node`를 실행하면 된다. 선택적으로 별도 dev/showcase MM은
+`./scripts/local-mm`으로 실행한다. launcher가 필요한 파일과 `MODE=dev`, `--locked`를
+내부에서 설정한다.
 
 ```text
 ./scripts/local-node
@@ -15,7 +16,33 @@ launcher가 처리하므로 일반적인 local 실행 명령에 직접 넣지 �
 
 ## Single-node 빠른 확인
 
-저장소 루트에서 `./scripts/local-node`만 실행하면 된다. 출력되는
+기능 쇼케이스는 저장소 루트의 세 터미널에서 다음처럼 실행한다.
+
+```bash
+# Terminal 1 — canonical local validator/API
+./scripts/local-node
+
+# Terminal 2 — optional separate dev/showcase market maker
+./scripts/local-mm
+
+# Terminal 3 — web client
+cd web
+bun install
+bun run dev
+```
+
+`hl-mm`은 `hl-node`와 별도인 클라이언트 서비스이며, deterministic public dev
+secp256k1 signer fixture로 canonical transaction을 하나의 validator API에 제출한다.
+기본 대상은 `http://127.0.0.1:8080`이고, 한 MM 인스턴스만 한 validator API를 대상으로
+한다. Docker N=4에서는 validator0 host API에 하나만 연결한다:
+
+```bash
+./scripts/local-mm --node-url http://127.0.0.1:18080
+```
+
+이 MM은 simulated balance만 사용한다. fixture key나 real funds를 사용하지 말고,
+production에서 실행하지 않는다.
+
 `ready ... committed_height=0`은 정상이다. `ready`는 API/network listener가 열리고
 consensus runner를 시작할 준비가 됐다는 뜻이며, height 0은 canonical genesis의 높이다.
 그 뒤 single validator가 자동으로 proposal을 만들고 2-chain 규칙에 따라 블록을 확정한다.
@@ -114,15 +141,17 @@ single-validator: 7ec4f5cbcfbbefc8c1e9f70665703428558dc6947ba50901a78101d7dbfbd6
 ## 실행 예
 
 호스트 4-node 실행은 네 터미널에서 같은 `genesis.json`과 각 `host-4/nodeN.json`을
-사용한다. single local run은 저장소 루트에서 `./scripts/local-node`를 실행하고,
-웹 클라이언트는 별도 터미널에서 `cd web`, 최초 한 번 `bun install`, `bun run dev`를
-실행한다. `hl-node`와 web은
-서로 다른 프로세스이므로 web을 띄우려면 별도 터미널이 필요하다. Docker 하네스는
+사용한다. Docker N=4에서 MM을 붙일 때는 여러 validator마다 실행하지 말고
+validator0 host API `http://127.0.0.1:18080`에 하나만 연결한다. Docker 하네스는
 저장소 루트에서 다음과 같이 실행한다.
 
 ```bash
 docker compose -f docker-compose.validator4.yml build --pull
 docker compose -f docker-compose.validator4.yml up --build
+
+# 별도 터미널 — Docker N=4의 validator0 API에 MM 하나만 연결
+./scripts/local-mm --node-url http://127.0.0.1:18080
+
 docker compose -f docker-compose.validator4.yml down
 ```
 

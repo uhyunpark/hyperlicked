@@ -173,7 +173,7 @@ Additional improvements from comprehensive blockchain expert review:
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
 - **Staking Foundation** ✅ - Epoch transitions, validator sets, jailing, slashing
 - **Real-time Streaming** ✅ - Trigger order events, enhanced position updates, order history streaming
-- **Market Maker** ✅ - Dev mode artificial liquidity with multiple strategies
+- **Market Maker** ✅ - Separate dev-only `hl-mm` service submitting canonical signed transactions
 - **Oracle Fetcher** ✅ - Background CEX price fetching (Binance, etc.)
 - **Trigger Orders (TP/SL)** ✅ - Stop-loss and take-profit with real-time events
 - **ADL System** ✅ - Auto-deleverage when insurance fund insufficient
@@ -301,8 +301,10 @@ External price fetching service:
 Artificial liquidity for development:
 - ✅ Configurable intensity presets (low/medium/high)
 - ✅ Multiple trading strategies (market making, trend following, mean reversion)
-- ✅ Deterministic account generation from seed
-- ✅ Oracle price reference for realistic spreads
+- ✅ Deterministic signer-derived secp256k1 development accounts
+- ✅ Canonical EIP-712 order/cancel submission through one validator API
+- ✅ Finalized-receipt waiting, nonce refresh, bounded rate/retry/open-order limits
+- ✅ Oracle price reference with local mark-price fallback
 
 #### Real-time WebSocket Streaming ✅
 Enhanced event streaming:
