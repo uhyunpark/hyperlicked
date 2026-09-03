@@ -55,10 +55,10 @@ pub struct OracleConfig {
 impl Default for OracleConfig {
     fn default() -> Self {
         Self {
-            max_staleness_ms: 3000,      // 3 seconds
-            min_sources: 3,               // Need 3+ sources
-            max_deviation_bps: 1000,     // 10% circuit breaker
-            fallback_to_mark: true,      // Bootstrap mode
+            max_staleness_ms: 3000,  // 3 seconds
+            min_sources: 3,          // Need 3+ sources
+            max_deviation_bps: 1000, // 10% circuit breaker
+            fallback_to_mark: true,  // Bootstrap mode
         }
     }
 }

@@ -9,12 +9,14 @@
 //! If a transaction with nonce N+k arrives before N+1 through N+k-1, it will be
 //! accepted if k <= MAX_NONCE_GAP.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{hash_map::RandomState, BTreeSet, HashMap};
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use super::positions::Position;
-use super::{Address, Symbol};
+use super::{Address, MarketConfig, Symbol};
 use crate::types::{Price, Size};
 
 /// Maximum allowed gap in nonces before rejection
@@ -26,6 +28,13 @@ pub struct Account {
     pub address: Address,
     /// Free collateral (in cents, e.g., USDC)
     pub balance: i64,
+    /// Liquid native HYCK balance in HYCK base units.
+    ///
+    /// This is deliberately separate from [`Self::balance`], which remains
+    /// the perp collateral balance (cents).  Native staking transactions
+    /// must only debit/credit this field.
+    #[serde(default)]
+    pub hyck_balance: i64,
     /// Collateral locked in positions
     pub locked: i64,
     /// Positions by symbol
@@ -49,9 +58,15 @@ pub enum NonceResult {
     /// Nonce is too low (already used)
     TooLow { expected: u64 },
     /// Nonce is too far ahead
-    GapTooLarge { expected: u64, got: u64, max_gap: u64 },
+    GapTooLarge {
+        expected: u64,
+        got: u64,
+        max_gap: u64,
+    },
     /// Nonce has already been used (duplicate within gap window)
     AlreadyUsed,
+    /// Nonce cannot be consumed because its successor is not representable.
+    Exhausted,
 }
 
 impl Account {
@@ -59,6 +74,7 @@ impl Account {
         Self {
             address: address.into(),
             balance: 0,
+            hyck_balance: 0,
             locked: 0,
             positions: HashMap::new(),
             nonce: 0,
@@ -78,12 +94,17 @@ impl Account {
     pub fn validate_nonce_with_gap(&self, nonce: u64) -> NonceResult {
         // Exact match - ideal case
         if nonce == self.nonce {
+            if self.next_nonce_after_exact().is_none() {
+                return NonceResult::Exhausted;
+            }
             return NonceResult::Valid;
         }
 
         // Too low - already used or before expected
         if nonce < self.nonce {
-            return NonceResult::TooLow { expected: self.nonce };
+            return NonceResult::TooLow {
+                expected: self.nonce,
+            };
         }
 
         // Check gap tolerance
@@ -94,6 +115,14 @@ impl Account {
                 got: nonce,
                 max_gap: MAX_NONCE_GAP,
             };
+        }
+
+        // There is no representable successor to u64::MAX. Treat it as a
+        // terminal nonce rather than allowing a later increment to wrap back
+        // to zero and reopen replay protection. Keep the out-of-range result
+        // above so a far-future MAX nonce is still classified as a gap error.
+        if nonce == u64::MAX {
+            return NonceResult::Exhausted;
         }
 
         // Within gap - check if already used
@@ -108,24 +137,74 @@ impl Account {
     ///
     /// If nonce == expected, increments normally and clears pending.
     /// If nonce > expected (within gap), adds to pending_nonces.
-    pub fn use_nonce_with_gap(&mut self, nonce: u64) {
-        if nonce == self.nonce {
-            // Increment nonce
-            self.nonce += 1;
-            // Clear any pending nonces that are now <= current nonce
-            while self.pending_nonces.first().copied() == Some(self.nonce) {
-                self.pending_nonces.remove(&self.nonce);
-                self.nonce += 1;
+    pub fn use_nonce_with_gap(&mut self, nonce: u64) -> Result<(), AccountError> {
+        // Keep this public mutator fail-closed even when called directly by a
+        // fixture or another subsystem instead of through AccountManager.
+        // Otherwise an out-of-range nonce could be inserted into the pending
+        // set and only discovered much later during state validation.
+        match self.validate_nonce_with_gap(nonce) {
+            NonceResult::Valid | NonceResult::ValidWithGap => {}
+            NonceResult::TooLow { expected } => {
+                return Err(AccountError::InvalidNonce {
+                    expected,
+                    got: nonce,
+                });
             }
+            NonceResult::GapTooLarge {
+                expected,
+                got,
+                max_gap,
+            } => {
+                return Err(AccountError::NonceGapTooLarge {
+                    expected,
+                    got,
+                    max_gap,
+                });
+            }
+            NonceResult::AlreadyUsed => return Err(AccountError::NonceAlreadyUsed { nonce }),
+            NonceResult::Exhausted => return Err(AccountError::NonceOverflow),
+        }
+
+        if nonce == self.nonce {
+            // Compute the complete advancement before mutating anything so an
+            // imported state near u64::MAX fails atomically.
+            let next_nonce = self
+                .next_nonce_after_exact()
+                .ok_or(AccountError::NonceOverflow)?;
+            let mut consumed = self
+                .nonce
+                .checked_add(1)
+                .ok_or(AccountError::NonceOverflow)?;
+            while consumed < next_nonce {
+                self.pending_nonces.remove(&consumed);
+                consumed = consumed.checked_add(1).ok_or(AccountError::NonceOverflow)?;
+            }
+            self.nonce = next_nonce;
         } else if nonce > self.nonce {
             // Out of order - add to pending
             self.pending_nonces.insert(nonce);
         }
+        Ok(())
     }
 
     /// Increment nonce after successful transaction
-    pub fn increment_nonce(&mut self) {
-        self.nonce += 1;
+    pub fn increment_nonce(&mut self) -> Result<(), AccountError> {
+        self.nonce = self
+            .nonce
+            .checked_add(1)
+            .ok_or(AccountError::NonceOverflow)?;
+        Ok(())
+    }
+
+    /// Return the next nonce after consuming the current one and any
+    /// contiguous pending markers. `None` means the state cannot advance
+    /// without overflowing u64.
+    fn next_nonce_after_exact(&self) -> Option<u64> {
+        let mut next = self.nonce.checked_add(1)?;
+        while self.pending_nonces.contains(&next) {
+            next = next.checked_add(1)?;
+        }
+        Some(next)
     }
 
     /// Get current nonce (for API responses)
@@ -165,10 +244,7 @@ impl Account {
             .iter()
             .filter(|(_, pos)| pos.size != 0)
             .map(|(symbol, pos)| {
-                let mark = mark_prices
-                    .get(symbol)
-                    .copied()
-                    .unwrap_or(pos.entry_price);
+                let mark = mark_prices.get(symbol).copied().unwrap_or(pos.entry_price);
                 let notional = pos.notional(mark);
                 ((notional as i128 * maintenance_rate_bps as i128) / 10000) as i64
             })
@@ -256,61 +332,168 @@ impl Account {
 }
 
 /// Manages all accounts
+const ACCOUNT_SHARD_COUNT: usize = 64;
+type AccountShard = HashMap<Address, Arc<Account>>;
+
+#[derive(Clone)]
 pub struct AccountManager {
-    accounts: HashMap<Address, Account>,
+    /// Shards are copy-on-write at the map level.  Cloning a state only
+    /// clones these 64 `Arc`s; mutating one account detaches its shard and
+    /// then detaches the account record itself if another state still owns it.
+    shards: [Arc<AccountShard>; ACCOUNT_SHARD_COUNT],
+    /// A per-manager randomized selector prevents attacker-chosen addresses
+    /// from concentrating writes in one shard.  `Clone` preserves the seed so
+    /// parent/child states always address the same account in the same shard.
+    shard_hasher: RandomState,
 }
 
 impl AccountManager {
     pub fn new() -> Self {
         Self {
-            accounts: HashMap::new(),
+            shards: std::array::from_fn(|_| Arc::new(HashMap::new())),
+            shard_hasher: RandomState::new(),
         }
     }
 
     /// Create AccountManager from a list of accounts (for recovery from snapshot)
     pub fn from_accounts(accounts: Vec<Account>) -> Self {
-        let accounts_map = accounts
-            .into_iter()
-            .map(|a| (a.address.clone(), a))
-            .collect();
+        let shard_hasher = RandomState::new();
+        let mut shard_maps: [AccountShard; ACCOUNT_SHARD_COUNT] =
+            std::array::from_fn(|_| HashMap::new());
+        for account in accounts {
+            let shard = shard_index(&shard_hasher, &account.address);
+            shard_maps[shard].insert(account.address.clone(), Arc::new(account));
+        }
+
         Self {
-            accounts: accounts_map,
+            shards: shard_maps.map(Arc::new),
+            shard_hasher,
         }
     }
 
     /// Get all accounts (for snapshot)
     pub fn all_accounts(&self) -> Vec<Account> {
-        self.accounts.values().cloned().collect()
+        let mut accounts: Vec<_> = self
+            .shards
+            .iter()
+            .flat_map(|shard| shard.values())
+            .map(|account| account.as_ref().clone())
+            .collect();
+        accounts.sort_by(|left, right| left.address.cmp(&right.address));
+        accounts
+    }
+
+    /// Validate authoritative account and position records without mutation.
+    ///
+    /// Negative free balance is deliberately allowed: realized losses and
+    /// fees can make an account insolvent before liquidation/ADL settles it.
+    /// Locked collateral, nonce bookkeeping, and position structure are
+    /// stricter runtime invariants and must survive import/replay unchanged.
+    pub fn validate_primary_state(
+        &self,
+        market_configs: &HashMap<Symbol, MarketConfig>,
+    ) -> Result<(), AccountError> {
+        let mut addresses: Vec<_> = self.shards.iter().flat_map(|shard| shard.keys()).collect();
+        addresses.sort();
+
+        for address in addresses {
+            let account = self.shards[self.shard_index(address)]
+                .get(address)
+                .expect("validated account key must resolve in its shard");
+            if address.is_empty()
+                || address != &account.address
+                || account.address != account.address.to_lowercase()
+            {
+                return Err(AccountError::InvalidAccountAddress);
+            }
+            if account.locked < 0 {
+                return Err(AccountError::NegativeLockedCollateral);
+            }
+            if account.hyck_balance < 0 {
+                return Err(AccountError::NegativeHyckBalance);
+            }
+
+            let max_pending = account.nonce.checked_add(MAX_NONCE_GAP).unwrap_or(u64::MAX);
+            if account.pending_nonces.iter().any(|pending| {
+                *pending == u64::MAX || *pending <= account.nonce || *pending > max_pending
+            }) {
+                return Err(AccountError::InvalidPendingNonce);
+            }
+
+            let mut symbols: Vec<_> = account.positions.keys().collect();
+            symbols.sort();
+            for symbol in symbols {
+                if symbol.is_empty() {
+                    return Err(AccountError::InvalidPositionSymbol);
+                }
+                let position = &account.positions[symbol];
+                let config = market_configs
+                    .get(symbol)
+                    .ok_or(AccountError::UnknownPositionMarket)?;
+                let absolute_size = position
+                    .size
+                    .checked_abs()
+                    .ok_or(AccountError::InvalidPositionSize)?;
+                if absolute_size > config.max_position_size {
+                    return Err(AccountError::PositionSizeLimitExceeded);
+                }
+                if (position.size == 0 && position.entry_price != 0)
+                    || (position.size != 0 && position.entry_price <= 0)
+                {
+                    return Err(AccountError::InvalidPositionEntryPrice);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn shard_mut(&mut self, address: &str) -> &mut AccountShard {
+        let index = self.shard_index(address);
+        Arc::make_mut(&mut self.shards[index])
+    }
+
+    fn shard_index(&self, address: &str) -> usize {
+        shard_index(&self.shard_hasher, address)
     }
 
     /// Get or create account (no faucet - use `get_or_create_with_faucet` for dev mode)
     pub fn get_or_create(&mut self, address: &str) -> &mut Account {
         let addr_lower = address.to_lowercase();
-        self.accounts
+        let account = self
+            .shard_mut(&addr_lower)
             .entry(addr_lower.clone())
-            .or_insert_with(|| Account::new(&addr_lower))
+            .or_insert_with(|| Arc::new(Account::new(&addr_lower)));
+        Arc::make_mut(account)
     }
 
     /// Get or create account with optional faucet funding (for API layer)
     pub fn get_or_create_with_faucet(&mut self, address: &str, faucet_amount: i64) -> &mut Account {
         let addr_lower = address.to_lowercase();
-        self.accounts.entry(addr_lower.clone()).or_insert_with(|| {
-            let mut account = Account::new(&addr_lower);
-            if faucet_amount > 0 {
-                account.balance = faucet_amount;
-                tracing::info!(
-                    address = %addr_lower,
-                    balance = faucet_amount,
-                    "New account created with faucet funds"
-                );
-            }
-            account
-        })
+        let account = self
+            .shard_mut(&addr_lower)
+            .entry(addr_lower.clone())
+            .or_insert_with(|| {
+                let mut account = Account::new(&addr_lower);
+                if faucet_amount > 0 {
+                    account.balance = faucet_amount;
+                    tracing::info!(
+                        address = %addr_lower,
+                        balance = faucet_amount,
+                        "New account created with faucet funds"
+                    );
+                }
+                Arc::new(account)
+            });
+        Arc::make_mut(account)
     }
 
     /// Get account (read-only)
     pub fn get(&self, address: &str) -> Option<&Account> {
-        self.accounts.get(&address.to_lowercase())
+        let address = address.to_lowercase();
+        self.shards[self.shard_index(&address)]
+            .get(&address)
+            .map(|account| account.as_ref())
     }
 
     /// Deposit funds
@@ -319,8 +502,19 @@ impl AccountManager {
             return Err(AccountError::InvalidAmount);
         }
         let account = self.get_or_create(address);
-        account.balance += amount;
+        account.balance = account
+            .balance
+            .checked_add(amount)
+            .ok_or(AccountError::BalanceOverflow)?;
         Ok(())
+    }
+
+    /// Return a liquid native HYCK balance, or zero for an account that has
+    /// not been created yet.
+    pub fn hyck_balance(&self, address: &str) -> i64 {
+        self.get(address)
+            .map(|account| account.hyck_balance)
+            .unwrap_or(0)
     }
 
     /// Withdraw funds
@@ -333,6 +527,81 @@ impl AccountManager {
             return Err(AccountError::InsufficientBalance);
         }
         account.balance -= amount;
+        Ok(())
+    }
+
+    /// Credit liquid native HYCK without touching perp collateral.
+    pub fn deposit_hyck(&mut self, address: &str, amount: i64) -> Result<(), AccountError> {
+        if amount <= 0 {
+            return Err(AccountError::InvalidAmount);
+        }
+        let address = address.to_lowercase();
+        // Preflight before taking a mutable COW path.  Besides keeping the
+        // balance unchanged, an overflow on an existing account must not
+        // detach its shard or create a new account as a side effect.
+        if let Some(account) = self.get(&address) {
+            account
+                .hyck_balance
+                .checked_add(amount)
+                .ok_or(AccountError::HyckBalanceOverflow)?;
+        }
+        self.get_or_create(&address).hyck_balance += amount;
+        Ok(())
+    }
+
+    /// Debit liquid native HYCK without touching perp collateral.
+    pub fn withdraw_hyck(&mut self, address: &str, amount: i64) -> Result<(), AccountError> {
+        if amount <= 0 {
+            return Err(AccountError::InvalidAmount);
+        }
+        let address = address.to_lowercase();
+        let balance = self
+            .get(&address)
+            .map(|account| account.hyck_balance)
+            .unwrap_or(0);
+        if balance < amount {
+            return Err(AccountError::InsufficientHyckBalance);
+        }
+        self.get_or_create(&address).hyck_balance -= amount;
+        Ok(())
+    }
+
+    /// Atomically transfer liquid native HYCK between two accounts.
+    ///
+    /// All balance and overflow checks happen before either account is
+    /// mutated, so a failed transfer cannot leave a partial debit or credit.
+    pub fn transfer_hyck(&mut self, from: &str, to: &str, amount: i64) -> Result<(), AccountError> {
+        if amount <= 0 {
+            return Err(AccountError::InvalidAmount);
+        }
+
+        let from = from.to_lowercase();
+        let to = to.to_lowercase();
+        let from_balance = self
+            .get(&from)
+            .map(|account| account.hyck_balance)
+            .unwrap_or(0);
+        if from_balance < amount {
+            return Err(AccountError::InsufficientHyckBalance);
+        }
+        // A self-transfer has no net state change.  In particular, an
+        // account at i64::MAX can still transfer to itself without the
+        // transient credit overflowing.
+        if from == to {
+            return Ok(());
+        }
+        let to_balance = self
+            .get(&to)
+            .map(|account| account.hyck_balance)
+            .unwrap_or(0);
+        to_balance
+            .checked_add(amount)
+            .ok_or(AccountError::HyckBalanceOverflow)?;
+
+        // The preflight above guarantees both operations succeed. Keep the
+        // debit and credit adjacent so this remains one logical state change.
+        self.get_or_create(&from).hyck_balance -= amount;
+        self.get_or_create(&to).hyck_balance += amount;
         Ok(())
     }
 
@@ -349,7 +618,13 @@ impl AccountManager {
 
     /// Unlock collateral (order cancelled/filled)
     pub fn unlock_collateral(&mut self, address: &str, amount: i64) {
-        if let Some(account) = self.accounts.get_mut(&address.to_lowercase()) {
+        let address = address.to_lowercase();
+        let shard_index = self.shard_index(&address);
+        if !self.shards[shard_index].contains_key(&address) {
+            return;
+        }
+        let shard = Arc::make_mut(&mut self.shards[shard_index]);
+        if let Some(account) = shard.get_mut(&address).map(Arc::make_mut) {
             let to_unlock = amount.min(account.locked);
             account.locked -= to_unlock;
             account.balance += to_unlock;
@@ -386,22 +661,23 @@ impl AccountManager {
 
     /// Get all accounts with positions in a symbol
     pub fn accounts_with_position(&self, symbol: &str) -> Vec<&Account> {
-        self.accounts
-            .values()
+        self.shards
+            .iter()
+            .flat_map(|shard| shard.values())
             .filter(|a| {
                 a.positions
                     .get(symbol)
                     .map(|p| p.size != 0)
                     .unwrap_or(false)
             })
+            .map(|account| account.as_ref())
             .collect()
     }
 
     /// Check if account can open position (has margin)
     pub fn can_open_position(&self, address: &str, notional: i64, leverage: i64) -> bool {
         let required_margin = notional / leverage;
-        self.accounts
-            .get(address)
+        self.get(address)
             .map(|a| a.balance >= required_margin)
             .unwrap_or(false)
     }
@@ -415,8 +691,7 @@ impl AccountManager {
                 got: nonce,
             });
         }
-        account.increment_nonce();
-        Ok(())
+        account.increment_nonce()
     }
 
     /// Validate and consume nonce with gap tolerance
@@ -425,29 +700,49 @@ impl AccountManager {
     pub fn use_nonce_with_gap(&mut self, address: &str, nonce: u64) -> Result<(), AccountError> {
         let account = self.get_or_create(address);
         match account.validate_nonce_with_gap(nonce) {
-            NonceResult::Valid | NonceResult::ValidWithGap => {
-                account.use_nonce_with_gap(nonce);
-                Ok(())
-            }
-            NonceResult::TooLow { expected } => {
-                Err(AccountError::InvalidNonce { expected, got: nonce })
-            }
-            NonceResult::GapTooLarge { expected, got, max_gap } => {
-                Err(AccountError::NonceGapTooLarge { expected, got, max_gap })
-            }
-            NonceResult::AlreadyUsed => {
-                Err(AccountError::NonceAlreadyUsed { nonce })
-            }
+            NonceResult::Valid | NonceResult::ValidWithGap => account.use_nonce_with_gap(nonce),
+            NonceResult::TooLow { expected } => Err(AccountError::InvalidNonce {
+                expected,
+                got: nonce,
+            }),
+            NonceResult::GapTooLarge {
+                expected,
+                got,
+                max_gap,
+            } => Err(AccountError::NonceGapTooLarge {
+                expected,
+                got,
+                max_gap,
+            }),
+            NonceResult::AlreadyUsed => Err(AccountError::NonceAlreadyUsed { nonce }),
+            NonceResult::Exhausted => Err(AccountError::NonceOverflow),
         }
     }
 
     /// Get current nonce for an address
     pub fn get_nonce(&self, address: &str) -> u64 {
-        self.accounts
-            .get(&address.to_lowercase())
-            .map(|a| a.nonce)
-            .unwrap_or(0)
+        self.get(address).map(|a| a.nonce).unwrap_or(0)
     }
+
+    #[cfg(test)]
+    fn account_ptr(&self, address: &str) -> Option<*const Account> {
+        let address = address.to_lowercase();
+        self.shards[self.shard_index(&address)]
+            .get(&address)
+            .map(Arc::as_ptr)
+    }
+
+    #[cfg(test)]
+    fn shard_ptr(&self, address: &str) -> *const AccountShard {
+        let address = address.to_lowercase();
+        Arc::as_ptr(&self.shards[self.shard_index(&address)])
+    }
+}
+
+fn shard_index(hasher: &RandomState, address: &str) -> usize {
+    let mut state = hasher.build_hasher();
+    address.hash(&mut state);
+    (state.finish() as usize) & (ACCOUNT_SHARD_COUNT - 1)
 }
 
 impl Default for AccountManager {
@@ -461,16 +756,46 @@ impl Default for AccountManager {
 pub enum AccountError {
     #[error("invalid amount")]
     InvalidAmount,
+    #[error("account balance overflow")]
+    BalanceOverflow,
+    #[error("native HYCK balance overflow")]
+    HyckBalanceOverflow,
     #[error("insufficient balance")]
     InsufficientBalance,
+    #[error("insufficient native HYCK balance")]
+    InsufficientHyckBalance,
     #[error("account not found")]
     NotFound,
+    #[error("account map key/address is empty, non-canonical, or mismatched")]
+    InvalidAccountAddress,
+    #[error("locked collateral cannot be negative")]
+    NegativeLockedCollateral,
+    #[error("native HYCK balance cannot be negative")]
+    NegativeHyckBalance,
+    #[error("pending nonce is not within the valid nonce gap")]
+    InvalidPendingNonce,
+    #[error("position symbol is empty")]
+    InvalidPositionSymbol,
+    #[error("position references an unknown market")]
+    UnknownPositionMarket,
+    #[error("position size cannot be represented safely")]
+    InvalidPositionSize,
+    #[error("position exceeds its market size limit")]
+    PositionSizeLimitExceeded,
+    #[error("position size and entry price are inconsistent")]
+    InvalidPositionEntryPrice,
     #[error("invalid nonce: expected {expected}, got {got}")]
     InvalidNonce { expected: u64, got: u64 },
     #[error("nonce gap too large: expected {expected}, got {got}, max gap is {max_gap}")]
-    NonceGapTooLarge { expected: u64, got: u64, max_gap: u64 },
+    NonceGapTooLarge {
+        expected: u64,
+        got: u64,
+        max_gap: u64,
+    },
     #[error("nonce already used: {nonce}")]
     NonceAlreadyUsed { nonce: u64 },
+    #[error("nonce counter exhausted")]
+    NonceOverflow,
 }
 
 #[cfg(test)]
@@ -488,6 +813,104 @@ mod tests {
         assert_eq!(mgr.get("alice").unwrap().balance, 7000);
 
         assert!(mgr.withdraw("alice", 10000).is_err());
+    }
+
+    #[test]
+    fn native_hyck_balance_is_separate_from_perp_collateral() {
+        let mut mgr = AccountManager::new();
+        mgr.deposit("alice", 500).unwrap();
+        mgr.deposit_hyck("alice", 1_000_000).unwrap();
+        assert_eq!(mgr.get("alice").unwrap().balance, 500);
+        assert_eq!(mgr.hyck_balance("alice"), 1_000_000);
+
+        mgr.withdraw_hyck("alice", 250_000).unwrap();
+        assert_eq!(mgr.get("alice").unwrap().balance, 500);
+        assert_eq!(mgr.hyck_balance("alice"), 750_000);
+    }
+
+    #[test]
+    fn native_hyck_transfer_failures_are_atomic() {
+        let mut mgr = AccountManager::new();
+        mgr.deposit_hyck("alice", 10).unwrap();
+        mgr.deposit_hyck("bob", i64::MAX).unwrap();
+
+        let insufficient = mgr.transfer_hyck("alice", "carol", 11);
+        assert!(matches!(
+            insufficient,
+            Err(AccountError::InsufficientHyckBalance)
+        ));
+        assert_eq!(mgr.hyck_balance("alice"), 10);
+        assert_eq!(mgr.hyck_balance("carol"), 0);
+
+        let overflow = mgr.transfer_hyck("alice", "bob", 1);
+        assert!(matches!(overflow, Err(AccountError::HyckBalanceOverflow)));
+        assert_eq!(mgr.hyck_balance("alice"), 10);
+        assert_eq!(mgr.hyck_balance("bob"), i64::MAX);
+
+        // Self-transfer is a no-op, including at the largest representable
+        // balance where a transient credit would otherwise overflow.
+        assert!(mgr.transfer_hyck("bob", "BOB", i64::MAX).is_ok());
+        assert_eq!(mgr.hyck_balance("bob"), i64::MAX);
+    }
+
+    #[test]
+    fn failed_native_hyck_credit_or_debit_does_not_create_an_account() {
+        let mut mgr = AccountManager::new();
+        assert!(matches!(
+            mgr.withdraw_hyck("missing", 1),
+            Err(AccountError::InsufficientHyckBalance)
+        ));
+        assert!(mgr.get("missing").is_none());
+
+        mgr.deposit_hyck("full", i64::MAX).unwrap();
+        assert!(matches!(
+            mgr.deposit_hyck("full", 1),
+            Err(AccountError::HyckBalanceOverflow)
+        ));
+        assert_eq!(mgr.hyck_balance("full"), i64::MAX);
+    }
+
+    #[test]
+    fn test_account_manager_clone_isolates_changed_accounts_and_shares_untouched() {
+        let mut parent = AccountManager::new();
+        let alice = "alice".to_string();
+        let bob = (0..ACCOUNT_SHARD_COUNT * 4)
+            .map(|index| format!("bob-{index}"))
+            .find(|address| parent.shard_index(address) != parent.shard_index(&alice))
+            .expect("test fixture must find two distinct account shards");
+        parent.deposit(&alice, 100).unwrap();
+        parent.deposit(&bob, 200).unwrap();
+
+        let parent_alice = parent.account_ptr(&alice).unwrap();
+        let parent_bob = parent.account_ptr(&bob).unwrap();
+        let parent_alice_shard = parent.shard_ptr(&alice);
+        let parent_bob_shard = parent.shard_ptr(&bob);
+        let mut child = parent.clone();
+        let mut sibling = parent.clone();
+
+        assert_eq!(child.shard_ptr(&alice), parent_alice_shard);
+        assert_eq!(child.shard_ptr(&bob), parent_bob_shard);
+
+        child.deposit(&alice, 10).unwrap();
+        sibling.use_nonce(&alice, 0).unwrap();
+
+        assert_eq!(parent.get(&alice).unwrap().balance, 100);
+        assert_eq!(child.get(&alice).unwrap().balance, 110);
+        assert_eq!(sibling.get_nonce(&alice), 1);
+        assert_eq!(parent.get_nonce(&alice), 0);
+
+        // The changed account detaches both the account Arc and its shard;
+        // an untouched account keeps both the account Arc and its shard.
+        assert_eq!(child.account_ptr(&bob), Some(parent_bob));
+        assert_eq!(sibling.account_ptr(&bob), Some(parent_bob));
+        assert_eq!(child.shard_ptr(&bob), parent_bob_shard);
+        assert_eq!(sibling.shard_ptr(&bob), parent_bob_shard);
+        assert_ne!(child.account_ptr(&alice), Some(parent_alice));
+        assert_ne!(sibling.account_ptr(&alice), Some(parent_alice));
+        assert_ne!(child.account_ptr(&alice), sibling.account_ptr(&alice));
+        assert_ne!(child.shard_ptr(&alice), parent_alice_shard);
+        assert_ne!(sibling.shard_ptr(&alice), parent_alice_shard);
+        assert_ne!(child.shard_ptr(&alice), sibling.shard_ptr(&alice));
     }
 
     #[test]
@@ -587,10 +1010,16 @@ mod tests {
         );
 
         // Within gap is valid with gap flag
-        assert_eq!(account.validate_nonce_with_gap(7), NonceResult::ValidWithGap);
+        assert_eq!(
+            account.validate_nonce_with_gap(7),
+            NonceResult::ValidWithGap
+        );
 
         // At max gap is valid
-        assert_eq!(account.validate_nonce_with_gap(15), NonceResult::ValidWithGap);
+        assert_eq!(
+            account.validate_nonce_with_gap(15),
+            NonceResult::ValidWithGap
+        );
 
         // Beyond max gap is invalid
         assert_eq!(
@@ -608,23 +1037,23 @@ mod tests {
         let mut account = Account::new("trader");
 
         // Use nonce 0 (exact match)
-        account.use_nonce_with_gap(0);
+        account.use_nonce_with_gap(0).unwrap();
         assert_eq!(account.nonce, 1);
         assert!(account.pending_nonces.is_empty());
 
         // Use nonce 3 (gap of 2)
-        account.use_nonce_with_gap(3);
+        account.use_nonce_with_gap(3).unwrap();
         assert_eq!(account.nonce, 1); // Not incremented yet
         assert!(account.pending_nonces.contains(&3));
 
         // Use nonce 2 (gap of 1)
-        account.use_nonce_with_gap(2);
+        account.use_nonce_with_gap(2).unwrap();
         assert_eq!(account.nonce, 1);
         assert!(account.pending_nonces.contains(&2));
         assert!(account.pending_nonces.contains(&3));
 
         // Use nonce 1 (fills the gap)
-        account.use_nonce_with_gap(1);
+        account.use_nonce_with_gap(1).unwrap();
         assert_eq!(account.nonce, 4); // Incremented past all pending
         assert!(account.pending_nonces.is_empty());
     }
@@ -635,7 +1064,7 @@ mod tests {
         account.nonce = 5;
 
         // Use nonce 7 (gap)
-        account.use_nonce_with_gap(7);
+        account.use_nonce_with_gap(7).unwrap();
         assert!(account.pending_nonces.contains(&7));
 
         // Try to use 7 again - should be AlreadyUsed
@@ -684,6 +1113,77 @@ mod tests {
         assert!(matches!(
             mgr.use_nonce_with_gap("alice", 5),
             Err(AccountError::NonceAlreadyUsed { .. })
+        ));
+    }
+
+    #[test]
+    fn nonce_counter_overflow_fails_closed_without_mutation() {
+        let mut account = Account::new("trader");
+
+        assert!(matches!(
+            account.use_nonce_with_gap(u64::MAX),
+            Err(AccountError::NonceGapTooLarge { .. })
+        ));
+        assert_eq!(account.nonce, 0);
+        assert!(account.pending_nonces.is_empty());
+
+        account.nonce = u64::MAX;
+
+        assert_eq!(
+            account.validate_nonce_with_gap(u64::MAX),
+            NonceResult::Exhausted
+        );
+        assert!(matches!(
+            account.use_nonce_with_gap(u64::MAX),
+            Err(AccountError::NonceOverflow)
+        ));
+        assert_eq!(account.nonce, u64::MAX);
+        assert!(account.pending_nonces.is_empty());
+
+        let mut account = Account::new("trader");
+        account.nonce = u64::MAX - 1;
+        account.pending_nonces.insert(u64::MAX);
+        assert_eq!(
+            account.validate_nonce_with_gap(u64::MAX - 1),
+            NonceResult::Exhausted
+        );
+        assert!(matches!(
+            account.use_nonce_with_gap(u64::MAX - 1),
+            Err(AccountError::NonceOverflow)
+        ));
+        assert_eq!(account.nonce, u64::MAX - 1);
+        assert!(account.pending_nonces.contains(&u64::MAX));
+    }
+
+    #[test]
+    fn primary_validation_accepts_insolvency_but_checks_nonce_and_position_structure() {
+        let mut manager = AccountManager::new();
+        let account = manager.get_or_create("alice");
+        account.balance = -1;
+        account.locked = 10;
+        account.nonce = 2;
+        account.pending_nonces.insert(4);
+        account.apply_fill("BTC-USDT", true, 100, 5_000_000);
+
+        let configs = HashMap::from([("BTC-USDT".to_string(), MarketConfig::default())]);
+        manager.validate_primary_state(&configs).unwrap();
+
+        manager.get_or_create("alice").pending_nonces.insert(2);
+        assert!(matches!(
+            manager.validate_primary_state(&configs),
+            Err(AccountError::InvalidPendingNonce)
+        ));
+        manager.get_or_create("alice").pending_nonces.remove(&2);
+
+        manager
+            .get_or_create("alice")
+            .positions
+            .get_mut("BTC-USDT")
+            .unwrap()
+            .entry_price = 0;
+        assert!(matches!(
+            manager.validate_primary_state(&configs),
+            Err(AccountError::InvalidPositionEntryPrice)
         ));
     }
 }

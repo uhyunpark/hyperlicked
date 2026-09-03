@@ -15,7 +15,11 @@ fn test_register_validator() {
     let self_stake = MIN_SELF_STAKE + 100_000; // Min + extra
 
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(self_stake * 2).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_ALICE)
+                .amount(self_stake * 2)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -35,7 +39,7 @@ fn test_register_validator() {
 
     // Balance should be reduced by self-stake
     let expected_balance = self_stake * 2 - self_stake;
-    assert_balance(&ctx.state, TRADER_ALICE, expected_balance);
+    assert_hyck_balance(&ctx.state, TRADER_ALICE, expected_balance);
 }
 
 /// Test delegation to validator increases stake
@@ -48,10 +52,18 @@ fn test_delegate_to_validator() {
 
     // Fund both accounts
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(self_stake * 2).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_ALICE)
+                .amount(self_stake * 2)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -98,7 +110,7 @@ fn test_delegate_to_validator() {
     );
 
     // Bob's balance should decrease
-    assert_balance(&ctx.state, TRADER_BOB, DEFAULT_DEPOSIT - delegation_amount);
+    assert_hyck_balance(&ctx.state, TRADER_BOB, DEFAULT_DEPOSIT - delegation_amount);
 }
 
 /// Test undelegation starts unbonding queue
@@ -111,10 +123,18 @@ fn test_undelegate_unbonding() {
 
     // Setup
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(self_stake * 2).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_ALICE)
+                .amount(self_stake * 2)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -138,7 +158,7 @@ fn test_undelegate_unbonding() {
         .unwrap();
     ctx.execute_block();
 
-    let balance_before_undelegate = ctx.balance(TRADER_BOB);
+    let balance_before_undelegate = ctx.hyck_balance(TRADER_BOB);
 
     // Bob undelegates half
     let undelegate_amount = delegation_amount / 2;
@@ -161,7 +181,7 @@ fn test_undelegate_unbonding() {
     );
 
     // Bob's balance should NOT increase yet (in unbonding)
-    assert_balance(&ctx.state, TRADER_BOB, balance_before_undelegate);
+    assert_hyck_balance(&ctx.state, TRADER_BOB, balance_before_undelegate);
 }
 
 /// Test insufficient stake fails validator registration
@@ -172,7 +192,11 @@ fn test_register_fails_insufficient_stake() {
     let insufficient_stake = MIN_SELF_STAKE - 1;
 
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_ALICE)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -189,7 +213,10 @@ fn test_register_fails_insufficient_stake() {
     // Validator should NOT exist (registration failed)
     let alice_addr = TRADER_ALICE.to_string();
     let validator = ctx.state.staking().get_validator(&alice_addr);
-    assert!(validator.is_none(), "Validator should not exist with insufficient stake");
+    assert!(
+        validator.is_none(),
+        "Validator should not exist with insufficient stake"
+    );
 }
 
 /// Test delegation to non-existent validator fails
@@ -198,11 +225,15 @@ fn test_delegate_to_nonexistent_validator_fails() {
     let mut ctx = TestContext::new();
 
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
-    let initial_balance = ctx.balance(TRADER_BOB);
+    let initial_balance = ctx.hyck_balance(TRADER_BOB);
 
     // Try to delegate to non-existent validator
     ctx.state
@@ -215,7 +246,7 @@ fn test_delegate_to_nonexistent_validator_fails() {
     ctx.execute_block();
 
     // Balance should remain unchanged (delegation failed)
-    assert_balance(&ctx.state, TRADER_BOB, initial_balance);
+    assert_hyck_balance(&ctx.state, TRADER_BOB, initial_balance);
 }
 
 /// Test claim unstaked after unbonding period
@@ -228,10 +259,18 @@ fn test_claim_unstaked() {
 
     // Setup
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(self_stake * 2).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_ALICE)
+                .amount(self_stake * 2)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            NativeHyckTransferBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -265,7 +304,7 @@ fn test_claim_unstaked() {
         .unwrap();
     ctx.execute_block();
 
-    let balance_after_undelegate = ctx.balance(TRADER_BOB);
+    let balance_after_undelegate = ctx.hyck_balance(TRADER_BOB);
 
     // Fast forward past unbonding period (7 days = 604,800,000 ms)
     let unbonding_period = 604_800_000;
@@ -280,7 +319,7 @@ fn test_claim_unstaked() {
     ctx.execute_block();
 
     // Bob should receive his funds back
-    let balance_after_claim = ctx.balance(TRADER_BOB);
+    let balance_after_claim = ctx.hyck_balance(TRADER_BOB);
     assert!(
         balance_after_claim > balance_after_undelegate,
         "Balance should increase after claiming: {} > {}",

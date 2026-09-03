@@ -33,7 +33,10 @@ struct TestNode {
 impl TestNode {
     fn new(config: ConsensusConfig, network: MockNetwork) -> Self {
         let store = MemoryBlockStore::new();
-        let genesis = Block::genesis();
+        let context = config
+            .context()
+            .expect("test consensus config must have a canonical context");
+        let genesis = Block::genesis(context);
         store.save(&genesis);
         store.set_committed(&genesis.hash());
 
@@ -63,7 +66,9 @@ impl TestNode {
                 return block;
             }
         }
-        self.store.get_by_height(0).unwrap_or_else(Block::genesis)
+        self.store
+            .get_by_height(0)
+            .unwrap_or_else(|| Block::genesis(self.config.context().expect("valid context")))
     }
 
     async fn run_leader_round(&mut self) -> anyhow::Result<Option<Block>> {
@@ -75,11 +80,15 @@ impl TestNode {
             .unwrap();
 
         let mut block = Block {
+            epoch: self.config.epoch,
+            committee_hash: self.config.context().expect("valid context").committee_hash,
+            genesis_hash: self.config.context().expect("valid context").genesis_hash,
             view,
             height: parent.height + 1,
             parent: parent.hash(),
             payload,
             proposer: self.config.node_id,
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: now.as_millis() as u64,
             justify: None,
@@ -92,13 +101,23 @@ impl TestNode {
 
         // Broadcast proposal
         let propose = Propose {
+            epoch: block.epoch,
+            committee_hash: block.committee_hash,
+            genesis_hash: block.genesis_hash,
             block: block.clone(),
             justify: self.safety.high_qc().cloned(),
+            proposer_signature: vec![],
         };
         self.network.broadcast_propose(propose).await?;
 
         // Self-vote
-        let self_vote = Vote::new(view, block_hash, block.app_hash, self.config.node_id);
+        let self_vote = Vote::new(
+            self.config.context().expect("valid context"),
+            view,
+            block_hash,
+            block.app_hash,
+            self.config.node_id,
+        );
         self.votes.entry(block_hash).or_default().push(self_vote);
 
         // Collect votes
@@ -108,8 +127,17 @@ impl TestNode {
             .await;
 
         if votes.len() >= quorum {
-            let qc = Certificate::new(view, block_hash, votes);
+            let qc = Certificate::new(
+                self.config.context().expect("valid context"),
+                view,
+                block_hash,
+                votes,
+            )
+            .map_err(anyhow::Error::msg)?;
             let prepare = Prepare {
+                epoch: qc.epoch,
+                committee_hash: qc.committee_hash,
+                genesis_hash: qc.genesis_hash,
                 view,
                 qc: qc.clone(),
             };
@@ -140,7 +168,7 @@ impl TestNode {
 
         // Execute and vote
         if let Some(vote) = self.process_proposal(propose) {
-            let leader = self.config.leader_of(view);
+            let leader = self.config.leader_of_active(view);
             let _ = self.network.send_vote(leader, vote).await;
         }
 
@@ -237,7 +265,13 @@ impl TestNode {
             self.safety.update_high_qc(justify);
         }
 
-        Some(Vote::new(view, block.hash(), local_app_hash, self.config.node_id))
+        Some(Vote::new(
+            self.config.context().expect("valid context"),
+            view,
+            block.hash(),
+            local_app_hash,
+            self.config.node_id,
+        ))
     }
 
     fn process_prepare(&mut self, prepare: Prepare) {
@@ -332,8 +366,11 @@ async fn test_three_nodes_reach_consensus() {
     let configs: Vec<_> = node_ids
         .iter()
         .map(|&node_id| ConsensusConfig {
+            epoch: 0,
+            genesis_hash: [0u8; 32],
             node_id,
             validators: node_ids.to_vec(),
+            voting_powers: vec![1, 1, 1],
             view_timeout_ms: 500,
             bls_pubkeys: vec![],
             bls_secret_key: None,
@@ -406,8 +443,11 @@ async fn test_transactions_included_in_blocks() {
     let configs: Vec<_> = node_ids
         .iter()
         .map(|&node_id| ConsensusConfig {
+            epoch: 0,
+            genesis_hash: [0u8; 32],
             node_id,
             validators: node_ids.to_vec(),
+            voting_powers: vec![1, 1, 1],
             view_timeout_ms: 500,
             bls_pubkeys: vec![],
             bls_secret_key: None,
@@ -420,10 +460,15 @@ async fn test_transactions_included_in_blocks() {
         Arc::new(Mutex::new(TestNode::new(configs[2].clone(), net2))),
     ];
 
-    // Submit a deposit transaction to the leader (node 0 at view 0)
+    // Submit a deposit transaction to the active leader at view 0.
+    let leader = configs[0].leader_of_active(0);
+    let leader_index = node_ids
+        .iter()
+        .position(|node_id| *node_id == leader)
+        .expect("active leader must be in the configured validator set");
     {
-        let mut node0 = nodes[0].lock().await;
-        let _ = node0.app.submit_tx(Transaction::Deposit {
+        let mut leader_node = nodes[leader_index].lock().await;
+        let _ = leader_node.app.submit_tx(Transaction::Deposit {
             trader: "alice".into(),
             amount: 100_000_000,
         });
@@ -439,11 +484,7 @@ async fn test_transactions_included_in_blocks() {
         let node = node.lock().await;
         let account = node.app.account("alice");
 
-        println!(
-            "Node {} alice balance: {:?}",
-            i,
-            account.map(|a| a.balance)
-        );
+        println!("Node {} alice balance: {:?}", i, account.map(|a| a.balance));
 
         // After block execution, alice should have her deposit
         if node.committed_height >= 1 {
@@ -464,32 +505,32 @@ async fn test_leader_rotation() {
     let configs: Vec<_> = node_ids
         .iter()
         .map(|&node_id| ConsensusConfig {
+            epoch: 0,
+            genesis_hash: [0u8; 32],
             node_id,
             validators: node_ids.to_vec(),
+            voting_powers: vec![1, 1, 1],
             view_timeout_ms: 500,
             bls_pubkeys: vec![],
             bls_secret_key: None,
         })
         .collect();
 
-    // Verify round-robin leader rotation
-    assert_eq!(configs[0].leader_of(0), node_ids[0]);
-    assert_eq!(configs[0].leader_of(1), node_ids[1]);
-    assert_eq!(configs[0].leader_of(2), node_ids[2]);
-    assert_eq!(configs[0].leader_of(3), node_ids[0]); // Wraps around
-
-    // Verify is_leader works correctly
-    assert!(configs[0].is_leader(0));
-    assert!(!configs[0].is_leader(1));
-    assert!(!configs[0].is_leader(2));
-
-    assert!(!configs[1].is_leader(0));
-    assert!(configs[1].is_leader(1));
-    assert!(!configs[1].is_leader(2));
-
-    assert!(!configs[2].is_leader(0));
-    assert!(!configs[2].is_leader(1));
-    assert!(configs[2].is_leader(2));
+    // Every node must derive the same active leader, and exactly one local
+    // configuration must identify itself as leader for each view.
+    for view in 0..12 {
+        let leader = configs[0].leader_of_active(view);
+        assert!(configs
+            .iter()
+            .all(|config| config.leader_of_active(view) == leader));
+        assert_eq!(
+            configs
+                .iter()
+                .filter(|config| config.is_leader(view))
+                .count(),
+            1
+        );
+    }
 
     println!("Leader rotation verified correctly");
 }
@@ -499,8 +540,11 @@ async fn test_quorum_calculation() {
     let node_ids = [[1u8; 32], [2u8; 32], [3u8; 32]];
 
     let config = ConsensusConfig {
+        epoch: 0,
+        genesis_hash: [0u8; 32],
         node_id: node_ids[0],
         validators: node_ids.to_vec(),
+        voting_powers: vec![1, 1, 1],
         view_timeout_ms: 500,
         bls_pubkeys: vec![],
         bls_secret_key: None,
@@ -513,8 +557,11 @@ async fn test_quorum_calculation() {
 
     // For n=4: f=1, quorum = max(2*1+1, 4/2+1) = max(3, 3) = 3
     let config4 = ConsensusConfig {
+        epoch: 0,
+        genesis_hash: [0u8; 32],
         node_id: [1u8; 32],
         validators: vec![[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
+        voting_powers: vec![1, 1, 1, 1],
         view_timeout_ms: 500,
         bls_pubkeys: vec![],
         bls_secret_key: None,

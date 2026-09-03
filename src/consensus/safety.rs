@@ -14,31 +14,40 @@
 //! ## Persistence Requirements (CRITICAL)
 //!
 //! The `voted_views` set MUST be persisted to prevent double-voting after crash.
-//! Use `voted_views()` to export for persistence, and `with_state()` to recover.
+//! Use `voted_views()` to export the safety portion of persisted state, and
+//! `with_state_for_context()` to recover it with the expected consensus context.
+//! The persistent store is responsible for writing the surrounding
+//! `ConsensusState` atomically with the finalized block; this small example
+//! demonstrates the safety invariant without requiring a store implementation.
 //!
-//! ```ignore
-//! // Before shutdown or after each vote
-//! let state = ConsensusState {
-//!     voted_views: safety.voted_views(),
-//!     high_qc: safety.high_qc().cloned(),
-//!     // ...
-//! };
-//! store.save_consensus_state(&state)?;
+//! ```
+//! use hyperlicked::consensus::Safety;
+//! use hyperlicked::types::{Block, ConsensusContext};
 //!
-//! // On recovery
-//! let state = store.load_consensus_state()?;
-//! let safety = Safety::with_state(
-//!     state.high_qc,
-//!     state.locked_qc,
-//!     &state.voted_views,
-//! );
+//! let context = ConsensusContext::new(0, [0u8; 32]);
+//! let mut safety = Safety::new_with_context(context);
+//! let block = Block::genesis(context);
+//!
+//! safety.record_vote(block.view);
+//! let persisted_voted_views = safety.voted_views();
+//! assert_eq!(persisted_voted_views, vec![block.view]);
+//!
+//! let recovered = Safety::with_state_for_context(
+//!     context,
+//!     None,
+//!     None,
+//!     &persisted_voted_views,
+//! )
+//! .expect("matching context must recover");
+//! assert!(recovered.safe_to_vote(&block, [0u8; 32]).is_err());
 //! ```
 
 use std::collections::HashSet;
 
-use crate::types::{Block, Certificate, Hash, View};
+use crate::types::{Block, Certificate, ConsensusContext, Hash, View};
 
 /// Safety module: tracks votes and enforces voting rules
+#[derive(Clone)]
 pub struct Safety {
     /// Views we've already voted in (prevents double voting)
     voted_views: HashSet<View>,
@@ -49,6 +58,9 @@ pub struct Safety {
     /// Locked QC (for liveness, see HotStuff-2 paper)
     /// Block can only be voted if it extends locked_qc or has higher view
     locked_qc: Option<Certificate>,
+
+    /// Static consensus context for all blocks and certificates.
+    context: Option<ConsensusContext>,
 }
 
 impl Safety {
@@ -57,7 +69,56 @@ impl Safety {
             voted_views: HashSet::new(),
             high_qc: None,
             locked_qc: None,
+            context: None,
         }
+    }
+
+    /// Create Safety bound to the initial committee context.
+    pub fn new_with_context(context: ConsensusContext) -> Self {
+        Self {
+            voted_views: HashSet::new(),
+            high_qc: None,
+            locked_qc: None,
+            context: Some(context),
+        }
+    }
+
+    /// Bind Safety to a static consensus context.
+    pub fn set_context(&mut self, context: ConsensusContext) -> Result<(), SafetyError> {
+        if let Some(existing) = self.context {
+            if existing != context {
+                return Err(SafetyError::ContextMismatch {
+                    expected: existing,
+                    got: context,
+                });
+            }
+        }
+        if self
+            .high_qc
+            .as_ref()
+            .is_some_and(|qc| qc.context() != context)
+            || self
+                .locked_qc
+                .as_ref()
+                .is_some_and(|qc| qc.context() != context)
+        {
+            return Err(SafetyError::ContextMismatch {
+                expected: context,
+                got: self
+                    .high_qc
+                    .as_ref()
+                    .or(self.locked_qc.as_ref())
+                    .map(|qc| qc.context())
+                    .unwrap_or(context),
+            });
+        }
+        self.context = Some(context);
+        Ok(())
+    }
+
+    /// Return the context enforced by Safety, if configured.
+    pub fn context(&self) -> Option<ConsensusContext> {
+        self.context
     }
 
     /// Create Safety module with recovered state (for persistence recovery)
@@ -70,11 +131,59 @@ impl Safety {
             voted_views: voted_views.iter().copied().collect(),
             high_qc,
             locked_qc,
+            context: None,
         }
+    }
+
+    /// Recover Safety while enforcing the persisted consensus context.
+    pub fn with_state_for_context(
+        context: ConsensusContext,
+        high_qc: Option<Certificate>,
+        locked_qc: Option<Certificate>,
+        voted_views: &[View],
+    ) -> Result<Self, SafetyError> {
+        if high_qc.as_ref().is_some_and(|qc| qc.context() != context)
+            || locked_qc.as_ref().is_some_and(|qc| qc.context() != context)
+        {
+            return Err(SafetyError::ContextMismatch {
+                expected: context,
+                got: high_qc
+                    .as_ref()
+                    .or(locked_qc.as_ref())
+                    .map(|qc| qc.context())
+                    .unwrap_or(context),
+            });
+        }
+        Ok(Self {
+            voted_views: voted_views.iter().copied().collect(),
+            high_qc,
+            locked_qc,
+            context: Some(context),
+        })
     }
 
     /// Check if it's safe to vote for this block
     pub fn safe_to_vote(&self, block: &Block, local_app_hash: Hash) -> Result<(), SafetyError> {
+        if let Some(expected) = self.context {
+            if block.context() != expected {
+                return Err(SafetyError::ContextMismatch {
+                    expected,
+                    got: block.context(),
+                });
+            }
+        }
+
+        if self
+            .high_qc
+            .as_ref()
+            .is_some_and(|qc| self.context.is_some_and(|context| qc.context() != context))
+            || self
+                .locked_qc
+                .as_ref()
+                .is_some_and(|qc| self.context.is_some_and(|context| qc.context() != context))
+        {
+            return Err(SafetyError::InconsistentContext);
+        }
         // Rule 1: One vote per view
         if self.voted_views.contains(&block.view) {
             return Err(SafetyError::AlreadyVoted(block.view));
@@ -124,6 +233,13 @@ impl Safety {
 
     /// Update high_qc if the new one is higher
     pub fn update_high_qc(&mut self, qc: Certificate) {
+        if let Some(expected) = self.context {
+            if qc.context() != expected {
+                return;
+            }
+        } else {
+            self.context = Some(qc.context());
+        }
         let dominated = self
             .high_qc
             .as_ref()
@@ -137,6 +253,13 @@ impl Safety {
 
     /// Update locked_qc (called when we see QC on a QC)
     pub fn update_locked_qc(&mut self, qc: Certificate) {
+        if let Some(expected) = self.context {
+            if qc.context() != expected {
+                return;
+            }
+        } else {
+            self.context = Some(qc.context());
+        }
         let dominated = self
             .locked_qc
             .as_ref()
@@ -200,16 +323,29 @@ pub enum SafetyError {
 
     #[error("app_hash mismatch: expected {expected:?}, got {got:?}")]
     AppHashMismatch { expected: Hash, got: Hash },
+
+    #[error("consensus context mismatch: expected {expected:?}, got {got:?}")]
+    ContextMismatch {
+        expected: ConsensusContext,
+        got: ConsensusContext,
+    },
+
+    #[error("safety state contains certificates from inconsistent consensus contexts")]
+    InconsistentContext,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn context() -> ConsensusContext {
+        ConsensusContext::new(0, [0u8; 32])
+    }
+
     #[test]
     fn test_first_vote_allowed() {
         let safety = Safety::new();
-        let block = Block::genesis();
+        let block = Block::genesis(context());
         let local_hash = [0u8; 32];
 
         assert!(safety.safe_to_vote(&block, local_hash).is_ok());
@@ -218,7 +354,7 @@ mod tests {
     #[test]
     fn test_double_vote_rejected() {
         let mut safety = Safety::new();
-        let block = Block::genesis();
+        let block = Block::genesis(context());
         let local_hash = [0u8; 32];
 
         // First vote OK
@@ -235,7 +371,7 @@ mod tests {
     #[test]
     fn test_app_hash_mismatch() {
         let safety = Safety::new();
-        let block = Block::genesis();
+        let block = Block::genesis(context());
         let wrong_hash = [1u8; 32]; // Different from block.app_hash
 
         assert!(matches!(
@@ -261,11 +397,15 @@ mod tests {
 
         // Verify we can't double-vote after recovery
         let block5 = Block {
+            epoch: 0,
+            committee_hash: [0u8; 32],
+            genesis_hash: [0u8; 32],
             view: 5,
             height: 1,
             parent: [0u8; 32],
             payload: vec![],
             proposer: [0u8; 32],
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: 0,
             justify: None,

@@ -9,8 +9,7 @@ use axum::{
 };
 
 use crate::api::types::ApiState;
-use crate::app::{OraclePrice, PriceSource, Transaction};
-use crate::config::Config;
+use crate::app::{OraclePrice, PriceSource};
 
 /// Oracle price response
 #[derive(serde::Serialize)]
@@ -67,7 +66,11 @@ pub async fn get_oracle_price(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<OraclePriceResponse>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let oracle = app.oracle();
 
     if !oracle.enabled {
@@ -105,7 +108,11 @@ pub async fn get_oracle_sources(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<Vec<PriceSourceResponse>>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let oracle = app.oracle();
 
     let sources = oracle
@@ -113,7 +120,8 @@ pub async fn get_oracle_sources(
         .get(&symbol)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let response: Vec<PriceSourceResponse> = sources.iter().map(PriceSourceResponse::from).collect();
+    let response: Vec<PriceSourceResponse> =
+        sources.iter().map(PriceSourceResponse::from).collect();
 
     Ok(Json(response))
 }
@@ -128,7 +136,11 @@ pub struct OracleStatusResponse {
 
 /// Get oracle system status
 pub async fn get_oracle_status(State(state): State<ApiState>) -> Json<OracleStatusResponse> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let oracle = app.oracle();
 
     let symbols: Vec<String> = oracle.prices.keys().cloned().collect();
@@ -142,6 +154,7 @@ pub async fn get_oracle_status(State(state): State<ApiState>) -> Json<OracleStat
 
 /// Oracle price update request
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 pub struct OracleUpdateRequest {
     pub operator: String,
     pub symbol: String,
@@ -151,6 +164,7 @@ pub struct OracleUpdateRequest {
 
 /// Price source input
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 pub struct PriceSourceInput {
     pub source_id: String,
     pub price: i64,
@@ -163,58 +177,35 @@ pub async fn submit_oracle_update(
     State(state): State<ApiState>,
     Json(req): Json<OracleUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let sources: Vec<PriceSource> = req
-        .sources
-        .into_iter()
-        .map(|s| PriceSource {
-            source_id: s.source_id,
-            price: s.price,
-            timestamp: s.timestamp,
-            weight_bps: s.weight_bps,
-        })
-        .collect();
-
-    let signature = hex::decode(&req.signature).unwrap_or_default();
-
-    let tx = Transaction::OraclePriceUpdate {
-        operator: req.operator,
-        symbol: req.symbol,
-        sources,
-        signature,
-    };
-
-    // Submit to mempool
-    let mut app = state.shared.app.write().await;
-    match app.submit_tx(tx) {
-        Ok(hash) => Ok(Json(serde_json::json!({
-            "status": "submitted",
-            "hash": hex::encode(hash)
-        }))),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
-    }
+    // Oracle updates currently use an operator BLS signature embedded in the
+    // legacy Transaction.  That object is not a canonical chain-domain
+    // envelope and would be accepted by only the node receiving this request.
+    // Keep the endpoint explicitly disabled until the BLS envelope scheme is
+    // wired through consensus; never enqueue it as an unsigned System tx.
+    let _ = (state, req);
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "oracle submission is disabled until canonical BLS transaction envelopes are enabled"
+            .to_string(),
+    ))
 }
 
-/// Request to enable/disable oracle (dev mode only)
+/// Request to enable/disable oracle.
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 pub struct SetOracleEnabledRequest {
     pub enabled: bool,
 }
 
-/// Enable or disable oracle (dev mode only)
+/// Enable or disable oracle.
+///
+/// Oracle enablement is consensus state.  There is intentionally no direct
+/// API mutation path: a future governance/system transaction must carry the
+/// change in a block so every validator applies it in the same order.
 pub async fn set_oracle_enabled(
     State(state): State<ApiState>,
     Json(req): Json<SetOracleEnabledRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Only allow in dev mode
-    if !Config::global().mode.is_dev() {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    let mut app = state.shared.app.write().await;
-    app.oracle_mut().set_enabled(req.enabled);
-
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "oracle_enabled": req.enabled
-    })))
+    let _ = (state, req);
+    Err(StatusCode::FORBIDDEN)
 }

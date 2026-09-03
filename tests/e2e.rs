@@ -3,7 +3,7 @@
 //! These tests define the expected behavior of the system.
 //! They serve as the living specification.
 //!
-//! Run with: cargo test --test e2e
+//! Run with: cargo test --all-features --test e2e
 //!
 //! ## Test Organization
 //!
@@ -23,14 +23,44 @@
 mod e2e;
 
 use hyperlicked::app::{AppState, OrderType, Side, Transaction};
+use hyperlicked::consensus::AppHook;
+#[cfg(feature = "legacy-engine")]
 use hyperlicked::consensus::{Engine, MemoryBlockStore};
-use hyperlicked::types::ConsensusConfig;
+use hyperlicked::types::{ConsensusConfig, ConsensusContext};
+
+fn test_context() -> ConsensusContext {
+    ConsensusConfig::single_node()
+        .context()
+        .expect("single-node config must have a canonical context")
+}
+
+fn execute_pending_block(state: &mut AppState, timestamp: u64) {
+    let context = test_context();
+    let parent = hyperlicked::types::Block::genesis(context);
+    let block = hyperlicked::types::Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
+        view: 1,
+        height: 1,
+        parent: parent.hash(),
+        payload: state.prepare_payload(&parent),
+        proposer: [0u8; 32],
+        commitment_root: [0u8; 32],
+        app_hash: [0u8; 32],
+        timestamp,
+        justify: None,
+    };
+
+    state.execute(&block);
+}
 
 // =============================================================================
 // Phase 1: Consensus Tests
 // =============================================================================
 
 #[test]
+#[cfg(feature = "legacy-engine")]
 fn test_single_node_produces_blocks() {
     // A single node should be able to produce blocks
     let config = ConsensusConfig::single_node();
@@ -53,6 +83,7 @@ fn test_single_node_produces_blocks() {
 }
 
 #[test]
+#[cfg(feature = "legacy-engine")]
 fn test_blocks_chain_correctly() {
     // Each block should reference its parent
     let config = ConsensusConfig::single_node();
@@ -77,7 +108,8 @@ fn test_blocks_chain_correctly() {
             blocks[i].parent,
             blocks[i - 1].hash(),
             "Block {} should reference block {}",
-            i, i - 1
+            i,
+            i - 1
         );
         assert_eq!(
             blocks[i].height,
@@ -87,29 +119,9 @@ fn test_blocks_chain_correctly() {
     }
 }
 
-#[test]
-#[ignore = "requires network setup"]
-fn test_block_contains_transactions() {
-    // Blocks should contain transactions from mempool
-    // This requires a more complex setup with transaction injection
-}
-
 // =============================================================================
 // Phase 2: Multi-Node Tests
 // =============================================================================
-
-#[test]
-#[ignore = "requires network setup"]
-fn test_three_nodes_reach_consensus() {
-    // 3 nodes should agree on block order
-    // This test requires running 3 nodes with networking
-}
-
-#[test]
-#[ignore = "requires timeout handling"]
-fn test_view_change_on_timeout() {
-    // If leader fails, view should advance
-}
 
 // =============================================================================
 // Phase 3: App Layer Tests
@@ -121,52 +133,48 @@ fn test_order_matching() {
     let mut state = AppState::new();
 
     // Deposit for both traders
-    state.submit_tx(Transaction::Deposit {
-        trader: "alice".into(),
-        amount: 100_000_000, // $1M
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 100_000_000, // $1M
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::Deposit {
-        trader: "bob".into(),
-        amount: 100_000_000,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "bob".into(),
+            amount: 100_000_000,
+        })
+        .unwrap();
 
     // Alice places bid at $50,000
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "alice".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Bid,
-        price: 5_000_000, // $50,000 in cents
-        size: 100_000_000, // 1 BTC in satoshis
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,  // $50,000 in cents
+            size: 100_000_000, // 1 BTC in satoshis
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
     // Bob places ask at $49,000 (should match)
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "bob".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Ask,
-        price: 4_900_000,
-        size: 100_000_000,
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "bob".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Ask,
+            price: 4_900_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
-    // Execute block to process transactions
-    let block = hyperlicked::types::Block {
-        view: 0,
-        height: 1,
-        parent: [0u8; 32],
-        payload: vec![],
-        proposer: [0u8; 32],
-        app_hash: [0u8; 32],
-        timestamp: 1000,
-        justify: None,
-    };
-
-    use hyperlicked::consensus::AppHook;
-    state.execute(&block);
+    // Execute a payload-built block to process transactions
+    execute_pending_block(&mut state, 1000);
 
     // Verify positions
     let alice = state.account("alice").expect("Alice account");
@@ -192,55 +200,54 @@ fn test_position_updates() {
     let mut state = AppState::new();
 
     // Setup: Alice deposits and goes long
-    state.submit_tx(Transaction::Deposit {
-        trader: "alice".into(),
-        amount: 100_000_000,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 100_000_000,
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::Deposit {
-        trader: "bob".into(),
-        amount: 100_000_000,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "bob".into(),
+            amount: 100_000_000,
+        })
+        .unwrap();
 
     // Alice bids, Bob hits
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "alice".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Bid,
-        price: 5_000_000,
-        size: 200_000_000, // 2 BTC
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,
+            size: 200_000_000, // 2 BTC
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "bob".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Ask,
-        price: 5_000_000,
-        size: 100_000_000, // 1 BTC (partial)
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "bob".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Ask,
+            price: 5_000_000,
+            size: 100_000_000, // 1 BTC (partial)
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
-    // Execute
-    let block = hyperlicked::types::Block {
-        view: 0,
-        height: 1,
-        parent: [0u8; 32],
-        payload: vec![],
-        proposer: [0u8; 32],
-        app_hash: [0u8; 32],
-        timestamp: 1000,
-        justify: None,
-    };
-
-    use hyperlicked::consensus::AppHook;
-    state.execute(&block);
+    // Execute a payload-built block
+    execute_pending_block(&mut state, 1000);
 
     // Alice should have 1 BTC (partial fill), with remaining order on book
     let alice_pos = state.account("alice").unwrap().position("BTC-USDT");
-    assert_eq!(alice_pos.size, 100_000_000, "Alice should have 1 BTC from partial fill");
+    assert_eq!(
+        alice_pos.size, 100_000_000,
+        "Alice should have 1 BTC from partial fill"
+    );
 
     // Check orderbook still has Alice's remaining order
     let book = state.orderbook("BTC-USDT").unwrap();
@@ -250,6 +257,7 @@ fn test_position_updates() {
 }
 
 #[test]
+#[cfg(feature = "legacy-engine")]
 fn test_full_flow() {
     // Order → Block → Fill → Position Update
     // This is the complete flow through consensus
@@ -258,35 +266,43 @@ fn test_full_flow() {
     let mut state = AppState::new();
 
     // 1. Submit transactions to mempool
-    state.submit_tx(Transaction::Deposit {
-        trader: "alice".into(),
-        amount: 100_000_000,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "alice".into(),
+            amount: 100_000_000,
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::Deposit {
-        trader: "bob".into(),
-        amount: 100_000_000,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::Deposit {
+            trader: "bob".into(),
+            amount: 100_000_000,
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "alice".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Bid,
-        price: 5_000_000,
-        size: 100_000_000,
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "alice".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Bid,
+            price: 5_000_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
-    state.submit_tx(Transaction::PlaceOrder {
-        trader: "bob".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Ask,
-        price: 5_000_000,
-        size: 100_000_000,
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }).unwrap();
+    state
+        .submit_tx(Transaction::PlaceOrder {
+            trader: "bob".into(),
+            symbol: "BTC-USDT".into(),
+            side: Side::Ask,
+            price: 5_000_000,
+            size: 100_000_000,
+            order_type: OrderType::Gtc,
+            reduce_only: false,
+        })
+        .unwrap();
 
     // 2. Create engine with our state
     let store = MemoryBlockStore::new();
@@ -315,30 +331,43 @@ fn test_full_flow() {
 #[test]
 fn test_mempool_3_bucket_ordering() {
     // Transactions should be ordered: deposits → cancels → orders
-    use hyperlicked::app::Mempool;
-
     let mut mempool = hyperlicked::app::Mempool::default();
 
     // Add in wrong order
-    mempool.add(Transaction::PlaceOrder {
-        trader: "alice".into(),
-        symbol: "BTC-USDT".into(),
-        side: Side::Bid,
-        price: 5_000_000,
-        size: 100_000_000,
-        order_type: OrderType::Gtc,
-        reduce_only: false,
-    }, 1).unwrap();
+    mempool
+        .add(
+            Transaction::PlaceOrder {
+                trader: "alice".into(),
+                symbol: "BTC-USDT".into(),
+                side: Side::Bid,
+                price: 5_000_000,
+                size: 100_000_000,
+                order_type: OrderType::Gtc,
+                reduce_only: false,
+            },
+            1,
+        )
+        .unwrap();
 
-    mempool.add(Transaction::CancelOrder {
-        trader: "bob".into(),
-        order_id: "order1".into(),
-    }, 2).unwrap();
+    mempool
+        .add(
+            Transaction::CancelOrder {
+                trader: "bob".into(),
+                order_id: "order1".into(),
+            },
+            2,
+        )
+        .unwrap();
 
-    mempool.add(Transaction::Deposit {
-        trader: "charlie".into(),
-        amount: 1000,
-    }, 3).unwrap();
+    mempool
+        .add(
+            Transaction::Deposit {
+                trader: "charlie".into(),
+                amount: 1000,
+            },
+            3,
+        )
+        .unwrap();
 
     // Extract
     let txs = mempool.prepare_block(10);

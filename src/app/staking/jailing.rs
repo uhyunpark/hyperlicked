@@ -101,6 +101,7 @@ impl StakingState {
 mod tests {
     use super::*;
     use crate::app::staking::types::MIN_SELF_STAKE;
+    use crate::crypto::bls::BlsSecretKey;
 
     fn test_node_id(n: u8) -> NodeId {
         let mut id = [0u8; 32];
@@ -109,14 +110,33 @@ mod tests {
     }
 
     fn test_bls_key() -> Vec<u8> {
-        vec![0u8; 48]
+        BlsSecretKey::from_seed(&[1u8; 32])
+            .public_key()
+            .to_bytes()
+            .to_vec()
+    }
+
+    fn test_bls_proof() -> Vec<u8> {
+        let node_id = test_node_id(1);
+        BlsSecretKey::from_seed(&[1u8; 32])
+            .create_proof_of_possession(&[0u8; 32], &node_id)
+            .to_bytes()
+            .to_vec()
     }
 
     #[test]
     fn test_manual_jail() {
         let mut state = StakingState::new();
         state
-            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v1".into(),
+                test_node_id(1),
+                test_bls_key(),
+                test_bls_proof(),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
 
         // Manually jail
@@ -136,7 +156,15 @@ mod tests {
     fn test_can_unjail() {
         let mut state = StakingState::new();
         state
-            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v1".into(),
+                test_node_id(1),
+                test_bls_key(),
+                test_bls_proof(),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
 
         state.manual_jail("v1", 1000, Some(5000));

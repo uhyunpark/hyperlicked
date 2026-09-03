@@ -54,7 +54,9 @@ pub fn assert_long_position(state: &AppState, trader: &str, symbol: &str) {
     assert!(
         size > 0,
         "Expected {} to have long position in {}, got {} sats",
-        trader, symbol, size
+        trader,
+        symbol,
+        size
     );
 }
 
@@ -68,7 +70,9 @@ pub fn assert_short_position(state: &AppState, trader: &str, symbol: &str) {
     assert!(
         size < 0,
         "Expected {} to have short position in {}, got {} sats",
-        trader, symbol, size
+        trader,
+        symbol,
+        size
     );
 }
 
@@ -96,7 +100,10 @@ pub fn assert_balance_range(state: &AppState, trader: &str, min: i64, max: i64) 
     assert!(
         actual >= min && actual <= max,
         "Balance for {} not in expected range: expected [{}, {}], got {}",
-        trader, min, max, actual
+        trader,
+        min,
+        max,
+        actual
     );
 }
 
@@ -109,6 +116,20 @@ pub fn assert_balance_delta(state: &AppState, trader: &str, initial: i64, expect
         actual_delta, expected_delta,
         "Balance delta mismatch for {}: expected {} cents, got {} cents",
         trader, expected_delta, actual_delta
+    );
+}
+
+/// Assert that a trader has a specific liquid native HYCK balance.
+pub fn assert_hyck_balance(state: &AppState, trader: &str, expected: i64) {
+    let actual = state
+        .account(trader)
+        .map(|account| account.hyck_balance)
+        .unwrap_or(0);
+
+    assert_eq!(
+        actual, expected,
+        "Native HYCK balance mismatch for {}: expected {} base units, got {} base units",
+        trader, expected, actual
     );
 }
 

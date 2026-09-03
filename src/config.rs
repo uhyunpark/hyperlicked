@@ -26,12 +26,30 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn from_env() -> Self {
-        match std::env::var("MODE").as_deref() {
-            Ok("mainnet") | Ok("production") => Mode::Mainnet,
-            Ok("testnet") | Ok("staging") => Mode::Testnet,
-            _ => Mode::Dev, // Default to dev
+    /// Parse a runtime mode without consulting process-global state.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "dev" => Ok(Mode::Dev),
+            "testnet" | "staging" => Ok(Mode::Testnet),
+            "mainnet" | "production" => Ok(Mode::Mainnet),
+            _ => Err(format!(
+                "MODE must be one of: dev, testnet, mainnet (got `{value}`)"
+            )),
         }
+    }
+
+    /// Read MODE for a process that must explicitly select its runtime mode.
+    pub fn from_env_required() -> Result<Self, String> {
+        let value = std::env::var("MODE")
+            .map_err(|_| "MODE must be explicitly set to dev, testnet, or mainnet".to_string())?;
+        Self::parse(&value)
+    }
+
+    pub fn from_env() -> Self {
+        std::env::var("MODE")
+            .ok()
+            .and_then(|value| Self::parse(&value).ok())
+            .unwrap_or(Mode::Dev)
     }
 
     pub fn is_dev(&self) -> bool {
@@ -41,6 +59,10 @@ impl Mode {
     pub fn is_production(&self) -> bool {
         matches!(self, Mode::Mainnet)
     }
+}
+
+fn dev_only_flag(mode: Mode, requested: bool) -> bool {
+    mode.is_dev() && requested
 }
 
 impl std::fmt::Display for Mode {
@@ -204,7 +226,12 @@ impl Config {
         // Parse peers from PEERS env var (comma-separated URLs)
         let peers: Vec<String> = std::env::var("PEERS")
             .ok()
-            .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         Self {
@@ -232,12 +259,18 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1000), // Default: snapshot every 1000 blocks
-            oracle_enabled: std::env::var("ORACLE_ENABLED")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false),
-            mm_enabled: std::env::var("MM_ENABLED")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false),
+            oracle_enabled: dev_only_flag(
+                mode,
+                std::env::var("ORACLE_ENABLED")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false),
+            ),
+            mm_enabled: dev_only_flag(
+                mode,
+                std::env::var("MM_ENABLED")
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false),
+            ),
             peers,
             sync_poll_interval_ms: std::env::var("SYNC_POLL_INTERVAL_MS")
                 .ok()
@@ -332,6 +365,30 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_parse_accepts_supported_values() {
+        assert_eq!(Mode::parse("dev"), Ok(Mode::Dev));
+        assert_eq!(Mode::parse("testnet"), Ok(Mode::Testnet));
+        assert_eq!(Mode::parse("staging"), Ok(Mode::Testnet));
+        assert_eq!(Mode::parse("mainnet"), Ok(Mode::Mainnet));
+        assert_eq!(Mode::parse("production"), Ok(Mode::Mainnet));
+    }
+
+    #[test]
+    fn mode_parse_rejects_missing_or_unknown_values() {
+        assert!(Mode::parse("").is_err());
+        assert!(Mode::parse("prod").is_err());
+        assert!(Mode::parse("MAINNET").is_err());
+    }
+
+    #[test]
+    fn dev_only_runtime_flags_are_disabled_outside_dev() {
+        assert!(dev_only_flag(Mode::Dev, true));
+        assert!(!dev_only_flag(Mode::Testnet, true));
+        assert!(!dev_only_flag(Mode::Mainnet, true));
+        assert!(!dev_only_flag(Mode::Dev, false));
+    }
 
     #[test]
     fn test_mode_default_is_dev() {

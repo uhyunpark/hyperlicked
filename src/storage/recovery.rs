@@ -4,8 +4,8 @@
 //!
 //! ## Recovery Process
 //! 1. Load consensus state (QCs, voted views, current view)
-//! 2. Load latest snapshot
-//! 3. Replay blocks from snapshot height to committed height
+//! 2. Start from the genesis application state
+//! 3. Replay every committed block through the application hook
 //! 4. Return recovered state ready for consensus to resume
 
 use crate::consensus::Safety;
@@ -17,9 +17,11 @@ use super::{AppSnapshot, ConsensusState, PersistentStore};
 pub struct RecoveryResult {
     /// Recovered consensus state
     pub consensus_state: ConsensusState,
-    /// App snapshot (needs block replay to reach committed state)
+    /// Genesis app state.  This is intentionally not the latest persisted
+    /// snapshot because snapshots omit orderbooks and cannot reconstruct the
+    /// canonical exchange state on their own.
     pub snapshot: AppSnapshot,
-    /// Height of the snapshot (blocks from here need replay)
+    /// Always zero for canonical recovery.
     pub snapshot_height: u64,
     /// Safety module initialized with recovered state
     pub safety: Safety,
@@ -32,20 +34,39 @@ pub fn recover_from_storage<S: PersistentStore>(store: &S) -> anyhow::Result<Rec
         .load_consensus_state()?
         .unwrap_or_else(ConsensusState::genesis);
 
+    // A persisted QC is only meaningful in the exact context that was
+    // persisted with it.  Reject mixed-context state before constructing the
+    // Safety module; restoring first would make stale certificates observable
+    // to consensus code.
+    let context = consensus_state.context();
+    if let Some(qc) = &consensus_state.high_qc {
+        qc.validate_context(context)
+            .map_err(|error| anyhow::anyhow!("persisted high QC context mismatch: {error}"))?;
+    }
+    if let Some(qc) = &consensus_state.locked_qc {
+        qc.validate_context(context)
+            .map_err(|error| anyhow::anyhow!("persisted locked QC context mismatch: {error}"))?;
+    }
+
     tracing::info!(
         committed_height = consensus_state.committed_height,
         current_view = consensus_state.current_view,
+        epoch = consensus_state.epoch,
+        committee_hash = %hex::encode(consensus_state.committee_hash),
         "Loaded consensus state"
     );
 
-    // 2. Load latest snapshot
-    let (snapshot_height, snapshot) = store
-        .load_latest_snapshot(consensus_state.committed_height)?
-        .unwrap_or_else(|| (0, AppSnapshot::genesis()));
+    // 2. Do not use AppSnapshot for canonical recovery.  It intentionally
+    // omits orderbooks and other execution-critical structures, so replay the
+    // complete finalized chain from the genesis application state.
+    let snapshot_height = 0;
+    let snapshot = AppSnapshot::genesis();
 
     tracing::info!(
         snapshot_height,
-        blocks_to_replay = consensus_state.committed_height.saturating_sub(snapshot_height),
+        blocks_to_replay = consensus_state
+            .committed_height
+            .saturating_sub(snapshot_height),
         "Loaded app snapshot"
     );
 

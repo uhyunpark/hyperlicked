@@ -14,7 +14,11 @@ pub async fn get_account(
     State(state): State<ApiState>,
     Path(address): Path<String>,
 ) -> Json<AccountInfo> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     let account = match app.account(&address) {
         Some(acc) => acc,
@@ -22,6 +26,9 @@ pub async fn get_account(
             return Json(AccountInfo {
                 address: address.clone(),
                 balance: 0,
+                hyck_balance: 0,
+                hyck_balance_hyck: 0.0,
+                nonce: 0,
                 locked_collateral: 0,
                 available_balance: 0,
                 unrealized_pnl: 0,
@@ -33,6 +40,10 @@ pub async fn get_account(
     Json(AccountInfo {
         address: account.address.clone(),
         balance: account.balance,
+        hyck_balance: account.hyck_balance,
+        hyck_balance_hyck: account.hyck_balance as f64
+            / crate::app::staking::HYCK_BASE_UNITS_PER_HYCK as f64,
+        nonce: account.nonce,
         locked_collateral: account.locked,
         available_balance: account.balance,
         unrealized_pnl: 0,
@@ -46,7 +57,11 @@ pub async fn get_positions(
 ) -> Json<Vec<PositionInfo>> {
     use crate::app::MAINTENANCE_MARGIN_BPS;
 
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     let account = match app.account(&address) {
         Some(acc) => acc,
@@ -100,16 +115,26 @@ pub async fn get_nonce(
     State(state): State<ApiState>,
     Path(address): Path<String>,
 ) -> Json<serde_json::Value> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let nonce = app.accounts().get_nonce(&address);
-    Json(serde_json::json!({ "address": address, "nonce": nonce }))
+    // Nonces are u64 values and may exceed JavaScript's exact integer range;
+    // expose the canonical decimal representation instead of a JSON number.
+    Json(serde_json::json!({ "address": address, "nonce": nonce.to_string() }))
 }
 
 pub async fn get_orders(
     State(state): State<ApiState>,
     Path(address): Path<String>,
 ) -> Json<Vec<OrderInfo>> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let orders = app.orders_by_address(&address);
 
     let order_infos: Vec<OrderInfo> = orders
@@ -152,7 +177,11 @@ pub async fn get_account_funding(
     State(state): State<ApiState>,
     Path(address): Path<String>,
 ) -> Json<Vec<FundingPayment>> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     let account = match app.account(&address) {
         Some(acc) => acc,
@@ -164,7 +193,9 @@ pub async fn get_account_funding(
     let payments: Vec<FundingPayment> = account
         .positions
         .iter()
-        .filter(|(_, pos)| pos.last_funding_timestamp > 0 && (pos.cumulative_funding != 0 || pos.size != 0))
+        .filter(|(_, pos)| {
+            pos.last_funding_timestamp > 0 && (pos.cumulative_funding != 0 || pos.size != 0)
+        })
         .map(|(symbol, pos)| FundingPayment {
             symbol: symbol.clone(),
             payment: pos.cumulative_funding,
@@ -190,7 +221,11 @@ pub async fn get_user_fills(
 ) -> Json<Vec<FillInfo>> {
     use crate::app::orderbook::Side;
 
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let limit = query.limit.unwrap_or(100).min(500);
     let address_lower = address.to_lowercase();
 
@@ -235,4 +270,23 @@ pub async fn get_user_fills(
         .collect();
 
     Json(fills)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn nonce_route_serializes_u64_as_decimal_string() {
+        let address = "0x1111111111111111111111111111111111111111".to_string();
+        let mut app = crate::app::AppState::new();
+        app.accounts_mut().get_or_create(&address).nonce = u64::MAX;
+        let api_state = ApiState::new(crate::api::state::SharedState::new(app));
+
+        let response = get_nonce(State(api_state), Path(address.clone())).await;
+        let json = response.0;
+        assert_eq!(json["address"], serde_json::json!(address));
+        assert_eq!(json["nonce"], serde_json::json!(u64::MAX.to_string()));
+        assert!(json["nonce"].is_string());
+    }
 }

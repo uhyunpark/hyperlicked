@@ -1,1034 +1,1405 @@
-//! Active Sync Client
+//! Verified active block download.
 //!
-//! Background task that polls peers and catches up when behind.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! ActiveSyncClient
-//! ├── peers: Vec<String>         // HTTP endpoints of validators
-//! ├── poll_interval: Duration    // How often to check for new blocks
-//! └── snapshot_threshold: u64    // Download snapshot if behind by this much
-//!
-//! Sync Flow:
-//! 1. Poll peers for their height
-//! 2. If behind by < threshold: download blocks, replay
-//! 3. If behind by > threshold: download snapshot first, then blocks
-//! 4. Execute and store each block
-//! 5. Repeat
-//! ```
+//! Active sync is deliberately a transport component, not a second state
+//! machine.  A peer can provide bytes and a height hint, but it cannot choose
+//! the consensus context, committee, quorum keys, or application state that
+//! this client trusts.  Callers import the returned blocks through the normal
+//! consensus/store path.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tracing::debug;
 
-use crate::app::AppState;
-use crate::config::Config;
-use crate::consensus::AppHook;
-use crate::storage::{AppSnapshot, ConsensusState, PersistentStore};
-use crate::types::{Block, Certificate};
+use crate::consensus::verify_certificate;
+use crate::types::{
+    Block, Certificate, Committee, ConsensusContext, Hash, NodeId, MAX_SYNC_RESPONSE_BYTES,
+};
 
-/// Threshold for downloading snapshot vs replaying blocks
-const DEFAULT_SNAPSHOT_THRESHOLD: u64 = 1000;
-
-/// Maximum blocks to request per HTTP call
+/// Maximum number of blocks requested in one HTTP response.
 const MAX_BLOCKS_PER_REQUEST: u64 = 100;
 
-/// Default consecutive failures before blacklisting a peer
-const DEFAULT_BLACKLIST_THRESHOLD: u32 = 5;
+/// Maximum number of blocks returned by one active-sync download window.
+///
+/// The peer response is paginated, so the per-page limit above is not enough
+/// to bound the `Vec<Block>` retained by the caller.  Keep this fixed and
+/// conservative until a streaming/import path replaces the returned vector.
+const MAX_ACTIVE_SYNC_BLOCKS: u64 = 1_000;
 
-/// Default blacklist duration in milliseconds (60 seconds)
-const DEFAULT_BLACKLIST_DURATION_MS: u64 = 60_000;
+/// Hard cap for the complete JSON response envelope before deserialization.
+///
+/// `Block::validate` still enforces the 10 MB per-block payload bound.  This
+/// separate batch bound prevents a peer from making the downloader allocate
+/// an unbounded JSON/base64 envelope before those per-block checks run.
+const MAX_BLOCK_RANGE_RESPONSE_BYTES: usize = MAX_SYNC_RESPONSE_BYTES;
 
-/// Peer reputation tracking for blacklisting unreliable peers
-#[derive(Debug, Clone, Default)]
-pub struct PeerReputation {
-    /// Total successful interactions
-    pub success_count: u64,
-    /// Total failed interactions
-    pub failure_count: u64,
-    /// Consecutive failures (resets on success)
-    pub consecutive_failures: u32,
-    /// Blacklisted until this timestamp (ms since epoch), None if not blacklisted
-    pub blacklisted_until: Option<u64>,
-}
+/// Maximum raw JSON bytes retained across all pages of one active-sync
+/// download.  A page is still capped independently by
+/// [`MAX_BLOCK_RANGE_RESPONSE_BYTES`].
+const MAX_ACTIVE_SYNC_TOTAL_BYTES: usize = 4 * MAX_BLOCK_RANGE_RESPONSE_BYTES;
 
-impl PeerReputation {
-    /// Check if peer is currently blacklisted
-    pub fn is_blacklisted(&self, current_time_ms: u64) -> bool {
-        self.blacklisted_until
-            .map(|until| current_time_ms < until)
-            .unwrap_or(false)
-    }
-}
-
-/// Manages peer reputations and blacklisting
-#[derive(Debug)]
-pub struct PeerReputationManager {
-    /// Peer URL -> reputation
-    peers: HashMap<String, PeerReputation>,
-    /// Consecutive failures before blacklisting
-    blacklist_threshold: u32,
-    /// Duration to blacklist in milliseconds
-    blacklist_duration_ms: u64,
-}
-
-impl PeerReputationManager {
-    /// Create a new reputation manager with default settings
-    pub fn new() -> Self {
-        Self {
-            peers: HashMap::new(),
-            blacklist_threshold: DEFAULT_BLACKLIST_THRESHOLD,
-            blacklist_duration_ms: DEFAULT_BLACKLIST_DURATION_MS,
-        }
-    }
-
-    /// Create with custom threshold and duration
-    pub fn with_config(blacklist_threshold: u32, blacklist_duration_ms: u64) -> Self {
-        Self {
-            peers: HashMap::new(),
-            blacklist_threshold,
-            blacklist_duration_ms,
-        }
-    }
-
-    /// Record a successful interaction with a peer
-    pub fn record_success(&mut self, peer: &str) {
-        let rep = self.peers.entry(peer.to_string()).or_default();
-        rep.success_count = rep.success_count.saturating_add(1);
-        rep.consecutive_failures = 0;
-        // Clear blacklist on success (peer is working again)
-        rep.blacklisted_until = None;
-    }
-
-    /// Record a failed interaction with a peer
-    pub fn record_failure(&mut self, peer: &str, current_time_ms: u64) {
-        let rep = self.peers.entry(peer.to_string()).or_default();
-        rep.failure_count = rep.failure_count.saturating_add(1);
-        rep.consecutive_failures = rep.consecutive_failures.saturating_add(1);
-
-        // Blacklist if threshold exceeded
-        if rep.consecutive_failures >= self.blacklist_threshold {
-            let until = current_time_ms.saturating_add(self.blacklist_duration_ms);
-            rep.blacklisted_until = Some(until);
-            tracing::warn!(
-                peer,
-                consecutive_failures = rep.consecutive_failures,
-                blacklisted_until_ms = until,
-                "Peer blacklisted due to consecutive failures"
-            );
-        }
-    }
-
-    /// Check if a peer is currently blacklisted
-    pub fn is_blacklisted(&self, peer: &str, current_time_ms: u64) -> bool {
-        self.peers
-            .get(peer)
-            .map(|rep| rep.is_blacklisted(current_time_ms))
-            .unwrap_or(false)
-    }
-
-    /// Get reputation for a peer (for monitoring)
-    pub fn get_reputation(&self, peer: &str) -> Option<&PeerReputation> {
-        self.peers.get(peer)
-    }
-
-    /// Get all non-blacklisted peers from a list
-    pub fn filter_available<'a>(
-        &self,
-        peers: &'a [String],
-        current_time_ms: u64,
-    ) -> Vec<&'a String> {
-        peers
-            .iter()
-            .filter(|p| !self.is_blacklisted(p, current_time_ms))
-            .collect()
-    }
-}
-
-impl Default for PeerReputationManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Sync status response from peer
-#[derive(Debug, Deserialize)]
-pub struct PeerSyncStatus {
-    pub height: u64,
-    pub view: u64,
-    #[serde(rename = "committedHash")]
-    pub committed_hash: String,
-    #[serde(rename = "latestSnapshotHeight")]
-    pub latest_snapshot_height: Option<u64>,
-}
-
-/// Certificate export from peer (QC for block verification)
+/// Certificate export from a peer.
+///
+/// The committee and public-key fields are claims made by the peer.  They are
+/// parsed for exact sizes and are accepted only when the trusted committee
+/// verifier proves that they match the local committee.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerCertificateExport {
+    pub epoch: u64,
+    #[serde(rename = "committeeHash")]
+    pub committee_hash: String,
+    #[serde(rename = "genesisHash")]
+    pub genesis_hash: String,
     pub view: u64,
     #[serde(rename = "blockHash")]
-    pub block_hash: String, // hex
-    /// App state hash that all voters agreed on (required for BLS verification)
+    pub block_hash: String,
     #[serde(rename = "appHash", default)]
-    pub app_hash: Option<String>, // hex
-    /// Voters who contributed (NodeId hex strings)
+    pub app_hash: Option<String>,
     pub voters: Vec<String>,
-    /// BLS public keys (hex, 48 bytes each)
     #[serde(rename = "blsPubkeys", default)]
     pub bls_pubkeys: Vec<String>,
-    /// Aggregated signature (hex, 96 bytes for BLS)
     #[serde(rename = "aggSignature")]
     pub agg_signature: String,
 }
 
-/// Block export from peer
-#[derive(Debug, Deserialize)]
+/// Block export from a peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerBlockExport {
+    pub epoch: u64,
+    #[serde(rename = "committeeHash")]
+    pub committee_hash: String,
+    #[serde(rename = "genesisHash")]
+    pub genesis_hash: String,
     pub height: u64,
     pub view: u64,
+    /// Claimed block hash.  This is checked against `Block::hash()` exactly.
     pub hash: String,
     #[serde(rename = "parentHash")]
     pub parent_hash: String,
     #[serde(rename = "appHash")]
     pub app_hash: String,
+    #[serde(rename = "commitmentRoot")]
+    pub commitment_root: String,
     pub proposer: String,
     pub timestamp: u64,
     pub payload: Option<String>,
-    /// QC that justifies this block (proves parent was certified)
     pub justify: Option<PeerCertificateExport>,
 }
 
-/// Block range response from peer
-#[derive(Debug, Deserialize)]
+/// Block range response from a peer.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PeerBlockRangeResponse {
     pub blocks: Vec<PeerBlockExport>,
     #[serde(rename = "nextHeight")]
     pub next_height: Option<u64>,
 }
 
-/// Snapshot metadata from peer
-#[derive(Debug, Deserialize)]
-pub struct PeerSnapshotMetadata {
-    pub height: u64,
-    pub timestamp: u64,
-    #[serde(rename = "stateHash")]
-    pub state_hash: String,
+/// Two-chain finality proof response from a peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerFinalityProofExport {
+    pub target: PeerBlockExport,
+    pub child: PeerBlockExport,
+    #[serde(rename = "commitQc")]
+    pub commit_qc: PeerCertificateExport,
 }
 
-/// Snapshot export from peer
-#[derive(Debug, Deserialize)]
-pub struct PeerSnapshotExport {
-    pub metadata: PeerSnapshotMetadata,
-    pub data: String, // base64 encoded
+/// A finality proof that has passed local block, context, timestamp, and
+/// trusted-committee QC verification.
+#[derive(Debug, Clone)]
+pub struct VerifiedFinalityProof {
+    pub target: Block,
+    pub child: Block,
+    pub commit_qc: Certificate,
 }
 
-/// Sync result for each sync attempt
-#[derive(Debug)]
+/// Downloaded blocks whose terminal block is accompanied by a verified
+/// two-chain finality proof.  This is the only active-sync result suitable for
+/// a finalized import boundary; the legacy range method below remains a
+/// transport-compatible, non-finality API.
+#[derive(Debug, Clone)]
+pub struct VerifiedFinalizedBatch {
+    pub blocks: Vec<Block>,
+    pub proof: VerifiedFinalityProof,
+}
+
+/// Result type retained for network API compatibility.
+///
+/// Active sync no longer mutates state, persists blocks, or restores
+/// snapshots.  The verified blocks themselves are returned by
+/// [`ActiveSyncClient::download_verified_blocks`].  That method does not
+/// obtain a finality proof and must not be used as a finalized import proof.
+#[derive(Debug, PartialEq, Eq)]
 pub enum SyncResult {
-    /// Already synced, no action needed
     AlreadySynced,
-    /// Synced via block replay
-    SyncedBlocks { from: u64, to: u64 },
-    /// Synced via snapshot + blocks
-    SyncedSnapshot { snapshot_height: u64, blocks_to: u64 },
-    /// Sync failed (transient error, will retry)
+    VerifiedBlocks { from: u64, to: u64 },
     Failed(String),
-    /// State corruption detected (app_hash mismatch after valid QC)
-    ///
-    /// This is a critical error requiring operator intervention.
-    /// The node should NOT process further blocks.
-    StateCorrupted(String),
 }
 
-/// Active sync client configuration
+/// Configuration for a verified active-sync client.
+///
+/// There is intentionally no `Default` implementation and no constructor
+/// that omits the trusted context or committee.  The trusted values are kept
+/// private so callers cannot construct a client with an implicitly empty
+/// committee through a struct literal.
 #[derive(Debug, Clone)]
 pub struct ActiveSyncConfig {
-    /// Peer HTTP endpoints
+    /// Optional peer allow-list retained for callers that manage endpoints.
+    /// Peer status is never used as a trust anchor.
     pub peers: Vec<String>,
-    /// Poll interval
-    pub poll_interval: Duration,
-    /// Download snapshot if behind by more than this
-    pub snapshot_threshold: u64,
-    /// Consecutive failures before blacklisting a peer
-    pub blacklist_threshold: u32,
-    /// Duration to blacklist in milliseconds
-    pub blacklist_duration_ms: u64,
+    /// HTTP request timeout for block-range downloads.
+    pub request_timeout: Duration,
+    trusted_context: ConsensusContext,
+    committee: Committee,
 }
 
-impl Default for ActiveSyncConfig {
-    fn default() -> Self {
-        Self {
-            peers: Vec::new(),
-            poll_interval: Duration::from_secs(1),
-            snapshot_threshold: DEFAULT_SNAPSHOT_THRESHOLD,
-            blacklist_threshold: DEFAULT_BLACKLIST_THRESHOLD,
-            blacklist_duration_ms: DEFAULT_BLACKLIST_DURATION_MS,
+impl ActiveSyncConfig {
+    /// Construct active-sync configuration from a caller-provided trust root.
+    pub fn try_new(
+        peers: Vec<String>,
+        request_timeout: Duration,
+        trusted_context: ConsensusContext,
+        committee: Committee,
+    ) -> Result<Self, String> {
+        if request_timeout.is_zero() {
+            return Err("active-sync request timeout must be non-zero".to_string());
         }
+        committee.validate_context(trusted_context)?;
+        Ok(Self {
+            peers,
+            request_timeout,
+            trusted_context,
+            committee,
+        })
+    }
+
+    pub fn trusted_context(&self) -> ConsensusContext {
+        self.trusted_context
+    }
+
+    pub fn committee(&self) -> &Committee {
+        &self.committee
     }
 }
 
-/// Active sync client
-///
-/// Runs in background, polling peers and syncing when behind.
+/// Verified block downloader.
 pub struct ActiveSyncClient {
-    config: ActiveSyncConfig,
+    trusted_context: ConsensusContext,
+    committee: Committee,
     http_client: reqwest::Client,
-    reputation: PeerReputationManager,
 }
 
 impl ActiveSyncClient {
-    pub fn new(config: ActiveSyncConfig) -> Self {
-        let reputation = PeerReputationManager::with_config(
-            config.blacklist_threshold,
-            config.blacklist_duration_ms,
-        );
-        Self {
-            config,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
-            reputation,
-        }
+    /// Create a client only from a configuration that carries a valid trust
+    /// root.  The context and committee are cloned into immutable client
+    /// fields; no peer response can replace them.
+    pub fn try_new(config: ActiveSyncConfig) -> Result<Self, String> {
+        config.committee.validate_context(config.trusted_context)?;
+        let http_client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(|error| format!("failed to create HTTP client: {error}"))?;
+        Ok(Self {
+            trusted_context: config.trusted_context,
+            committee: config.committee,
+            http_client,
+        })
     }
 
-    /// Run the sync loop
+    /// Download and verify a block range using a caller-trusted local anchor.
     ///
-    /// This function runs forever, polling peers and syncing when behind.
-    ///
-    /// # Arguments
-    /// * `app` - Application state to update
-    /// * `store` - Optional persistent storage
-    /// * `state_corrupted` - Optional flag to set on Byzantine detection (app_hash mismatch)
-    pub async fn run(
-        &mut self,
-        app: Arc<RwLock<AppState>>,
-        store: Option<Arc<dyn PersistentStore + Send + Sync>>,
-        state_corrupted: Option<Arc<AtomicBool>>,
-    ) {
-        if self.config.peers.is_empty() {
-            warn!("No peers configured for sync, sync client inactive");
-            return;
+    /// This method never executes transactions, replaces an `AppState`, saves
+    /// a snapshot, or commits to storage.  The caller owns import and state
+    /// transition after all blocks have passed verification.  This is a
+    /// compatibility transport method only; it does not prove finality and
+    /// must not be used as a finalized import boundary.
+    pub async fn download_verified_blocks(
+        &self,
+        peer: &str,
+        trusted_anchor: &Block,
+        to_height: u64,
+    ) -> Result<Vec<Block>, String> {
+        validate_anchor(trusted_anchor, self.trusted_context, &self.committee)?;
+
+        if to_height < trusted_anchor.height {
+            return Err(format!(
+                "target height {} is below trusted anchor height {}",
+                to_height, trusted_anchor.height
+            ));
+        }
+        if to_height == trusted_anchor.height {
+            return Ok(Vec::new());
         }
 
-        info!(
-            peers = ?self.config.peers,
-            poll_interval_ms = self.config.poll_interval.as_millis(),
-            "Starting active sync client"
+        let from_height = trusted_anchor
+            .height
+            .checked_add(1)
+            .ok_or_else(|| "trusted anchor height overflow".to_string())?;
+        let requested_blocks = to_height - trusted_anchor.height;
+        ensure_block_budget(requested_blocks, MAX_ACTIVE_SYNC_BLOCKS)?;
+        let blocks = self.download_blocks(peer, from_height, to_height).await?;
+        verify_block_batch(
+            &blocks,
+            trusted_anchor,
+            to_height,
+            self.trusted_context,
+            &self.committee,
+        )?;
+        Ok(blocks)
+    }
+
+    /// Download a block range and require a verified two-chain proof for its
+    /// terminal block before returning it as finalized-batch data.
+    pub async fn download_verified_finalized_batch(
+        &self,
+        peer: &str,
+        trusted_anchor: &Block,
+        to_height: u64,
+    ) -> Result<VerifiedFinalizedBatch, String> {
+        let blocks = self
+            .download_verified_blocks(peer, trusted_anchor, to_height)
+            .await?;
+        let terminal = blocks.last().ok_or_else(|| {
+            "finalized batch must contain at least one downloaded block".to_string()
+        })?;
+
+        let url = format!(
+            "{}/api/v1/sync/finality/{}",
+            peer.trim_end_matches('/'),
+            terminal.height
         );
-
-        loop {
-            // Check if state is corrupted - stop syncing if so
-            if let Some(ref flag) = state_corrupted {
-                if flag.load(Ordering::Relaxed) {
-                    warn!(
-                        "State is corrupted - sync loop halted. \
-                         Operator intervention required: resync from trusted snapshot \
-                         or investigate potential Byzantine network."
-                    );
-                    // Keep sleeping but don't process blocks
-                    tokio::time::sleep(self.config.poll_interval).await;
-                    continue;
-                }
-            }
-
-            // Get local height
-            let local_height = {
-                let app = app.read().await;
-                app.committed_height()
-            };
-
-            // Poll peers for network height
-            match self.get_network_height().await {
-                Ok((peer, network_height)) => {
-                    if network_height > local_height {
-                        info!(
-                            local = local_height,
-                            network = network_height,
-                            behind = network_height - local_height,
-                            "Behind network, starting sync"
-                        );
-
-                        // Perform sync
-                        let result = self
-                            .catch_up(&peer, local_height, network_height, &app, &store, &state_corrupted)
-                            .await;
-
-                        match result {
-                            SyncResult::SyncedBlocks { from, to } => {
-                                info!(from, to, "Synced blocks");
-                            }
-                            SyncResult::SyncedSnapshot {
-                                snapshot_height,
-                                blocks_to,
-                            } => {
-                                info!(snapshot_height, blocks_to, "Synced from snapshot");
-                            }
-                            SyncResult::AlreadySynced => {
-                                debug!("Already synced");
-                            }
-                            SyncResult::Failed(err) => {
-                                error!(error = %err, "Sync failed");
-                            }
-                            SyncResult::StateCorrupted(err) => {
-                                error!(error = %err, "State corruption detected - halting sync");
-                                // The flag is already set by catch_up_blocks
-                            }
-                        }
-                    } else {
-                        debug!(height = local_height, "Synced with network");
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to get network height");
-                }
-            }
-
-            // Wait before next poll
-            tokio::time::sleep(self.config.poll_interval).await;
-        }
-    }
-
-    /// Get current time in milliseconds
-    fn current_time_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-
-    /// Get the highest height from any non-blacklisted peer
-    async fn get_network_height(&mut self) -> Result<(String, u64), String> {
-        let current_time = Self::current_time_ms();
-        let available_peers = self.reputation.filter_available(&self.config.peers, current_time);
-
-        if available_peers.is_empty() {
-            return Err("No peers available (all blacklisted)".to_string());
-        }
-
-        let mut best: Option<(String, u64)> = None;
-
-        for peer in available_peers {
-            match self.get_peer_status(peer).await {
-                Ok(status) => {
-                    self.reputation.record_success(peer);
-                    if best.as_ref().map(|(_, h)| *h).unwrap_or(0) < status.height {
-                        best = Some((peer.clone(), status.height));
-                    }
-                }
-                Err(e) => {
-                    self.reputation.record_failure(peer, current_time);
-                    debug!(peer, error = %e, "Failed to get peer status");
-                }
-            }
-        }
-
-        best.ok_or_else(|| "No peers responded".to_string())
-    }
-
-    /// Get sync status from a peer
-    async fn get_peer_status(&self, peer: &str) -> Result<PeerSyncStatus, String> {
-        let url = format!("{}/api/v1/sync/status", peer);
-        let resp = self
+        let response = self
             .http_client
-            .get(&url)
+            .get(url)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
+            .map_err(|error| format!("download finality proof failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "download finality proof failed: HTTP {}",
+                response.status()
+            ));
         }
+        let (export, _) =
+            read_bounded_json::<PeerFinalityProofExport>(response, MAX_BLOCK_RANGE_RESPONSE_BYTES)
+                .await?;
+        let proof = convert_finality_proof_export(export)?;
 
-        resp.json::<PeerSyncStatus>()
-            .await
-            .map_err(|e| e.to_string())
+        if proof.target.hash() != terminal.hash() || proof.target.justify != terminal.justify {
+            return Err(
+                "finality proof target does not exactly match downloaded terminal block"
+                    .to_string(),
+            );
+        }
+        verify_finality_proof(&proof, self.trusted_context, &self.committee)?;
+
+        Ok(VerifiedFinalizedBatch { blocks, proof })
     }
 
-    /// Download blocks from a peer
-    async fn download_blocks(
+    async fn download_blocks(&self, peer: &str, from: u64, to: u64) -> Result<Vec<Block>, String> {
+        self.download_blocks_with_limits(
+            peer,
+            from,
+            to,
+            MAX_ACTIVE_SYNC_BLOCKS,
+            MAX_ACTIVE_SYNC_TOTAL_BYTES,
+        )
+        .await
+    }
+
+    async fn download_blocks_with_limits(
         &self,
         peer: &str,
         from: u64,
         to: u64,
+        max_blocks: u64,
+        max_bytes: usize,
     ) -> Result<Vec<Block>, String> {
-        let mut all_blocks = Vec::new();
-        let mut current_from = from;
+        let requested_blocks = inclusive_block_count(from, to)?;
+        ensure_block_budget(requested_blocks, max_blocks)?;
+        if max_bytes == 0 {
+            return Err("active-sync total response byte budget must be non-zero".to_string());
+        }
 
-        while current_from <= to {
+        let capacity = usize::try_from(requested_blocks)
+            .map_err(|_| "active-sync requested block count overflows usize".to_string())?;
+        let mut blocks = Vec::with_capacity(capacity);
+        let mut next_from = from;
+        let mut total_blocks = 0u64;
+        let mut total_bytes = 0usize;
+
+        while next_from <= to {
+            if total_blocks >= max_blocks {
+                return Err(format!(
+                    "active-sync block budget of {} blocks exhausted before pagination completed",
+                    max_blocks
+                ));
+            }
+            let remaining_bytes = max_bytes.checked_sub(total_bytes).ok_or_else(|| {
+                format!(
+                    "active-sync total response byte budget of {} bytes exhausted",
+                    max_bytes
+                )
+            })?;
+            if remaining_bytes == 0 {
+                return Err(format!(
+                    "active-sync total response byte budget of {} bytes exhausted",
+                    max_bytes
+                ));
+            }
+
             let url = format!(
                 "{}/api/v1/sync/blocks?from={}&to={}&limit={}&includePayload=true",
-                peer,
-                current_from,
+                peer.trim_end_matches('/'),
+                next_from,
                 to,
                 MAX_BLOCKS_PER_REQUEST
             );
-
-            let resp = self
+            let response = self
                 .http_client
-                .get(&url)
+                .get(url)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
-
-            if !resp.status().is_success() {
-                return Err(format!("HTTP {}", resp.status()));
+                .map_err(|error| format!("download blocks failed: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "download blocks failed: HTTP {}",
+                    response.status()
+                ));
             }
 
-            let response: PeerBlockRangeResponse =
-                resp.json().await.map_err(|e| e.to_string())?;
-
+            let (response, page_bytes): (PeerBlockRangeResponse, usize) =
+                read_bounded_json(response, remaining_bytes).await?;
+            if !total_budget_fits(total_bytes, page_bytes, max_bytes) {
+                return Err(format!(
+                    "active-sync total response byte budget of {} bytes exceeded",
+                    max_bytes
+                ));
+            }
+            total_bytes += page_bytes;
             if response.blocks.is_empty() {
-                break;
+                return Err(format!(
+                    "peer returned an empty block page at requested height {next_from}"
+                ));
+            }
+            if response.blocks.len() as u64 > MAX_BLOCKS_PER_REQUEST {
+                return Err(format!(
+                    "peer returned {} blocks, maximum is {}",
+                    response.blocks.len(),
+                    MAX_BLOCKS_PER_REQUEST
+                ));
+            }
+            let page_blocks = response.blocks.len() as u64;
+            if !block_budget_fits(total_blocks, page_blocks, max_blocks) {
+                return Err(format!(
+                    "active-sync block budget of {} blocks exceeded",
+                    max_blocks
+                ));
+            }
+            total_blocks += page_blocks;
+
+            let page_start = response.blocks[0].height;
+            if page_start != next_from {
+                return Err(format!(
+                    "block page starts at height {page_start}, expected {next_from}"
+                ));
             }
 
-            // Convert to Block type
-            for block_export in response.blocks {
-                let block = self.convert_block_export(block_export)?;
-                all_blocks.push(block);
-            }
-
-            // Check if more blocks available
-            match response.next_height {
-                Some(next) if next <= to => {
-                    current_from = next;
+            let mut expected_height = next_from;
+            for export in response.blocks {
+                if export.height != expected_height || export.height > to {
+                    return Err(format!(
+                        "block page has non-sequential/out-of-range height {}, expected {}..{}",
+                        export.height, expected_height, to
+                    ));
                 }
-                _ => break,
+                blocks.push(convert_block_export(export)?);
+                expected_height = expected_height
+                    .checked_add(1)
+                    .ok_or_else(|| "block height overflow".to_string())?;
+            }
+
+            let last_height = expected_height - 1;
+            match response.next_height {
+                Some(next) => {
+                    if next != expected_height || next <= next_from || next > to {
+                        return Err(format!(
+                            "invalid pagination nextHeight {next}; expected {}..{}",
+                            expected_height, to
+                        ));
+                    }
+                    next_from = next;
+                }
+                None if last_height == to => break,
+                None => {
+                    return Err(format!(
+                        "peer ended pagination at height {last_height}, requested through {to}"
+                    ));
+                }
             }
         }
 
-        Ok(all_blocks)
+        Ok(blocks)
+    }
+}
+
+/// Read a response body without trusting `Content-Length` as the only size
+/// check.  Chunked responses and incorrect length headers are both bounded by
+/// checking every received chunk before appending it to the deserialization
+/// buffer.
+async fn read_bounded_json<T>(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(T, usize), String>
+where
+    T: DeserializeOwned,
+{
+    let max_bytes = max_bytes.min(MAX_BLOCK_RANGE_RESPONSE_BYTES);
+    if max_bytes == 0 {
+        return Err("block range response byte limit must be non-zero".to_string());
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!(
+            "block range response exceeds {} byte limit",
+            max_bytes
+        ));
     }
 
-    /// Convert certificate export to Certificate type
-    fn convert_certificate_export(
-        &self,
-        export: PeerCertificateExport,
-    ) -> Result<Certificate, String> {
-        let block_hash = hex::decode(&export.block_hash)
-            .map_err(|e| format!("Invalid certificate block hash: {}", e))?;
-        let block_hash: [u8; 32] = block_hash
-            .try_into()
-            .map_err(|_| "Invalid certificate block hash length")?;
-
-        // Parse app_hash if present (required for BLS verification)
-        let app_hash: Option<[u8; 32]> = match export.app_hash {
-            Some(ref hash_hex) => {
-                let bytes = hex::decode(hash_hex)
-                    .map_err(|e| format!("Invalid certificate app hash: {}", e))?;
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| "Invalid certificate app hash length")?;
-                Some(arr)
-            }
-            None => None,
-        };
-
-        let voters: Result<Vec<[u8; 32]>, String> = export
-            .voters
-            .iter()
-            .map(|v| {
-                let bytes = hex::decode(v).map_err(|e| format!("Invalid voter: {}", e))?;
-                bytes
-                    .try_into()
-                    .map_err(|_| "Invalid voter length".to_string())
-            })
-            .collect();
-        let voters = voters?;
-
-        let bls_pubkeys: Result<Vec<Vec<u8>>, String> = export
-            .bls_pubkeys
-            .iter()
-            .map(|pk| hex::decode(pk).map_err(|e| format!("Invalid BLS pubkey: {}", e)))
-            .collect();
-        let bls_pubkeys = bls_pubkeys?;
-
-        let agg_signature =
-            hex::decode(&export.agg_signature).map_err(|e| format!("Invalid signature: {}", e))?;
-
-        Ok(Certificate {
-            view: export.view,
-            block_hash,
-            app_hash,
-            votes: vec![], // BLS mode doesn't store individual votes
-            voters,
-            bls_pubkeys,
-            agg_signature,
-        })
-    }
-
-    /// Convert block export to Block type
-    fn convert_block_export(&self, export: PeerBlockExport) -> Result<Block, String> {
-        let parent = hex::decode(&export.parent_hash)
-            .map_err(|e| format!("Invalid parent hash: {}", e))?;
-        let app_hash =
-            hex::decode(&export.app_hash).map_err(|e| format!("Invalid app hash: {}", e))?;
-        let proposer =
-            hex::decode(&export.proposer).map_err(|e| format!("Invalid proposer: {}", e))?;
-
-        let payload = match export.payload {
-            Some(b64) => BASE64.decode(&b64).map_err(|e| format!("Invalid payload: {}", e))?,
-            None => Vec::new(),
-        };
-
-        // Parse justify certificate if present
-        let justify = match export.justify {
-            Some(cert_export) => Some(self.convert_certificate_export(cert_export)?),
-            None => None,
-        };
-
-        Ok(Block {
-            view: export.view,
-            height: export.height,
-            parent: parent.try_into().map_err(|_| "Invalid parent hash length")?,
-            payload,
-            proposer: proposer.try_into().map_err(|_| "Invalid proposer length")?,
-            app_hash: app_hash.try_into().map_err(|_| "Invalid app hash length")?,
-            timestamp: export.timestamp,
-            justify,
-        })
-    }
-
-    /// Verify a block's QC (justify certificate)
-    ///
-    /// Returns Ok(()) if:
-    /// - Block is genesis (height 1 or less, no QC needed)
-    /// - QC is present and valid (BLS signature verifies)
-    /// - SKIP_QC_VERIFY is set (dev mode only)
-    fn verify_block_qc(&self, block: &Block, parent_hash: &[u8; 32]) -> Result<(), String> {
-        // Genesis and first blocks don't need QC verification
-        if block.height <= 1 {
-            return Ok(());
-        }
-
-        // Check if QC verification is skipped (dev mode only)
-        if Config::global().skip_qc_verify {
-            debug!(height = block.height, "Skipping QC verification (dev mode)");
-            return Ok(());
-        }
-
-        // Non-genesis blocks must have a justify certificate
-        let justify = block
-            .justify
-            .as_ref()
-            .ok_or_else(|| format!("Block {} missing QC", block.height))?;
-
-        // QC must certify the parent block
-        if justify.block_hash != *parent_hash {
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed reading block range response: {error}"))?
+    {
+        if !response_chunk_fits_with_limit(body.len(), chunk.len(), max_bytes) {
             return Err(format!(
-                "QC block_hash {} doesn't match parent {}",
-                hex::encode(&justify.block_hash[..4]),
-                hex::encode(&parent_hash[..4])
+                "block range response exceeds {} byte limit",
+                max_bytes
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body_len = body.len();
+    let value = serde_json::from_slice(&body)
+        .map_err(|error| format!("invalid block range response: {error}"))?;
+    Ok((value, body_len))
+}
+
+#[cfg(test)]
+fn response_chunk_fits(received: usize, incoming: usize) -> bool {
+    response_chunk_fits_with_limit(received, incoming, MAX_BLOCK_RANGE_RESPONSE_BYTES)
+}
+
+fn response_chunk_fits_with_limit(received: usize, incoming: usize, limit: usize) -> bool {
+    received <= limit && incoming <= limit.saturating_sub(received)
+}
+
+fn total_budget_fits(received: usize, incoming: usize, limit: usize) -> bool {
+    response_chunk_fits_with_limit(received, incoming, limit)
+}
+
+fn block_budget_fits(received: u64, incoming: u64, limit: u64) -> bool {
+    received <= limit && incoming <= limit.saturating_sub(received)
+}
+
+fn inclusive_block_count(from: u64, to: u64) -> Result<u64, String> {
+    to.checked_sub(from)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| format!("invalid active-sync block range {from}..{to}"))
+}
+
+fn ensure_block_budget(requested: u64, max_blocks: u64) -> Result<(), String> {
+    if requested > max_blocks {
+        return Err(format!(
+            "active-sync requested block span of {} exceeds {} block limit",
+            requested, max_blocks
+        ));
+    }
+    Ok(())
+}
+
+fn parse_exact_hash(value: &str, field: &str) -> Result<Hash, String> {
+    let bytes = hex::decode(value).map_err(|error| format!("invalid {field}: {error}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("{field} must be exactly 32 bytes"))
+}
+
+fn parse_exact_node_id(value: &str, field: &str) -> Result<NodeId, String> {
+    parse_exact_hash(value, field)
+}
+
+fn parse_bls_pubkey(value: &str) -> Result<Vec<u8>, String> {
+    let bytes = hex::decode(value).map_err(|error| format!("invalid BLS public key: {error}"))?;
+    if bytes.len() != 48 {
+        return Err("BLS public key must be exactly 48 bytes".to_string());
+    }
+    Ok(bytes)
+}
+
+fn convert_certificate_export(export: PeerCertificateExport) -> Result<Certificate, String> {
+    let voters = export
+        .voters
+        .iter()
+        .map(|voter| parse_exact_node_id(voter, "certificate voter"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bls_pubkeys = export
+        .bls_pubkeys
+        .iter()
+        .map(String::as_str)
+        .map(parse_bls_pubkey)
+        .collect::<Result<Vec<_>, _>>()?;
+    let app_hash = export
+        .app_hash
+        .as_deref()
+        .map(|value| parse_exact_hash(value, "certificate app hash"))
+        .transpose()?;
+    let agg_signature = hex::decode(&export.agg_signature)
+        .map_err(|error| format!("invalid aggregate signature: {error}"))?;
+
+    Ok(Certificate {
+        epoch: export.epoch,
+        committee_hash: parse_exact_hash(&export.committee_hash, "certificate committee hash")?,
+        genesis_hash: parse_exact_hash(&export.genesis_hash, "certificate genesis hash")?,
+        view: export.view,
+        block_hash: parse_exact_hash(&export.block_hash, "certificate block hash")?,
+        app_hash,
+        votes: vec![],
+        voters,
+        bls_pubkeys,
+        agg_signature,
+    })
+}
+
+fn convert_block_export(export: PeerBlockExport) -> Result<Block, String> {
+    let payload = match export.payload {
+        Some(payload) => BASE64
+            .decode(payload)
+            .map_err(|error| format!("invalid block payload: {error}"))?,
+        None => Vec::new(),
+    };
+    let block = Block {
+        epoch: export.epoch,
+        committee_hash: parse_exact_hash(&export.committee_hash, "block committee hash")?,
+        genesis_hash: parse_exact_hash(&export.genesis_hash, "block genesis hash")?,
+        height: export.height,
+        view: export.view,
+        parent: parse_exact_hash(&export.parent_hash, "block parent hash")?,
+        payload,
+        proposer: parse_exact_node_id(&export.proposer, "block proposer")?,
+        commitment_root: parse_exact_hash(&export.commitment_root, "block commitment root")?,
+        app_hash: parse_exact_hash(&export.app_hash, "block app hash")?,
+        timestamp: export.timestamp,
+        justify: export.justify.map(convert_certificate_export).transpose()?,
+    };
+    block
+        .validate()
+        .map_err(|error| format!("invalid block: {error}"))?;
+
+    let claimed_hash = parse_exact_hash(&export.hash, "claimed block hash")?;
+    let actual_hash = block.hash();
+    if claimed_hash != actual_hash {
+        return Err(format!(
+            "claimed block hash {} does not match reconstructed hash {}",
+            hex::encode(claimed_hash),
+            hex::encode(actual_hash)
+        ));
+    }
+    Ok(block)
+}
+
+fn convert_finality_proof_export(
+    export: PeerFinalityProofExport,
+) -> Result<VerifiedFinalityProof, String> {
+    Ok(VerifiedFinalityProof {
+        target: convert_block_export(export.target)?,
+        child: convert_block_export(export.child)?,
+        commit_qc: convert_certificate_export(export.commit_qc)?,
+    })
+}
+
+fn verify_finality_proof(
+    proof: &VerifiedFinalityProof,
+    expected_context: ConsensusContext,
+    committee: &Committee,
+) -> Result<(), String> {
+    proof.target.validate_context(expected_context)?;
+    proof
+        .target
+        .validate()
+        .map_err(|error| format!("invalid finality target: {error}"))?;
+    if proof.target.height == 0 {
+        let genesis = Block::genesis(expected_context);
+        if proof.target.hash() != genesis.hash() || proof.target.justify.is_some() {
+            return Err("finality target is not canonical genesis".to_string());
+        }
+    } else {
+        if committee.member(&proof.target.proposer).is_none() {
+            return Err("finality target proposer is not in the trusted committee".to_string());
+        }
+        if committee.leader(proof.target.view) != proof.target.proposer {
+            return Err("finality target proposer is not the scheduled leader".to_string());
+        }
+    }
+
+    proof.child.validate_context(expected_context)?;
+    proof
+        .child
+        .validate()
+        .map_err(|error| format!("invalid finality child: {error}"))?;
+    if committee.member(&proof.child.proposer).is_none() {
+        return Err("finality child proposer is not in the trusted committee".to_string());
+    }
+    if committee.leader(proof.child.view) != proof.child.proposer {
+        return Err("finality child proposer is not the scheduled leader".to_string());
+    }
+    let expected_height = proof
+        .target
+        .height
+        .checked_add(1)
+        .ok_or_else(|| "finality child height overflows u64".to_string())?;
+    if proof.child.height != expected_height || proof.child.parent != proof.target.hash() {
+        return Err("finality child is not the exact child of target".to_string());
+    }
+    proof
+        .child
+        .validate_parent_timestamp(proof.target.timestamp)
+        .map_err(|error| format!("finality child timestamp is invalid: {error}"))?;
+
+    let justify = proof
+        .child
+        .justify
+        .as_ref()
+        .ok_or_else(|| "finality child is missing the QC for target".to_string())?;
+    verify_certificate(
+        committee,
+        justify,
+        expected_context,
+        proof.target.view,
+        &proof.target.hash(),
+        Some(&proof.target.app_hash),
+        true,
+    )
+    .map_err(|error| format!("finality child justification is invalid: {error}"))?;
+    verify_certificate(
+        committee,
+        &proof.commit_qc,
+        expected_context,
+        proof.child.view,
+        &proof.child.hash(),
+        Some(&proof.child.app_hash),
+        true,
+    )
+    .map_err(|error| format!("finality commit QC is invalid: {error}"))?;
+    Ok(())
+}
+
+fn validate_anchor(
+    anchor: &Block,
+    expected_context: ConsensusContext,
+    committee: &Committee,
+) -> Result<(), String> {
+    anchor.validate_context(expected_context)?;
+    anchor
+        .validate()
+        .map_err(|error| format!("trusted anchor is invalid: {error}"))?;
+
+    if anchor.height == 0 {
+        let canonical_genesis = Block::genesis(expected_context);
+        if anchor.hash() != canonical_genesis.hash() || anchor.justify.is_some() {
+            return Err("trusted anchor is not the canonical genesis block".to_string());
+        }
+        return Ok(());
+    }
+
+    if committee.member(&anchor.proposer).is_none() {
+        return Err("trusted anchor proposer is not in the trusted committee".to_string());
+    }
+    if committee.leader(anchor.view) != anchor.proposer {
+        return Err("trusted anchor proposer is not the scheduled committee leader".to_string());
+    }
+    if anchor.height == 1 {
+        if anchor.justify.is_some() {
+            return Err("height-1 trusted anchor must not carry a justification".to_string());
+        }
+        let canonical_genesis = Block::genesis(expected_context);
+        if anchor.parent != canonical_genesis.hash() {
+            return Err("height-1 trusted anchor does not point to canonical genesis".to_string());
+        }
+    } else if anchor.justify.is_none() {
+        return Err("trusted anchor above height 1 is missing a justification".to_string());
+    } else if let Some(justify) = anchor.justify.as_ref() {
+        // The caller supplies a trusted non-genesis anchor.  Without the
+        // parent block we cannot independently check its QC's parent view or
+        // app hash, but we can still enforce its context, target hash, and
+        // required app-hash structure before using it as a batch boundary.
+        justify.validate_context(expected_context)?;
+        if justify.block_hash != anchor.parent {
+            return Err("trusted anchor justification does not target its parent".to_string());
+        }
+        if justify.app_hash.is_none() {
+            return Err("trusted anchor justification is missing app hash".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Verify a complete downloaded batch without touching application state.
+///
+/// This helper is intentionally pure so malformed peer data can be tested
+/// without starting an HTTP server or constructing an application runtime.
+fn verify_block_batch(
+    blocks: &[Block],
+    trusted_anchor: &Block,
+    to_height: u64,
+    expected_context: ConsensusContext,
+    committee: &Committee,
+) -> Result<(), String> {
+    let expected_count = to_height
+        .checked_sub(trusted_anchor.height)
+        .ok_or_else(|| "target height is below trusted anchor".to_string())?;
+    if blocks.len() as u64 != expected_count {
+        return Err(format!(
+            "downloaded {} blocks, expected {}",
+            blocks.len(),
+            expected_count
+        ));
+    }
+
+    let mut parent = trusted_anchor;
+    for (index, block) in blocks.iter().enumerate() {
+        let expected_height = trusted_anchor
+            .height
+            .checked_add(index as u64 + 1)
+            .ok_or_else(|| "block height overflow".to_string())?;
+        block.validate_context(expected_context)?;
+        block
+            .validate()
+            .map_err(|error| format!("invalid block at height {}: {error}", block.height))?;
+        if block.height != expected_height {
+            return Err(format!(
+                "non-sequential block height {}, expected {}",
+                block.height, expected_height
+            ));
+        }
+        if block.parent != parent.hash() {
+            return Err(format!(
+                "block {} parent does not match trusted previous block",
+                block.height
+            ));
+        }
+        block
+            .validate_parent_timestamp(parent.timestamp)
+            .map_err(|error| {
+                format!(
+                    "invalid parent timestamp at height {}: {error}",
+                    block.height
+                )
+            })?;
+        if committee.member(&block.proposer).is_none() {
+            return Err(format!(
+                "block {} proposer is not in the trusted committee",
+                block.height
+            ));
+        }
+        if committee.leader(block.view) != block.proposer {
+            return Err(format!(
+                "block {} proposer is not the scheduled committee leader",
+                block.height
             ));
         }
 
-        // Verify BLS signature if present
-        if justify.is_bls() {
-            if !self.verify_bls_certificate(justify) {
-                return Err(format!(
-                    "Invalid BLS signature on QC for block {}",
-                    block.height
-                ));
-            }
-        } else if justify.voters.is_empty() {
-            return Err(format!("QC for block {} has no voters", block.height));
-        }
-
-        Ok(())
-    }
-
-    /// Verify BLS aggregated signature on a certificate
-    ///
-    /// Performs FULL cryptographic verification:
-    /// 1. Certificate has voters and matching pubkeys
-    /// 2. Certificate has app_hash (required for verification)
-    /// 3. Aggregated BLS signature verifies against the signing message
-    ///
-    /// The signing message is: view || block_hash || app_hash
-    fn verify_bls_certificate(&self, cert: &Certificate) -> bool {
-        // Use the Certificate's built-in verification
-        match cert.verify_bls() {
-            Ok(()) => {
-                debug!(
-                    view = cert.view,
-                    voters = cert.voters.len(),
-                    "BLS certificate verified successfully"
-                );
-                true
-            }
-            Err(e) => {
-                warn!(
-                    view = cert.view,
-                    error = %e,
-                    "BLS certificate verification failed"
-                );
-                false
-            }
-        }
-    }
-
-    /// Download snapshot from a peer
-    async fn download_snapshot(&self, peer: &str) -> Result<(u64, AppSnapshot), String> {
-        let url = format!("{}/api/v1/sync/snapshot/latest", peer);
-        let resp = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
-        }
-
-        let export: PeerSnapshotExport = resp.json().await.map_err(|e| e.to_string())?;
-
-        // Decode base64 snapshot
-        let snapshot_bytes = BASE64
-            .decode(&export.data)
-            .map_err(|e| format!("Invalid snapshot data: {}", e))?;
-
-        // Deserialize snapshot
-        let snapshot: AppSnapshot =
-            serde_json::from_slice(&snapshot_bytes).map_err(|e| format!("Invalid snapshot: {}", e))?;
-
-        Ok((export.metadata.height, snapshot))
-    }
-
-    /// Catch up to network height
-    async fn catch_up(
-        &self,
-        peer: &str,
-        local_height: u64,
-        network_height: u64,
-        app: &Arc<RwLock<AppState>>,
-        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
-        state_corrupted: &Option<Arc<AtomicBool>>,
-    ) -> SyncResult {
-        let behind = network_height.saturating_sub(local_height);
-
-        // If far behind, use snapshot
-        if behind > self.config.snapshot_threshold {
-            return self
-                .catch_up_from_snapshot(peer, network_height, app, store, state_corrupted)
-                .await;
-        }
-
-        // Otherwise, just replay blocks
-        self.catch_up_blocks(peer, local_height + 1, network_height, app, store, state_corrupted)
-            .await
-    }
-
-    /// Catch up by downloading and replaying blocks
-    async fn catch_up_blocks(
-        &self,
-        peer: &str,
-        from: u64,
-        to: u64,
-        app: &Arc<RwLock<AppState>>,
-        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
-        state_corrupted: &Option<Arc<AtomicBool>>,
-    ) -> SyncResult {
-        // Download blocks
-        let blocks = match self.download_blocks(peer, from, to).await {
-            Ok(b) => b,
-            Err(e) => return SyncResult::Failed(format!("Download blocks failed: {}", e)),
-        };
-
-        if blocks.is_empty() {
-            return SyncResult::AlreadySynced;
-        }
-
-        let first_height = blocks.first().map(|b| b.height).unwrap_or(from);
-        let last_height = blocks.last().map(|b| b.height).unwrap_or(to);
-
-        // Track whether QC was verified (for Byzantine detection severity)
-        let qc_verified = !Config::global().skip_qc_verify;
-
-        // Execute each block
-        for block in &blocks {
-            // Verify QC before committing (Byzantine detection)
-            if let Err(e) = self.verify_block_qc(block, &block.parent) {
-                error!(height = block.height, error = %e, "QC verification failed");
-                return SyncResult::Failed(format!(
-                    "QC verification failed at height {}: {}",
-                    block.height, e
-                ));
-            }
-
-            let mut app = app.write().await;
-            let app_hash = app.execute(block);
-
-            // Verify app hash - reject on mismatch (Byzantine detection)
-            if app_hash != block.app_hash {
-                let err_msg = format!(
-                    "App hash mismatch at height {}: expected {}, got {}",
-                    block.height,
-                    hex::encode(&block.app_hash[..4]),
-                    hex::encode(&app_hash[..4])
-                );
-
-                if qc_verified {
-                    // CRITICAL: QC was valid but app_hash differs
-                    // This indicates either:
-                    // 1. This node's state is corrupt and needs resync
-                    // 2. The validator network is Byzantine (2f+1 colluding)
-                    error!(
-                        height = block.height,
-                        expected = %hex::encode(&block.app_hash[..4]),
-                        got = %hex::encode(&app_hash[..4]),
-                        "CRITICAL: App hash mismatch after valid QC! \
-                         This indicates either: \
-                         (1) This node's state is corrupt - resync from trusted snapshot, or \
-                         (2) The validator network is Byzantine (2f+1 colluding). \
-                         Node is now HALTED - operator intervention required."
-                    );
-
-                    // Set the corruption flag for API exposure
-                    if let Some(ref flag) = state_corrupted {
-                        flag.store(true, Ordering::Relaxed);
-                    }
-
-                    return SyncResult::StateCorrupted(err_msg);
-                } else {
-                    // QC wasn't verified (dev mode), just log warning and fail
-                    warn!(
-                        height = block.height,
-                        expected = %hex::encode(&block.app_hash[..4]),
-                        got = %hex::encode(&app_hash[..4]),
-                        "App hash mismatch during sync (QC not verified - dev mode)"
-                    );
-                    return SyncResult::Failed(err_msg);
-                }
-            }
-
-            // Store block and consensus state
-            if let Some(store) = store {
-                let consensus_state = ConsensusState {
-                    high_qc: block.justify.clone(),
-                    locked_qc: None,
-                    voted_views: vec![],
-                    current_view: block.view,
-                    committed_height: block.height,
-                    committed_hash: app_hash,
-                    consecutive_timeouts: 0,
-                    vc_sent_for_view: None,
-                };
-
-                if let Err(e) = store.commit_block(block, &consensus_state) {
-                    error!(error = %e, height = block.height, "Failed to store block");
-                }
-            }
-
-            debug!(height = block.height, "Synced block");
-        }
-
-        SyncResult::SyncedBlocks {
-            from: first_height,
-            to: last_height,
-        }
-    }
-
-    /// Catch up by downloading snapshot first, then replaying blocks
-    async fn catch_up_from_snapshot(
-        &self,
-        peer: &str,
-        network_height: u64,
-        app: &Arc<RwLock<AppState>>,
-        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
-        state_corrupted: &Option<Arc<AtomicBool>>,
-    ) -> SyncResult {
-        // Download snapshot
-        let (snapshot_height, snapshot) = match self.download_snapshot(peer).await {
-            Ok(s) => s,
-            Err(e) => return SyncResult::Failed(format!("Download snapshot failed: {}", e)),
-        };
-
-        info!(height = snapshot_height, "Downloaded snapshot");
-
-        // Store snapshot if we have storage
-        if let Some(store) = store {
-            if let Err(e) = store.save_snapshot(snapshot_height, &snapshot) {
-                error!(error = %e, "Failed to store snapshot");
-            }
-        }
-
-        // Restore app state from snapshot
-        {
-            let mut app = app.write().await;
-            *app = AppState::from_snapshot(snapshot);
-        }
-
-        // Now replay blocks from snapshot to current
-        if snapshot_height < network_height {
-            let result = self
-                .catch_up_blocks(peer, snapshot_height + 1, network_height, app, store, state_corrupted)
-                .await;
-
-            match result {
-                SyncResult::SyncedBlocks { to, .. } => SyncResult::SyncedSnapshot {
-                    snapshot_height,
-                    blocks_to: to,
-                },
-                SyncResult::Failed(e) => SyncResult::Failed(e),
-                SyncResult::StateCorrupted(e) => SyncResult::StateCorrupted(e),
-                _ => SyncResult::SyncedSnapshot {
-                    snapshot_height,
-                    blocks_to: snapshot_height,
-                },
+        if block.height == 1 {
+            if block.justify.is_some() {
+                return Err("height-1 block must not carry a justification".to_string());
             }
         } else {
-            SyncResult::SyncedSnapshot {
-                snapshot_height,
-                blocks_to: snapshot_height,
-            }
-        }
-    }
-
-    /// Sync once (non-blocking version for testing)
-    pub async fn sync_once(
-        &mut self,
-        app: &Arc<RwLock<AppState>>,
-        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
-    ) -> SyncResult {
-        self.sync_once_with_corruption_flag(app, store, &None).await
-    }
-
-    /// Sync once with corruption flag (non-blocking version)
-    pub async fn sync_once_with_corruption_flag(
-        &mut self,
-        app: &Arc<RwLock<AppState>>,
-        store: &Option<Arc<dyn PersistentStore + Send + Sync>>,
-        state_corrupted: &Option<Arc<AtomicBool>>,
-    ) -> SyncResult {
-        if self.config.peers.is_empty() {
-            return SyncResult::Failed("No peers configured".to_string());
+            let justify = block
+                .justify
+                .as_ref()
+                .ok_or_else(|| format!("block {} is missing a justification", block.height))?;
+            verify_certificate(
+                committee,
+                justify,
+                expected_context,
+                parent.view,
+                &parent.hash(),
+                Some(&parent.app_hash),
+                true,
+            )
+            .map_err(|error| {
+                format!("invalid justification at height {}: {error}", block.height)
+            })?;
         }
 
-        let local_height = {
-            let app = app.read().await;
-            app.committed_height()
-        };
-
-        match self.get_network_height().await {
-            Ok((peer, network_height)) => {
-                if network_height > local_height {
-                    self.catch_up(&peer, local_height, network_height, app, store, state_corrupted)
-                        .await
-                } else {
-                    SyncResult::AlreadySynced
-                }
-            }
-            Err(e) => SyncResult::Failed(e),
-        }
+        debug!(height = block.height, "verified active-sync block");
+        parent = block;
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::form_certificate;
+    use crate::crypto::bls::{aggregate_signatures, BlsSecretKey};
+    use crate::types::{CommitmentV2, ConsensusConfig, Vote};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
-    #[test]
-    fn test_sync_config_default() {
-        let config = ActiveSyncConfig::default();
-        assert!(config.peers.is_empty());
-        assert_eq!(config.snapshot_threshold, DEFAULT_SNAPSHOT_THRESHOLD);
-        assert_eq!(config.blacklist_threshold, DEFAULT_BLACKLIST_THRESHOLD);
-        assert_eq!(config.blacklist_duration_ms, DEFAULT_BLACKLIST_DURATION_MS);
+    struct Fixture {
+        committee: Committee,
+        context: ConsensusContext,
+        voters: Vec<NodeId>,
+        secrets: Vec<BlsSecretKey>,
+        genesis: Block,
     }
 
-    #[test]
-    fn test_sync_client_creation() {
-        let config = ActiveSyncConfig {
-            peers: vec!["http://localhost:8080".to_string()],
-            poll_interval: Duration::from_secs(1),
-            snapshot_threshold: 500,
-            blacklist_threshold: 3,
-            blacklist_duration_ms: 30_000,
+    fn fixture_with_powers(powers: &[u64]) -> Fixture {
+        let voters: Vec<NodeId> = (1..=powers.len()).map(|id| [id as u8; 32]).collect();
+        let secrets: Vec<_> = (1..=powers.len())
+            .map(|id| {
+                let mut seed = [0u8; 32];
+                seed[0] = id as u8;
+                BlsSecretKey::from_seed(&seed)
+            })
+            .collect();
+        let config = ConsensusConfig {
+            epoch: 0,
+            genesis_hash: [0u8; 32],
+            node_id: voters[0],
+            validators: voters.clone(),
+            voting_powers: powers.to_vec(),
+            view_timeout_ms: 1000,
+            bls_pubkeys: secrets
+                .iter()
+                .map(|secret| secret.public_key().to_bytes().to_vec())
+                .collect(),
+            bls_secret_key: Some(secrets[0].to_bytes()),
         };
-        let _client = ActiveSyncClient::new(config);
+        let committee = config.committee().unwrap();
+        let context = committee.context_with_genesis(0, [9u8; 32]);
+        let genesis = Block::genesis(context);
+        Fixture {
+            committee,
+            context,
+            voters,
+            secrets,
+            genesis,
+        }
+    }
+
+    fn make_block(
+        fixture: &Fixture,
+        parent: &Block,
+        height: u64,
+        view: u64,
+        with_justify: bool,
+    ) -> Block {
+        let justify = if with_justify {
+            let votes: Vec<_> = fixture
+                .secrets
+                .iter()
+                .zip(fixture.voters.iter())
+                .take(3)
+                .map(|(secret, voter)| {
+                    Vote::new_bls(
+                        fixture.context,
+                        parent.view,
+                        parent.hash(),
+                        parent.app_hash,
+                        *voter,
+                        secret,
+                    )
+                })
+                .collect();
+            Some(form_certificate(&fixture.committee, fixture.context, votes, true).unwrap())
+        } else {
+            None
+        };
+        Block {
+            epoch: fixture.context.epoch,
+            committee_hash: fixture.context.committee_hash,
+            genesis_hash: fixture.context.genesis_hash,
+            view,
+            height,
+            parent: parent.hash(),
+            payload: vec![],
+            proposer: fixture.committee.leader(view),
+            commitment_root: CommitmentV2::default().root().unwrap(),
+            app_hash: [height as u8; 32],
+            timestamp: height,
+            justify,
+        }
+    }
+
+    fn export(block: &Block) -> PeerBlockExport {
+        PeerBlockExport {
+            epoch: block.epoch,
+            committee_hash: hex::encode(block.committee_hash),
+            genesis_hash: hex::encode(block.genesis_hash),
+            height: block.height,
+            view: block.view,
+            hash: hex::encode(block.hash()),
+            parent_hash: hex::encode(block.parent),
+            commitment_root: hex::encode(block.commitment_root),
+            app_hash: hex::encode(block.app_hash),
+            proposer: hex::encode(block.proposer),
+            timestamp: block.timestamp,
+            payload: Some(BASE64.encode(&block.payload)),
+            justify: block
+                .justify
+                .as_ref()
+                .map(|certificate| PeerCertificateExport {
+                    epoch: certificate.epoch,
+                    committee_hash: hex::encode(certificate.committee_hash),
+                    genesis_hash: hex::encode(certificate.genesis_hash),
+                    view: certificate.view,
+                    block_hash: hex::encode(certificate.block_hash),
+                    app_hash: certificate.app_hash.map(hex::encode),
+                    voters: certificate.voters.iter().map(hex::encode).collect(),
+                    bls_pubkeys: certificate.bls_pubkeys.iter().map(hex::encode).collect(),
+                    agg_signature: hex::encode(&certificate.agg_signature),
+                }),
+        }
+    }
+
+    fn export_certificate(certificate: &Certificate) -> PeerCertificateExport {
+        PeerCertificateExport {
+            epoch: certificate.epoch,
+            committee_hash: hex::encode(certificate.committee_hash),
+            genesis_hash: hex::encode(certificate.genesis_hash),
+            view: certificate.view,
+            block_hash: hex::encode(certificate.block_hash),
+            app_hash: certificate.app_hash.map(hex::encode),
+            voters: certificate.voters.iter().map(hex::encode).collect(),
+            bls_pubkeys: certificate.bls_pubkeys.iter().map(hex::encode).collect(),
+            agg_signature: hex::encode(&certificate.agg_signature),
+        }
+    }
+
+    fn qc_for(fixture: &Fixture, block: &Block) -> Certificate {
+        let votes: Vec<_> = fixture
+            .secrets
+            .iter()
+            .zip(fixture.voters.iter())
+            .take(3)
+            .map(|(secret, voter)| {
+                Vote::new_bls(
+                    fixture.context,
+                    block.view,
+                    block.hash(),
+                    block.app_hash,
+                    *voter,
+                    secret,
+                )
+            })
+            .collect();
+        form_certificate(&fixture.committee, fixture.context, votes, true).unwrap()
+    }
+
+    fn finality_proof(fixture: &Fixture) -> VerifiedFinalityProof {
+        let first = make_block(fixture, &fixture.genesis, 1, 0, false);
+        let target = make_block(fixture, &first, 2, 1, true);
+        let child = make_block(fixture, &target, 3, 2, true);
+        VerifiedFinalityProof {
+            target,
+            child: child.clone(),
+            commit_qc: qc_for(fixture, &child),
+        }
+    }
+
+    fn client(fixture: &Fixture) -> ActiveSyncClient {
+        let config = ActiveSyncConfig::try_new(
+            vec![],
+            Duration::from_secs(1),
+            fixture.context,
+            fixture.committee.clone(),
+        )
+        .unwrap();
+        ActiveSyncClient::try_new(config).unwrap()
+    }
+
+    fn page(blocks: Vec<PeerBlockExport>, next_height: Option<u64>) -> Vec<u8> {
+        serde_json::to_vec(&PeerBlockRangeResponse {
+            blocks,
+            next_height,
+        })
+        .unwrap()
+    }
+
+    async fn spawn_http_pages(pages: Vec<Vec<u8>>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for body in pages {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        (format!("http://{address}"), task)
     }
 
     #[test]
-    fn test_peer_reputation_success() {
-        let mut manager = PeerReputationManager::new();
-        let peer = "http://localhost:8080";
-
-        manager.record_success(peer);
-        let rep = manager.get_reputation(peer).unwrap();
-        assert_eq!(rep.success_count, 1);
-        assert_eq!(rep.failure_count, 0);
-        assert_eq!(rep.consecutive_failures, 0);
+    fn config_requires_trusted_context_and_committee() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let config = ActiveSyncConfig::try_new(
+            vec![],
+            Duration::from_secs(1),
+            fixture.context,
+            fixture.committee.clone(),
+        )
+        .unwrap();
+        assert_eq!(config.trusted_context(), fixture.context);
+        assert_eq!(config.committee().hash(), fixture.committee.hash());
     }
 
     #[test]
-    fn test_peer_reputation_failure_blacklist() {
-        let mut manager = PeerReputationManager::with_config(3, 60_000);
-        let peer = "http://localhost:8080";
-        let current_time = 1000000;
-
-        // 2 failures - not yet blacklisted
-        manager.record_failure(peer, current_time);
-        manager.record_failure(peer, current_time);
-        assert!(!manager.is_blacklisted(peer, current_time));
-
-        // 3rd failure - now blacklisted
-        manager.record_failure(peer, current_time);
-        assert!(manager.is_blacklisted(peer, current_time));
-
-        // Still blacklisted after 30 seconds
-        assert!(manager.is_blacklisted(peer, current_time + 30_000));
-
-        // Not blacklisted after 60 seconds
-        assert!(!manager.is_blacklisted(peer, current_time + 60_001));
+    fn response_chunk_budget_accepts_boundary_and_rejects_one_byte_over() {
+        assert!(response_chunk_fits(MAX_BLOCK_RANGE_RESPONSE_BYTES - 1, 1));
+        assert!(!response_chunk_fits(MAX_BLOCK_RANGE_RESPONSE_BYTES - 1, 2));
+        assert!(!response_chunk_fits(MAX_BLOCK_RANGE_RESPONSE_BYTES + 1, 0));
     }
 
     #[test]
-    fn test_peer_reputation_success_clears_blacklist() {
-        let mut manager = PeerReputationManager::with_config(2, 60_000);
-        let peer = "http://localhost:8080";
-        let current_time = 1000000;
-
-        // Blacklist the peer
-        manager.record_failure(peer, current_time);
-        manager.record_failure(peer, current_time);
-        assert!(manager.is_blacklisted(peer, current_time));
-
-        // Success clears blacklist
-        manager.record_success(peer);
-        assert!(!manager.is_blacklisted(peer, current_time));
-
-        let rep = manager.get_reputation(peer).unwrap();
-        assert_eq!(rep.consecutive_failures, 0);
-        assert_eq!(rep.failure_count, 2); // Total failures still tracked
+    fn total_response_budget_accepts_exact_boundary_and_rejects_one_byte_over() {
+        assert!(total_budget_fits(
+            MAX_ACTIVE_SYNC_TOTAL_BYTES - 1,
+            1,
+            MAX_ACTIVE_SYNC_TOTAL_BYTES
+        ));
+        assert!(!total_budget_fits(
+            MAX_ACTIVE_SYNC_TOTAL_BYTES - 1,
+            2,
+            MAX_ACTIVE_SYNC_TOTAL_BYTES
+        ));
     }
 
     #[test]
-    fn test_filter_available_peers() {
-        let mut manager = PeerReputationManager::with_config(2, 60_000);
-        let current_time = 1000000;
+    fn requested_block_span_is_bounded_before_download() {
+        assert!(ensure_block_budget(MAX_ACTIVE_SYNC_BLOCKS, MAX_ACTIVE_SYNC_BLOCKS).is_ok());
+        let error =
+            ensure_block_budget(MAX_ACTIVE_SYNC_BLOCKS + 1, MAX_ACTIVE_SYNC_BLOCKS).unwrap_err();
+        assert!(error.contains("requested block span"));
+    }
 
-        let peers = vec![
-            "http://peer1:8080".to_string(),
-            "http://peer2:8080".to_string(),
-            "http://peer3:8080".to_string(),
-        ];
+    #[tokio::test]
+    async fn oversized_requested_span_is_rejected_before_http() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let error = client(&fixture)
+            .download_verified_blocks("not a URL", &fixture.genesis, MAX_ACTIVE_SYNC_BLOCKS + 1)
+            .await
+            .unwrap_err();
+        assert!(error.contains("requested block span"));
+    }
 
-        // Blacklist peer2
-        manager.record_failure(&peers[1], current_time);
-        manager.record_failure(&peers[1], current_time);
+    #[tokio::test]
+    async fn cumulative_response_budget_rejects_second_page() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let second = make_block(&fixture, &first, 2, 1, true);
+        let first_page = page(vec![export(&first)], Some(2));
+        let second_page = page(vec![export(&second)], None);
+        let byte_budget = first_page.len() + second_page.len() - 1;
+        let (peer, server) = spawn_http_pages(vec![first_page, second_page]).await;
 
-        let available = manager.filter_available(&peers, current_time);
-        assert_eq!(available.len(), 2);
-        assert!(available.contains(&&peers[0]));
-        assert!(!available.contains(&&peers[1]));
-        assert!(available.contains(&&peers[2]));
+        let error = client(&fixture)
+            .download_blocks_with_limits(&peer, 1, 2, 2, byte_budget)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains("byte limit"));
+    }
+
+    #[tokio::test]
+    async fn cumulative_response_budget_accepts_exact_boundary() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let second = make_block(&fixture, &first, 2, 1, true);
+        let first_page = page(vec![export(&first)], Some(2));
+        let second_page = page(vec![export(&second)], None);
+        let byte_budget = first_page.len() + second_page.len();
+        let (peer, server) = spawn_http_pages(vec![first_page, second_page]).await;
+
+        let blocks = client(&fixture)
+            .download_blocks_with_limits(&peer, 1, 2, 2, byte_budget)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ordinary_verified_range_succeeds() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let body = page(vec![export(&first)], None);
+        let (peer, server) = spawn_http_pages(vec![body]).await;
+
+        let blocks = client(&fixture)
+            .download_verified_blocks(&peer, &fixture.genesis, 1)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].hash(), first.hash());
+    }
+
+    #[tokio::test]
+    async fn verified_finalized_batch_requires_and_returns_terminal_proof() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let second = make_block(&fixture, &first, 2, 1, true);
+        let third = make_block(&fixture, &second, 3, 2, true);
+        let child = make_block(&fixture, &third, 4, 3, true);
+        let proof = PeerFinalityProofExport {
+            target: export(&third),
+            child: export(&child),
+            commit_qc: export_certificate(&qc_for(&fixture, &child)),
+        };
+        let proof_body = serde_json::to_vec(&proof).unwrap();
+        let block_body = page(vec![export(&first), export(&second), export(&third)], None);
+        let (peer, server) = spawn_http_pages(vec![block_body, proof_body]).await;
+
+        let batch = client(&fixture)
+            .download_verified_finalized_batch(&peer, &fixture.genesis, 3)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(batch.blocks.last().unwrap().hash(), third.hash());
+        assert_eq!(batch.proof.target.hash(), third.hash());
+        assert_eq!(batch.proof.child.hash(), child.hash());
+    }
+
+    #[tokio::test]
+    async fn verified_finalized_batch_rejects_forged_terminal_target() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let second = make_block(&fixture, &first, 2, 1, true);
+        let third = make_block(&fixture, &second, 3, 2, true);
+        let child = make_block(&fixture, &third, 4, 3, true);
+        let proof = PeerFinalityProofExport {
+            target: export(&second),
+            child: export(&child),
+            commit_qc: export_certificate(&qc_for(&fixture, &child)),
+        };
+        let block_body = page(vec![export(&first), export(&second), export(&third)], None);
+        let proof_body = serde_json::to_vec(&proof).unwrap();
+        let (peer, server) = spawn_http_pages(vec![block_body, proof_body]).await;
+
+        let error = client(&fixture)
+            .download_verified_finalized_batch(&peer, &fixture.genesis, 3)
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.contains("exactly match downloaded terminal"));
+    }
+
+    #[test]
+    fn claimed_hash_mismatch_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let block = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let mut peer = export(&block);
+        peer.hash = hex::encode([0u8; 32]);
+        let error = convert_block_export(peer).unwrap_err();
+        assert!(error.contains("claimed block hash"));
+    }
+
+    #[test]
+    fn wrong_context_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let block = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let mut wrong_context = block.clone();
+        wrong_context.genesis_hash = [8u8; 32];
+        verify_block_batch(
+            &[wrong_context],
+            &fixture.genesis,
+            1,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn nonleader_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut block = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        block.proposer = fixture
+            .committee
+            .members()
+            .iter()
+            .map(|member| member.node_id)
+            .find(|node_id| *node_id != fixture.committee.leader(block.view))
+            .unwrap();
+        verify_block_batch(
+            &[block],
+            &fixture.genesis,
+            1,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn broken_sequence_and_parent_are_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut block = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        block.height = 2;
+        verify_block_batch(
+            &[block],
+            &fixture.genesis,
+            2,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap_err();
+
+        let mut block = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        block.parent = [4u8; 32];
+        verify_block_batch(
+            &[block],
+            &fixture.genesis,
+            1,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn rogue_self_signed_committee_key_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let parent = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let mut child = make_block(&fixture, &parent, 2, 1, true);
+        let certificate = child.justify.as_mut().unwrap();
+        let rogue = {
+            let mut seed = [0u8; 32];
+            seed[0] = 99;
+            BlsSecretKey::from_seed(&seed)
+        };
+        certificate.bls_pubkeys[0] = rogue.public_key().to_bytes().to_vec();
+        verify_block_batch(&[child], &parent, 2, fixture.context, &fixture.committee).unwrap_err();
+    }
+
+    #[test]
+    fn insufficient_weighted_quorum_is_rejected() {
+        let fixture = fixture_with_powers(&[5, 1, 1, 1]);
+        let parent = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let vote = Vote::new_bls(
+            fixture.context,
+            parent.view,
+            parent.hash(),
+            parent.app_hash,
+            fixture.voters[1],
+            &fixture.secrets[1],
+        );
+        let signature = crate::crypto::bls::BlsSignature::from_slice(&vote.signature).unwrap();
+        let aggregate = aggregate_signatures(&[signature]).unwrap();
+        let certificate = Certificate::new_bls(
+            fixture.context,
+            parent.view,
+            parent.hash(),
+            vec![vote],
+            aggregate.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let mut child = make_block(&fixture, &parent, 2, 1, false);
+        child.justify = Some(certificate);
+        verify_block_batch(&[child], &parent, 2, fixture.context, &fixture.committee).unwrap_err();
+    }
+
+    #[test]
+    fn valid_trusted_batch_is_accepted() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let second = make_block(&fixture, &first, 2, 1, true);
+        let third = make_block(&fixture, &second, 3, 2, true);
+        verify_block_batch(
+            &[first, second, third],
+            &fixture.genesis,
+            3,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn deterministic_parent_timestamp_is_enforced_during_batch_verification() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let first = make_block(&fixture, &fixture.genesis, 1, 0, false);
+        let mut second = make_block(&fixture, &first, 2, 1, true);
+        second.timestamp = first.timestamp + crate::types::MAX_BLOCK_TIMESTAMP_STEP_MS + 1;
+        let error = verify_block_batch(
+            &[first, second],
+            &fixture.genesis,
+            2,
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap_err();
+        assert!(error.contains("parent timestamp"));
+    }
+
+    #[test]
+    fn valid_two_chain_finality_proof_is_accepted() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        verify_finality_proof(
+            &finality_proof(&fixture),
+            fixture.context,
+            &fixture.committee,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn forged_finality_context_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut proof = finality_proof(&fixture);
+        proof.child.genesis_hash = [8u8; 32];
+        let error = verify_finality_proof(&proof, fixture.context, &fixture.committee).unwrap_err();
+        assert!(error.contains("context"));
+    }
+
+    #[test]
+    fn forged_finality_qc_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut proof = finality_proof(&fixture);
+        proof.commit_qc.agg_signature[0] ^= 1;
+        let error = verify_finality_proof(&proof, fixture.context, &fixture.committee).unwrap_err();
+        assert!(error.contains("commit QC"));
+    }
+
+    #[test]
+    fn forged_finality_app_hash_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut proof = finality_proof(&fixture);
+        proof.child.app_hash = [0xabu8; 32];
+        let error = verify_finality_proof(&proof, fixture.context, &fixture.committee).unwrap_err();
+        assert!(error.contains("commit QC") || error.contains("child justification"));
+    }
+
+    #[test]
+    fn forged_finality_timestamp_is_rejected() {
+        let fixture = fixture_with_powers(&[1, 1, 1, 1]);
+        let mut proof = finality_proof(&fixture);
+        proof.child.timestamp =
+            proof.target.timestamp + crate::types::MAX_BLOCK_TIMESTAMP_STEP_MS + 1;
+        let error = verify_finality_proof(&proof, fixture.context, &fixture.committee).unwrap_err();
+        assert!(error.contains("timestamp"));
     }
 }

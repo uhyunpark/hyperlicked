@@ -16,6 +16,12 @@ import {
   convertSize,
   placeTriggerOrder,
 } from '@/lib/api'
+import {
+  CANONICAL_SIGNATURE_SCHEME,
+  canonicalU64,
+  createCanonicalValidity,
+  incrementCanonicalNonce,
+} from '@/lib/wallet/canonicalAction'
 
 interface OrderParams {
   side: Side
@@ -67,7 +73,7 @@ export function useOrderSubmit() {
     try {
       // Always fetch fresh nonce from server before submitting
       const nonceData = await getNonce(wallet.address!)
-      const currentNonce = nonceData.nonce
+      const currentNonce = canonicalU64(nonceData.nonce, 'nonce')
 
       // For market orders, use sweep prices to ensure execution
       let orderPrice: number
@@ -80,6 +86,7 @@ export function useOrderSubmit() {
 
       // For market orders, always use IOC (immediate-or-cancel)
       const tifCode = orderType === 'market' ? TIF_CODES.ioc : TIF_CODES[tif]
+      const { validAfter, deadline } = createCanonicalValidity()
 
       const orderToSign: OrderToSign = {
         symbol: selectedSymbol,
@@ -87,41 +94,46 @@ export function useOrderSubmit() {
         type: tifCode,
         price: convertToApiPrice(orderPrice).toString(),
         qty: convertToApiSize(orderSize).toString(),
-        nonce: currentNonce.toString(),
-        deadline: '0',
+        nonce: currentNonce,
+        deadline,
+        validAfter,
         leverage,
         owner: wallet.address,
         reduce_only: reduceOnly
       }
 
-      const { signature, agentMode, delegationId } = await wallet.signOrderSmart(orderToSign)
+      const signature = await wallet.signCanonicalOrder(orderToSign)
 
       const signedTx = {
         type: 'order' as const,
         order: orderToSign,
         signature,
-        agent_mode: agentMode,
-        delegation_id: delegationId
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
       }
 
       const response = await submitSignedTransaction(signedTx)
 
-      if (response.status === 'submitted') {
-        const method = agentMode ? 'Agent Key' : (wallet.isRabby ? 'Rabby' : 'MetaMask')
-        toast.success('Order Submitted', `Order #${response.orderId} signed with ${method}`)
+      if (response.status === 'pending') {
+        const method = wallet.isRabby ? 'Rabby' : 'MetaMask'
+        toast.success('Order Accepted', `Transaction ${response.tx_hash.slice(0, 10)}… is pending (${method})`)
 
         // Place TP/SL orders if enabled and this is not a reduce-only order
         if (tpSlEnabled && !reduceOnly) {
           const orderSizeApi = convertToApiSize(parseFloat(size))
-          await placeTpSlOrders(wallet, selectedSymbol, orderSizeApi, tpPrice, slPrice)
+          await placeTpSlOrders(
+            wallet,
+            selectedSymbol,
+            orderSizeApi,
+            tpPrice,
+            slPrice,
+            incrementCanonicalNonce(currentNonce),
+          )
         }
 
         callbacks.onSuccess()
 
         // Immediately refresh open orders
         await refreshOpenOrders(wallet.address!)
-      } else {
-        toast.error('Order Rejected', response.message || 'Unknown error')
       }
     } catch (error) {
       console.error('[order] Error:', error)
@@ -138,31 +150,38 @@ async function placeTpSlOrders(
   symbol: string,
   size: number,
   tpPrice: string,
-  slPrice: string
+  slPrice: string,
+  firstNonce: string,
 ) {
   if (!wallet.address) return
+  let nextNonce = firstNonce
 
   // Place Take Profit if set
   if (tpPrice && parseFloat(tpPrice) > 0) {
     try {
-      const nonceData = await getNonce(wallet.address)
       const triggerToSign: TriggerOrderToSign = {
         symbol,
         triggerType: 2, // TakeProfit
         triggerPrice: convertToApiPrice(parseFloat(tpPrice)).toString(),
         size: size.toString(),
         limitPrice: '0',
-        nonce: nonceData.nonce.toString(),
+        nonce: nextNonce,
         owner: wallet.address,
+        ...createCanonicalValidity(),
       }
-      const { signature, agentMode, delegationId } = await wallet.signTriggerOrderSmart(triggerToSign)
-      await placeTriggerOrder({
+      const signature = await wallet.signCanonicalTriggerOrder(triggerToSign)
+      const response = await placeTriggerOrder({
         trigger: triggerToSign,
         signature,
-        agent_mode: agentMode,
-        delegation_id: delegationId,
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
       })
-      toast.success('Take Profit Set', `TP at $${parseFloat(tpPrice).toLocaleString()}`)
+      if (response.status === 'pending') {
+        toast.success(
+          'Take Profit Accepted',
+          `Transaction ${response.tx_hash.slice(0, 10)}… is pending (TP at $${parseFloat(tpPrice).toLocaleString()})`,
+        )
+        nextNonce = incrementCanonicalNonce(nextNonce)
+      }
     } catch (err: any) {
       toast.warning('TP Failed', err.message)
     }
@@ -171,24 +190,29 @@ async function placeTpSlOrders(
   // Place Stop Loss if set
   if (slPrice && parseFloat(slPrice) > 0) {
     try {
-      const nonceData = await getNonce(wallet.address)
       const triggerToSign: TriggerOrderToSign = {
         symbol,
         triggerType: 1, // StopLoss
         triggerPrice: convertToApiPrice(parseFloat(slPrice)).toString(),
         size: size.toString(),
         limitPrice: '0',
-        nonce: nonceData.nonce.toString(),
+        nonce: nextNonce,
         owner: wallet.address,
+        ...createCanonicalValidity(),
       }
-      const { signature, agentMode, delegationId } = await wallet.signTriggerOrderSmart(triggerToSign)
-      await placeTriggerOrder({
+      const signature = await wallet.signCanonicalTriggerOrder(triggerToSign)
+      const response = await placeTriggerOrder({
         trigger: triggerToSign,
         signature,
-        agent_mode: agentMode,
-        delegation_id: delegationId,
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
       })
-      toast.success('Stop Loss Set', `SL at $${parseFloat(slPrice).toLocaleString()}`)
+      if (response.status === 'pending') {
+        toast.success(
+          'Stop Loss Accepted',
+          `Transaction ${response.tx_hash.slice(0, 10)}… is pending (SL at $${parseFloat(slPrice).toLocaleString()})`,
+        )
+        nextNonce = incrementCanonicalNonce(nextNonce)
+      }
     } catch (err: any) {
       toast.warning('SL Failed', err.message)
     }

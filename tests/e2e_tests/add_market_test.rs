@@ -2,8 +2,6 @@
 //!
 //! Tests for dynamic market creation via Transaction::AddMarket.
 
-use hyperlicked::app::Transaction;
-
 use crate::e2e::helpers::*;
 
 /// Test that admin can successfully add a new market
@@ -43,9 +41,7 @@ fn test_add_market_unauthorized() {
     // Transaction should have been submitted but execution should fail
     // Check that the market was NOT created
     assert!(
-        ctx.state.orderbook(ETH_SYMBOL).is_none()
-            || result.is_err()
-            || true, // submit_tx queues; the real check is that the market doesn't exist after execute
+        ctx.state.orderbook(ETH_SYMBOL).is_none() || result.is_err() || true, // submit_tx queues; the real check is that the market doesn't exist after execute
     );
 
     // The real test: after execution, market should not exist

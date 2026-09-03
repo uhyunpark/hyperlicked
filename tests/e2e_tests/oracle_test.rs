@@ -17,11 +17,13 @@ fn test_oracle_price_update() {
 
     // Register a validator first (oracle updates require validator auth)
     let node_id = [1u8; 32];
+    let (bls_pubkey, bls_proof_of_possession) = test_validator_credentials(node_id);
     ctx.state
         .submit_tx(Transaction::RegisterValidator {
             operator: TRADER_ALICE.into(),
             node_id,
-            bls_pubkey: vec![0u8; 48],
+            bls_pubkey,
+            bls_proof_of_possession,
             self_stake: 10_000_000, // $100k
             commission_bps: 500,
         })
@@ -96,11 +98,13 @@ fn test_funding_uses_oracle_index_price() {
 
     // Register validator
     let node_id = [1u8; 32];
+    let (bls_pubkey, bls_proof_of_possession) = test_validator_credentials(node_id);
     ctx.state
         .submit_tx(Transaction::RegisterValidator {
             operator: TRADER_ALICE.into(),
             node_id,
-            bls_pubkey: vec![0u8; 48],
+            bls_pubkey,
+            bls_proof_of_possession,
             self_stake: 10_000_000,
             commission_bps: 500,
         })
@@ -211,11 +215,13 @@ fn test_oracle_circuit_breaker() {
 
     // Register validator
     let node_id = [1u8; 32];
+    let (bls_pubkey, bls_proof_of_possession) = test_validator_credentials(node_id);
     ctx.state
         .submit_tx(Transaction::RegisterValidator {
             operator: TRADER_ALICE.into(),
             node_id,
-            bls_pubkey: vec![0u8; 48],
+            bls_pubkey,
+            bls_proof_of_possession,
             self_stake: 10_000_000,
             commission_bps: 500,
         })

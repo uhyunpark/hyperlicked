@@ -17,7 +17,7 @@ use crate::config::Config;
 
 use super::{AppHook, BlockStore, Pacemaker, Safety};
 use crate::types::{
-    hash_short, Block, Certificate, ConsensusConfig, Hash, Propose, View, Vote,
+    hash_short, Block, Certificate, ConsensusConfig, ConsensusContext, Hash, Propose, View, Vote,
 };
 
 /// Consensus engine state
@@ -28,6 +28,9 @@ where
 {
     /// Configuration
     config: ConsensusConfig,
+
+    /// Static epoch-0 consensus authentication context.
+    context: ConsensusContext,
 
     /// Safety module (voting rules)
     safety: Safety,
@@ -69,12 +72,16 @@ where
     /// Create a new consensus engine
     pub fn new(config: ConsensusConfig, app: A, store: S) -> Self {
         // Initialize with genesis block
-        let genesis = Block::genesis();
+        let context = config
+            .context()
+            .expect("engine requires a valid static consensus configuration");
+        let genesis = Block::genesis(context);
         store.save(&genesis);
         store.set_committed(&genesis.hash());
 
         Self {
             config,
+            context,
             safety: Safety::new(),
             pacemaker: Pacemaker::default(),
             app,
@@ -93,12 +100,16 @@ where
     /// Used by RPC nodes that serve API requests but don't participate in consensus.
     pub fn new_observer(config: ConsensusConfig, app: A, store: S) -> Self {
         // Initialize with genesis block
-        let genesis = Block::genesis();
+        let context = config
+            .context()
+            .expect("engine requires a valid static consensus configuration");
+        let genesis = Block::genesis(context);
         store.save(&genesis);
         store.set_committed(&genesis.hash());
 
         Self {
             config,
+            context,
             safety: Safety::new(),
             pacemaker: Pacemaker::default(),
             app,
@@ -120,11 +131,15 @@ where
         current_view: u64,
         observer_mode: bool,
     ) -> Self {
+        let context = config
+            .context()
+            .expect("engine requires a valid static consensus configuration");
         let mut pacemaker = Pacemaker::default();
         pacemaker.set_view(current_view);
 
         Self {
             config,
+            context,
             safety: Safety::new(),
             pacemaker,
             app,
@@ -203,11 +218,15 @@ where
 
         // 3. Create block (justify is the QC that certifies our parent)
         let mut block = Block {
+            epoch: self.context.epoch,
+            committee_hash: self.context.committee_hash,
+            genesis_hash: self.context.genesis_hash,
             view,
             height: parent.height + 1,
             parent: parent_hash,
             payload,
             proposer: self.config.node_id,
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32], // Will be set after execution
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -216,9 +235,74 @@ where
             justify: self.safety.high_qc().cloned(),
         };
 
-        // 4. Execute to get app_hash
+        // 4. Execute to derive the authenticated schema-v3 state root before
+        // the block hash, signature, or vote is exposed.
         let app_hash = self.app.execute(&block);
         block.app_hash = app_hash;
+        let commitment = match self.app.derive_execution_commitment(&block) {
+            Ok(Some(commitment)) => commitment,
+            Ok(None) => {
+                warn!(
+                    height = block.height,
+                    "Leader refusing to broadcast a block without an execution commitment"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(height = block.height, error = %error, "Leader execution commitment preflight failed");
+                return None;
+            }
+        };
+        block.commitment_root = match commitment.root() {
+            Ok(root) => root,
+            Err(error) => {
+                warn!(height = block.height, error = %error, "Leader execution commitment root failed");
+                return None;
+            }
+        };
+        if let Err(error) = self.app.seal_execution_commitment(&block) {
+            warn!(height = block.height, error = %error, "Leader execution commitment seal failed");
+            return None;
+        }
+        match self.app.preflight_commitment(&block) {
+            Ok(Some(sealed)) => match sealed.root() {
+                Ok(root) if root == block.commitment_root => {}
+                Ok(_) | Err(_) => {
+                    warn!(
+                        height = block.height,
+                        "Leader execution commitment seal did not reproduce its root"
+                    );
+                    return None;
+                }
+            },
+            _ => {
+                warn!(
+                    height = block.height,
+                    "Leader execution commitment disappeared after sealing"
+                );
+                return None;
+            }
+        }
+        match self.app.preflight_state_root(&block) {
+            Ok(Some(root)) if root == block.app_hash => {}
+            Ok(root) => {
+                warn!(
+                    height = block.height,
+                    expected = %hash_short(&block.app_hash),
+                    preflight = ?root.as_ref().map(hash_short),
+                    "Leader refusing to broadcast a block with an unauthenticated state root"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(
+                    height = block.height,
+                    error = %error,
+                    "Leader refusing to broadcast a block whose state root failed preflight"
+                );
+                return None;
+            }
+        }
 
         let block_hash = block.hash();
         debug!(
@@ -234,13 +318,27 @@ where
 
         // 6. For single node: self-vote (with BLS signature if enabled)
         let vote = if let Some(bls_sk) = self.config.bls_secret_key() {
-            Vote::new_bls(view, block_hash, app_hash, self.config.node_id, &bls_sk)
+            Vote::new_bls(
+                self.context,
+                view,
+                block_hash,
+                app_hash,
+                self.config.node_id,
+                &bls_sk,
+            )
         } else {
-            Vote::new(view, block_hash, app_hash, self.config.node_id)
+            Vote::new(
+                self.context,
+                view,
+                block_hash,
+                app_hash,
+                self.config.node_id,
+            )
         };
 
         // 7. Form QC (single node = 1 vote is quorum)
-        let qc = Certificate::new(view, block_hash, vec![vote]);
+        let qc = Certificate::new(self.context, view, block_hash, vec![vote])
+            .expect("local vote must form a context-bound certificate");
 
         // 8. Process QC (may commit previous block)
         let committed = self.process_qc(qc);
@@ -395,6 +493,51 @@ where
             return None;
         }
 
+        match self.app.preflight_commitment(&block) {
+            Ok(Some(commitment)) => match commitment.root() {
+                Ok(root) if root == block.commitment_root => {}
+                Ok(_) | Err(_) => {
+                    warn!(
+                        height = block.height,
+                        "Observer rejecting block with mismatched execution commitment root"
+                    );
+                    return None;
+                }
+            },
+            Ok(None) => {
+                warn!(
+                    height = block.height,
+                    "Observer rejecting block without an execution commitment"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(height = block.height, error = %error, "Observer execution commitment preflight failed");
+                return None;
+            }
+        }
+
+        match self.app.preflight_state_root(&block) {
+            Ok(Some(root)) if root == block.app_hash => {}
+            Ok(root) => {
+                warn!(
+                    height = block.height,
+                    expected = %hash_short(&block.app_hash),
+                    preflight = ?root.as_ref().map(hash_short),
+                    "Observer rejecting block with an unauthenticated state root"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(
+                    height = block.height,
+                    error = %error,
+                    "Observer rejecting block whose state root failed preflight"
+                );
+                return None;
+            }
+        }
+
         // Store and commit
         self.store.save(&block);
         self.store.set_committed(&block.hash());
@@ -415,8 +558,15 @@ where
     /// - Block is genesis (height <= 1, no QC needed)
     /// - QC is present and structurally valid
     fn verify_block_qc(&self, block: &Block) -> Result<(), String> {
+        block.validate_context(self.context)?;
+        if let Some(justify) = &block.justify {
+            justify.validate_context(self.context)?;
+        }
         // Genesis and first blocks don't need QC verification
         if block.height <= 1 {
+            if block.height == 1 && block.parent != Block::genesis(self.context).hash() {
+                return Err("height-one block does not extend canonical genesis".to_string());
+            }
             return Ok(());
         }
 
@@ -425,6 +575,7 @@ where
             .justify
             .as_ref()
             .ok_or_else(|| format!("Block {} missing QC (justify certificate)", block.height))?;
+        justify.validate_context(self.context)?;
 
         // QC must certify the parent block
         if justify.block_hash != block.parent {
@@ -516,7 +667,11 @@ where
         }
 
         // Don't queue duplicates
-        if self.received_blocks.iter().any(|b| b.height == block.height) {
+        if self
+            .received_blocks
+            .iter()
+            .any(|b| b.height == block.height)
+        {
             return;
         }
 
@@ -542,6 +697,12 @@ where
 
     /// Process a received proposal
     pub fn on_propose(&mut self, propose: Propose) -> Option<Vote> {
+        if propose.validate_context(self.context).is_err()
+            || propose.block.validate_context(self.context).is_err()
+        {
+            warn!("Rejecting proposal with mismatched consensus context");
+            return None;
+        }
         let block = &propose.block;
         let view = block.view;
 
@@ -558,8 +719,72 @@ where
             return None;
         }
 
-        // 1. Execute block locally
+        if let Err(e) = self.verify_block_qc(block) {
+            warn!(view, error = %e, "Rejecting proposal: invalid context-bound QC");
+            return None;
+        }
+
+        if block.height > 1
+            && (propose.justify != block.justify
+                || propose
+                    .justify
+                    .as_ref()
+                    .map(|qc| qc.validate_context(self.context).is_err())
+                    .unwrap_or(true))
+        {
+            warn!("Rejecting proposal with invalid context-bound justification");
+            return None;
+        }
+
+        // 1. Execute block locally and recompute the authenticated root before
+        // touching safety state or producing a vote.
         let local_app_hash = self.app.execute(block);
+
+        if local_app_hash != block.app_hash {
+            warn!(
+                view,
+                expected = %hash_short(&block.app_hash),
+                got = %hash_short(&local_app_hash),
+                "Rejecting proposal with mismatched authenticated state root"
+            );
+            return None;
+        }
+        match self.app.preflight_commitment(block) {
+            Ok(Some(commitment)) => match commitment.root() {
+                Ok(root) if root == block.commitment_root => {}
+                Ok(_) | Err(_) => {
+                    warn!(
+                        view,
+                        "Rejecting proposal with mismatched execution commitment root"
+                    );
+                    return None;
+                }
+            },
+            Ok(None) => {
+                warn!(view, "Rejecting proposal without an execution commitment");
+                return None;
+            }
+            Err(error) => {
+                warn!(view, error = %error, "Rejecting proposal with invalid execution commitment");
+                return None;
+            }
+        }
+        match self.app.preflight_state_root(block) {
+            Ok(Some(root)) if root == block.app_hash => {}
+            Ok(root) => {
+                warn!(
+                    view,
+                    expected = %hash_short(&block.app_hash),
+                    preflight = ?root.as_ref().map(hash_short),
+                    "Rejecting proposal with unauthenticated state root"
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!(view, error = %error, "Rejecting proposal with invalid state root");
+                return None;
+            }
+        }
 
         // 2. Check safety
         if let Err(e) = self.safety.safe_to_vote(block, local_app_hash) {
@@ -577,15 +802,32 @@ where
 
         // 4. Create vote (with BLS signature if enabled)
         let vote = if let Some(bls_sk) = self.config.bls_secret_key() {
-            Vote::new_bls(view, block.hash(), local_app_hash, self.config.node_id, &bls_sk)
+            Vote::new_bls(
+                self.context,
+                view,
+                block.hash(),
+                local_app_hash,
+                self.config.node_id,
+                &bls_sk,
+            )
         } else {
-            Vote::new(view, block.hash(), local_app_hash, self.config.node_id)
+            Vote::new(
+                self.context,
+                view,
+                block.hash(),
+                local_app_hash,
+                self.config.node_id,
+            )
         };
         Some(vote)
     }
 
     /// Process a quorum certificate
     fn process_qc(&mut self, qc: Certificate) -> Option<Block> {
+        if qc.validate_context(self.context).is_err() {
+            warn!("Rejecting QC with mismatched consensus context");
+            return None;
+        }
         debug!(
             view = qc.view,
             hash = %hash_short(&qc.block_hash),
@@ -600,7 +842,9 @@ where
         // When we have QC for block B, commit B's PARENT.
         // This ensures block N is only committed when N+1 has been certified,
         // providing stronger Byzantine fault tolerance.
-        let certified_block = self.pending.get(&qc.block_hash)
+        let certified_block = self
+            .pending
+            .get(&qc.block_hash)
             .cloned()
             .or_else(|| self.store.get(&qc.block_hash))?;
 
@@ -663,7 +907,9 @@ where
         }
 
         // Fall back to genesis
-        self.store.get_by_height(0).unwrap_or_else(Block::genesis)
+        self.store
+            .get_by_height(0)
+            .unwrap_or_else(|| Block::genesis(self.context))
     }
 
     /// Get current view
@@ -681,35 +927,17 @@ where
         self.config.is_leader(self.pacemaker.current_view())
     }
 
-    /// Handle epoch transition by updating validator set
-    ///
-    /// Called by application layer when epoch boundary is reached.
-    /// Updates consensus configuration with the new active validator set.
+    /// Reject an epoch transition until its verified transition certificate and
+    /// historical committee are available to the consensus runtime.
     pub fn on_epoch_transition(&mut self, update: crate::app::staking::ValidatorSetUpdate) {
         if update.is_empty() {
-            info!("Epoch transition: no validators in update, keeping current set");
             return;
         }
 
-        info!(
-            validators = update.len(),
-            "Epoch transition: updating validator set"
+        panic!(
+            "dynamic validator updates are disabled until verified epoch-transition certificates and historical committee support are implemented ({} validators)",
+            update.len()
         );
-
-        // Update config with new validators and BLS keys
-        self.config.update_validators(update.node_ids, update.bls_pubkeys);
-
-        debug!(
-            validators = ?self.config.validators.len(),
-            "Consensus config updated with new validator set"
-        );
-    }
-
-    /// Get a mutable reference to the consensus config
-    ///
-    /// Used for external updates (e.g., epoch transitions)
-    pub fn config_mut(&mut self) -> &mut ConsensusConfig {
-        &mut self.config
     }
 }
 
@@ -717,6 +945,7 @@ where
 mod tests {
     use super::*;
     use crate::consensus::{MemoryBlockStore, NoOpApp};
+    use crate::types::CommitmentV2;
 
     #[test]
     fn test_2_chain_commit_rule() {
@@ -737,13 +966,21 @@ mod tests {
         // Tick 2: Certify block 2, commits block 1
         let committed = engine.tick();
         assert!(committed.is_some());
-        assert_eq!(committed.unwrap().height, 1, "Second QC should commit block 1");
+        assert_eq!(
+            committed.unwrap().height,
+            1,
+            "Second QC should commit block 1"
+        );
         assert_eq!(engine.committed_height(), 1);
 
         // Tick 3: Certify block 3, commits block 2
         let committed = engine.tick();
         assert!(committed.is_some());
-        assert_eq!(committed.unwrap().height, 2, "Third QC should commit block 2");
+        assert_eq!(
+            committed.unwrap().height,
+            2,
+            "Third QC should commit block 2"
+        );
         assert_eq!(engine.committed_height(), 2);
     }
 
@@ -820,6 +1057,7 @@ mod tests {
     #[test]
     fn test_observer_processes_queued_blocks() {
         let config = ConsensusConfig::single_node();
+        let context = config.context().expect("single-node context");
         let app = NoOpApp;
         let store = MemoryBlockStore::new();
 
@@ -828,27 +1066,43 @@ mod tests {
 
         // Block 1 at height 1 is exempt from QC verification
         let block1 = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 1,
             height: 1,
-            parent: Block::genesis().hash(),
+            parent: Block::genesis(context).hash(),
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: CommitmentV2::default()
+                .root()
+                .expect("empty commitment root"),
             app_hash: [0u8; 32], // NoOpApp returns [0u8; 32]
             timestamp: 1000,
             justify: None,
         };
 
         // Block 2 needs a QC certifying block 1, so add one
-        let qc_for_block1 = Certificate::new(1, block1.hash(), vec![
-            Vote::new(1, block1.hash(), [0u8; 32], [1u8; 32])
-        ]);
+        let qc_for_block1 = Certificate::new(
+            context,
+            1,
+            block1.hash(),
+            vec![Vote::new(context, 1, block1.hash(), [1u8; 32], [1u8; 32])],
+        )
+        .expect("context-bound test certificate");
 
         let block2 = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 2,
             height: 2,
             parent: block1.hash(),
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: CommitmentV2::default()
+                .root()
+                .expect("empty commitment root"),
             app_hash: [0u8; 32],
             timestamp: 2000,
             justify: Some(qc_for_block1),
@@ -879,6 +1133,7 @@ mod tests {
     #[test]
     fn test_observer_ignores_already_committed() {
         let config = ConsensusConfig::single_node();
+        let context = config.context().expect("single-node context");
         let app = NoOpApp;
         let store = MemoryBlockStore::new();
 
@@ -886,11 +1141,17 @@ mod tests {
 
         // Height 1 blocks are exempt from QC verification
         let block1 = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 1,
             height: 1,
-            parent: Block::genesis().hash(),
+            parent: Block::genesis(context).hash(),
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: CommitmentV2::default()
+                .root()
+                .expect("empty commitment root"),
             app_hash: [0u8; 32],
             timestamp: 1000,
             justify: None,
@@ -909,6 +1170,7 @@ mod tests {
     #[test]
     fn test_observer_rejects_block_without_qc() {
         let config = ConsensusConfig::single_node();
+        let context = config.context().expect("single-node context");
         let app = NoOpApp;
         let store = MemoryBlockStore::new();
 
@@ -916,11 +1178,17 @@ mod tests {
 
         // Block 1 at height 1 is exempt from QC check
         let block1 = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 1,
             height: 1,
-            parent: Block::genesis().hash(),
+            parent: Block::genesis(context).hash(),
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: CommitmentV2::default()
+                .root()
+                .expect("empty commitment root"),
             app_hash: [0u8; 32],
             timestamp: 1000,
             justify: None,
@@ -928,11 +1196,17 @@ mod tests {
 
         // Block 2 at height 2 REQUIRES a QC but doesn't have one
         let block2 = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 2,
             height: 2,
             parent: block1.hash(),
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: CommitmentV2::default()
+                .root()
+                .expect("empty commitment root"),
             app_hash: [0u8; 32],
             timestamp: 2000,
             justify: None, // Missing required QC

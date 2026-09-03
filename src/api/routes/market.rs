@@ -13,7 +13,11 @@ use crate::api::state::PriceLevel;
 use crate::api::types::{ApiState, CandleInfo, FundingInfo, MarketInfo, OrderbookSnapshot};
 
 pub async fn get_markets(State(state): State<ApiState>) -> Json<Vec<MarketInfo>> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let markets: Vec<MarketInfo> = app
         .market_configs()
         .values()
@@ -26,7 +30,11 @@ pub async fn get_market(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<MarketInfo>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let config = app.market_config(&symbol).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(MarketInfo::from_config(config)))
 }
@@ -35,7 +43,11 @@ pub async fn get_orderbook(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<OrderbookSnapshot>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
     let book = app.orderbook(&symbol).ok_or(StatusCode::NOT_FOUND)?;
 
     let bids: Vec<PriceLevel> = book
@@ -92,7 +104,11 @@ pub async fn get_trades(
     Query(params): Query<TradesQuery>,
 ) -> Json<Vec<TradeResponse>> {
     let limit = params.limit.unwrap_or(100).min(1000);
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     let trades: Vec<TradeResponse> = app
         .get_trades(&symbol, limit)
@@ -135,7 +151,11 @@ pub async fn get_candles(
     let interval = Interval::from_str(interval_str).ok_or(StatusCode::BAD_REQUEST)?;
     let limit = params.limit.unwrap_or(500).min(10_000);
 
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     // Check if market exists
     if app.orderbook(&symbol).is_none() {
@@ -163,7 +183,11 @@ pub async fn get_funding(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<FundingInfo>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     // Check if market exists
     if app.orderbook(&symbol).is_none() {
@@ -191,11 +215,11 @@ pub struct AssetCtxResponse {
     pub mark_price: i64,
     pub oracle_price: Option<i64>,
     pub mid_price: i64,
-    pub funding_rate: i64,     // 1/1M units
-    pub premium: i64,          // 1/1M units
-    pub open_interest: i64,    // satoshis
-    pub prev_day_price: i64,   // cents
-    pub day_volume: i64,       // satoshis
+    pub funding_rate: i64,        // 1/1M units
+    pub premium: i64,             // 1/1M units
+    pub open_interest: i64,       // satoshis
+    pub prev_day_price: i64,      // cents
+    pub day_volume: i64,          // satoshis
     pub day_notional_volume: i64, // cents
     pub next_funding_time: u64,
     pub timestamp: u64,
@@ -206,7 +230,11 @@ pub async fn get_asset_ctx(
     State(state): State<ApiState>,
     Path(symbol): Path<String>,
 ) -> Result<Json<AssetCtxResponse>, StatusCode> {
-    let app = state.shared.app.read().await;
+    let app = state
+        .shared
+        .app
+        .read()
+        .expect("application state lock poisoned");
 
     // Check if market exists
     if app.orderbook(&symbol).is_none() {
@@ -223,7 +251,9 @@ pub async fn get_asset_ctx(
         symbol: symbol.clone(),
         mark_price: app.mark_price(&symbol).unwrap_or(0),
         oracle_price: app.oracle_price(&symbol),
-        mid_price: app.mid_price(&symbol).unwrap_or(app.mark_price(&symbol).unwrap_or(0)),
+        mid_price: app
+            .mid_price(&symbol)
+            .unwrap_or(app.mark_price(&symbol).unwrap_or(0)),
         funding_rate: funding_rate_1m,
         premium: app.premium(&symbol).unwrap_or(0),
         open_interest: app.get_open_interest(&symbol),

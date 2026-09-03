@@ -30,6 +30,7 @@ Base URL: `/api/v1` (health check at `/health`, WebSocket at `/ws`)
 | GET | `/accounts/:address/funding` | Funding payment history |
 | GET | `/accounts/:address/fills` | Trade fills |
 | GET | `/accounts/:address/trigger-orders` | TP/SL trigger orders |
+| GET | `/transactions/:tx_hash` | Finalized transaction receipt and events |
 | GET | `/chain/status` | Block height, validators, uptime |
 | GET | `/chain/health` | Node health check |
 | GET | `/chain/insurance-fund` | Insurance fund balance |
@@ -85,6 +86,8 @@ Base URL: `/api/v1` (health check at `/health`, WebSocket at `/ws`)
 - **Sizes**: i64 satoshis (1 unit = 1e8)
 - **Timestamps**: u64 milliseconds since epoch
 - **Errors**: `{ "error": "message" }` with appropriate HTTP status
+- **Submission responses**: `{ "status": "pending", "tx_hash": "<64 lowercase hex characters>" }`; the hash is the canonical signed-envelope transaction hash used for receipt lookup.
+- **Finalized transaction responses**: `GET /transactions/:tx_hash` returns `{ "status": "finalized", "tx_hash": ..., "tx_index": ..., "tx_type": ..., "receipt_status": ..., "error_code": ..., "resource_usage": ..., "events": [...], "block": { "hash": ..., "height": ... } }`; unfinalized/missing transactions return `404`.
 
 ## WebSocket
 

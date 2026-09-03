@@ -268,7 +268,9 @@ fn verify_signature(
                 peer = %hash_short(peer_id),
                 "Peer did not provide authentication signature"
             );
-            return Err(anyhow!("Authentication required but peer sent empty signature"));
+            return Err(anyhow!(
+                "Authentication required but peer sent empty signature"
+            ));
         }
         return Ok(false);
     }

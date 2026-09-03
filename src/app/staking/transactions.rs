@@ -17,8 +17,15 @@ pub enum StakingTransaction {
         operator: Address,
         node_id: NodeId,
         bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
         self_stake: i64,
         commission_bps: i64,
+    },
+    /// Rotate a validator's BLS key for the next epoch.
+    RotateValidatorKey {
+        operator: Address,
+        new_bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
     },
     /// Delegate stake to a validator
     Delegate {
@@ -33,9 +40,7 @@ pub enum StakingTransaction {
         amount: i64,
     },
     /// Claim completed unstakes
-    ClaimUnstaked {
-        delegator: Address,
-    },
+    ClaimUnstaked { delegator: Address },
     /// Claim staking rewards
     ClaimRewards {
         /// Claimant address
@@ -44,9 +49,7 @@ pub enum StakingTransaction {
         validator: Option<Address>,
     },
     /// Unjail a jailed validator
-    Unjail {
-        operator: Address,
-    },
+    Unjail { operator: Address },
     /// Submit evidence of misbehavior
     SubmitEvidence {
         submitter: Address,
@@ -67,10 +70,12 @@ impl StakingTransaction {
 }
 
 /// Result of executing a staking transaction
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StakingTxResult {
     /// Validator registered successfully
     ValidatorRegistered { operator: Address, node_id: NodeId },
+    /// Validator key rotated for the next epoch
+    ValidatorKeyRotated { operator: Address },
     /// Delegation added
     Delegated {
         delegator: Address,
@@ -87,10 +92,7 @@ pub enum StakingTxResult {
     /// Unstaked funds claimed
     UnstakeClaimed { delegator: Address, amount: i64 },
     /// Rewards claimed
-    RewardsClaimed {
-        claimant: Address,
-        amount: i64,
-    },
+    RewardsClaimed { claimant: Address, amount: i64 },
     /// Validator unjailed
     Unjailed { operator: Address },
     /// Evidence submitted and processed
@@ -106,12 +108,14 @@ impl StakingState {
         &mut self,
         tx: StakingTransaction,
         timestamp: u64,
+        chain_domain: [u8; 32],
     ) -> Result<StakingTxResult, StakingError> {
         match tx {
             StakingTransaction::RegisterValidator {
                 operator,
                 node_id,
                 bls_pubkey,
+                bls_proof_of_possession,
                 self_stake,
                 commission_bps,
             } => {
@@ -119,10 +123,26 @@ impl StakingState {
                     operator.clone(),
                     node_id,
                     bls_pubkey,
+                    bls_proof_of_possession,
+                    chain_domain,
                     self_stake,
                     commission_bps,
                 )?;
                 Ok(StakingTxResult::ValidatorRegistered { operator, node_id })
+            }
+
+            StakingTransaction::RotateValidatorKey {
+                operator,
+                new_bls_pubkey,
+                bls_proof_of_possession,
+            } => {
+                self.rotate_validator_key(
+                    &operator,
+                    new_bls_pubkey,
+                    bls_proof_of_possession,
+                    chain_domain,
+                )?;
+                Ok(StakingTxResult::ValidatorKeyRotated { operator })
             }
 
             StakingTransaction::Delegate {
@@ -154,16 +174,14 @@ impl StakingState {
             }
 
             StakingTransaction::ClaimUnstaked { delegator } => {
-                let completions = self.process_unstake_queue(timestamp);
-                let amount = completions
-                    .iter()
-                    .filter(|(d, _)| d == &delegator)
-                    .map(|(_, a)| a)
-                    .sum();
+                let amount = self.process_unstake_queue_for(&delegator, timestamp);
                 Ok(StakingTxResult::UnstakeClaimed { delegator, amount })
             }
 
-            StakingTransaction::ClaimRewards { claimant, validator } => {
+            StakingTransaction::ClaimRewards {
+                claimant,
+                validator,
+            } => {
                 let amount = match validator {
                     Some(val) => {
                         let result = self.claim_delegation_rewards(&claimant, &val)?;
@@ -182,7 +200,10 @@ impl StakingState {
                 Ok(StakingTxResult::Unjailed { operator })
             }
 
-            StakingTransaction::SubmitEvidence { submitter: _, evidence } => {
+            StakingTransaction::SubmitEvidence {
+                submitter: _,
+                evidence,
+            } => {
                 let offender = evidence.offender;
                 self.submit_evidence(evidence)?;
 
@@ -206,7 +227,10 @@ impl StakingState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::staking::types::MIN_SELF_STAKE;
+    use crate::app::staking::types::EvidenceType;
+    use crate::app::staking::types::{MIN_SELF_STAKE, UNSTAKE_DELAY_MS};
+    use crate::crypto::bls::BlsSecretKey;
+    use crate::types::ConsensusContext;
 
     fn test_node_id(n: u8) -> NodeId {
         let mut id = [0u8; 32];
@@ -214,8 +238,23 @@ mod tests {
         id
     }
 
-    fn test_bls_key() -> Vec<u8> {
-        vec![0u8; 48]
+    fn test_bls_key(n: u8) -> Vec<u8> {
+        let mut seed = [0u8; 32];
+        seed[0] = n;
+        BlsSecretKey::from_seed(&seed)
+            .public_key()
+            .to_bytes()
+            .to_vec()
+    }
+
+    fn test_bls_proof(n: u8) -> Vec<u8> {
+        let mut seed = [0u8; 32];
+        seed[0] = n;
+        let node_id = test_node_id(n);
+        BlsSecretKey::from_seed(&seed)
+            .create_proof_of_possession(&[0u8; 32], &node_id)
+            .to_bytes()
+            .to_vec()
     }
 
     #[test]
@@ -225,13 +264,17 @@ mod tests {
         let tx = StakingTransaction::RegisterValidator {
             operator: "v1".into(),
             node_id: test_node_id(1),
-            bls_pubkey: test_bls_key(),
+            bls_pubkey: test_bls_key(1),
+            bls_proof_of_possession: test_bls_proof(1),
             self_stake: MIN_SELF_STAKE,
             commission_bps: 500,
         };
 
-        let result = state.execute_tx(tx, 1000).unwrap();
-        assert!(matches!(result, StakingTxResult::ValidatorRegistered { .. }));
+        let result = state.execute_tx(tx, 1000, [0u8; 32]).unwrap();
+        assert!(matches!(
+            result,
+            StakingTxResult::ValidatorRegistered { .. }
+        ));
         assert!(state.get_validator(&"v1".into()).is_some());
     }
 
@@ -240,16 +283,20 @@ mod tests {
         let mut state = StakingState::new();
 
         // Register validator first
-        state.execute_tx(
-            StakingTransaction::RegisterValidator {
-                operator: "v1".into(),
-                node_id: test_node_id(1),
-                bls_pubkey: test_bls_key(),
-                self_stake: MIN_SELF_STAKE,
-                commission_bps: 500,
-            },
-            1000,
-        ).unwrap();
+        state
+            .execute_tx(
+                StakingTransaction::RegisterValidator {
+                    operator: "v1".into(),
+                    node_id: test_node_id(1),
+                    bls_pubkey: test_bls_key(1),
+                    bls_proof_of_possession: test_bls_proof(1),
+                    self_stake: MIN_SELF_STAKE,
+                    commission_bps: 500,
+                },
+                1000,
+                [0u8; 32],
+            )
+            .unwrap();
 
         // Delegate
         let tx = StakingTransaction::Delegate {
@@ -257,8 +304,14 @@ mod tests {
             validator: "v1".into(),
             amount: 1000_00,
         };
-        let result = state.execute_tx(tx, 1000).unwrap();
-        assert!(matches!(result, StakingTxResult::Delegated { amount: 1000_00, .. }));
+        let result = state.execute_tx(tx, 1000, [0u8; 32]).unwrap();
+        assert!(matches!(
+            result,
+            StakingTxResult::Delegated {
+                amount: 1000_00,
+                ..
+            }
+        ));
 
         // Undelegate
         let tx = StakingTransaction::Undelegate {
@@ -266,8 +319,103 @@ mod tests {
             validator: "v1".into(),
             amount: 500_00,
         };
-        let result = state.execute_tx(tx, 2000).unwrap();
-        assert!(matches!(result, StakingTxResult::Undelegated { amount: 500_00, .. }));
+        let result = state.execute_tx(tx, 2000, [0u8; 32]).unwrap();
+        assert!(matches!(
+            result,
+            StakingTxResult::Undelegated { amount: 500_00, .. }
+        ));
+    }
+
+    #[test]
+    fn test_claim_unstaked_only_processes_requesting_delegator() {
+        let mut state = StakingState::new();
+        state
+            .execute_tx(
+                StakingTransaction::RegisterValidator {
+                    operator: "v1".into(),
+                    node_id: test_node_id(1),
+                    bls_pubkey: test_bls_key(1),
+                    bls_proof_of_possession: test_bls_proof(1),
+                    self_stake: MIN_SELF_STAKE,
+                    commission_bps: 500,
+                },
+                0,
+                [0u8; 32],
+            )
+            .unwrap();
+        state.delegate("alice".into(), "v1".into(), 300).unwrap();
+        state.delegate("bob".into(), "v1".into(), 300).unwrap();
+
+        state
+            .undelegate("alice".into(), "v1".into(), 100, 0)
+            .unwrap();
+        state
+            .undelegate("alice".into(), "v1".into(), 100, 1)
+            .unwrap();
+        state.undelegate("bob".into(), "v1".into(), 100, 0).unwrap();
+
+        let alice_before = state.unstake_queue.get("alice").unwrap().clone();
+        let bob_before = state.unstake_queue.get("bob").unwrap().clone();
+        let ready = UNSTAKE_DELAY_MS;
+
+        let result = state
+            .execute_tx(
+                StakingTransaction::ClaimUnstaked {
+                    delegator: "alice".into(),
+                },
+                ready,
+                [0u8; 32],
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            StakingTxResult::UnstakeClaimed { amount: 100, .. }
+        ));
+        assert_eq!(
+            bincode::serialize(state.unstake_queue.get("alice").unwrap()).unwrap(),
+            bincode::serialize(&vec![alice_before[1].clone()]).unwrap()
+        );
+        assert_eq!(
+            bincode::serialize(state.unstake_queue.get("bob").unwrap()).unwrap(),
+            bincode::serialize(&bob_before).unwrap()
+        );
+
+        let repeated = state
+            .execute_tx(
+                StakingTransaction::ClaimUnstaked {
+                    delegator: "alice".into(),
+                },
+                ready,
+                [0u8; 32],
+            )
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            StakingTxResult::UnstakeClaimed { amount: 0, .. }
+        ));
+        assert_eq!(
+            bincode::serialize(state.unstake_queue.get("bob").unwrap()).unwrap(),
+            bincode::serialize(&bob_before).unwrap()
+        );
+
+        let final_claim = state
+            .execute_tx(
+                StakingTransaction::ClaimUnstaked {
+                    delegator: "alice".into(),
+                },
+                ready + 1,
+                [0u8; 32],
+            )
+            .unwrap();
+        assert!(matches!(
+            final_claim,
+            StakingTxResult::UnstakeClaimed { amount: 100, .. }
+        ));
+        assert!(!state.unstake_queue.contains_key("alice"));
+        assert_eq!(
+            bincode::serialize(state.unstake_queue.get("bob").unwrap()).unwrap(),
+            bincode::serialize(&bob_before).unwrap()
+        );
     }
 
     #[test]
@@ -281,6 +429,42 @@ mod tests {
         let bytes = tx.to_bytes();
         let parsed = StakingTransaction::from_bytes(&bytes).unwrap();
 
-        assert!(matches!(parsed, StakingTransaction::Delegate { amount: 1000_00, .. }));
+        assert!(matches!(
+            parsed,
+            StakingTransaction::Delegate {
+                amount: 1000_00,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_evidence_serialization_preserves_signed_vote_fields() {
+        let context = ConsensusContext::with_genesis(0, [1u8; 32], [2u8; 32]);
+        let evidence = Evidence {
+            evidence_type: EvidenceType::DoubleVote,
+            offender: test_node_id(1),
+            view: 7,
+            timestamp: 8,
+            context,
+            hash_a: [3u8; 32],
+            app_hash_a: [4u8; 32],
+            hash_b: [5u8; 32],
+            app_hash_b: [6u8; 32],
+            signature_a: vec![7u8; 96],
+            signature_b: vec![8u8; 96],
+        };
+        let tx = StakingTransaction::SubmitEvidence {
+            submitter: "reporter".into(),
+            evidence,
+        };
+
+        let parsed = StakingTransaction::from_bytes(&tx.to_bytes()).unwrap();
+        let StakingTransaction::SubmitEvidence { evidence, .. } = parsed else {
+            panic!("expected evidence transaction");
+        };
+        assert_eq!(evidence.context, context);
+        assert_eq!(evidence.app_hash_a, [4u8; 32]);
+        assert_eq!(evidence.app_hash_b, [6u8; 32]);
     }
 }

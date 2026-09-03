@@ -5,15 +5,20 @@
 
 use hyperlicked::app::{AppState, OrderType, Side, Transaction};
 use hyperlicked::consensus::AppHook;
-use hyperlicked::types::Block;
+use hyperlicked::types::{Block, ConsensusContext};
 
 fn create_block(view: u64, height: u64, timestamp: u64) -> Block {
+    let context = ConsensusContext::new(0, [0u8; 32]);
     Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view,
         height,
         parent: [0u8; 32],
         payload: vec![],
         proposer: [1u8; 32],
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp,
         justify: None,
@@ -103,7 +108,11 @@ fn test_adl_triggers_when_insurance_insufficient() {
 
     // Verify positions
     assert_eq!(
-        state.account("liquidated").unwrap().position("BTC-USDT").size,
+        state
+            .account("liquidated")
+            .unwrap()
+            .position("BTC-USDT")
+            .size,
         100_000_000
     ); // Long 1 BTC
     assert_eq!(
@@ -129,7 +138,11 @@ fn test_adl_triggers_when_insurance_insufficient() {
     // 5. Verify ADL occurred
     // The liquidated position should be closed
     assert_eq!(
-        state.account("liquidated").unwrap().position("BTC-USDT").size,
+        state
+            .account("liquidated")
+            .unwrap()
+            .position("BTC-USDT")
+            .size,
         0
     );
 
@@ -226,8 +239,15 @@ fn test_adl_priority_by_profitability() {
     state.execute(&block1);
 
     // Verify positions
-    let liquidated_pos = state.account("liquidated").unwrap().position("BTC-USDT").size;
-    assert_eq!(liquidated_pos, 100_000_000, "Liquidated should have 1 BTC long");
+    let liquidated_pos = state
+        .account("liquidated")
+        .unwrap()
+        .position("BTC-USDT")
+        .size;
+    assert_eq!(
+        liquidated_pos, 100_000_000,
+        "Liquidated should have 1 BTC long"
+    );
 
     // Now crash price to trigger liquidation + ADL
     // Price drops to $44,000
@@ -238,13 +258,28 @@ fn test_adl_priority_by_profitability() {
     state.execute(&block2);
 
     // Liquidated position should be closed
-    let liquidated_pos_after = state.account("liquidated").unwrap().position("BTC-USDT").size;
-    assert_eq!(liquidated_pos_after, 0, "Liquidated position should be closed");
+    let liquidated_pos_after = state
+        .account("liquidated")
+        .unwrap()
+        .position("BTC-USDT")
+        .size;
+    assert_eq!(
+        liquidated_pos_after, 0,
+        "Liquidated position should be closed"
+    );
 
     // short_high should be ADL'd first (more profitable - higher entry price means more profit at lower mark)
     // Both have 50_000_000 position but short_high entered at $50k, short_low at $49k
-    let short_high_pos = state.account("short_high").unwrap().position("BTC-USDT").size;
-    let short_low_pos = state.account("short_low").unwrap().position("BTC-USDT").size;
+    let short_high_pos = state
+        .account("short_high")
+        .unwrap()
+        .position("BTC-USDT")
+        .size;
+    let short_low_pos = state
+        .account("short_low")
+        .unwrap()
+        .position("BTC-USDT")
+        .size;
 
     // At least one was ADL'd (positions reduced from original -50_000_000)
     assert!(
@@ -306,11 +341,7 @@ fn test_no_adl_when_insurance_sufficient() {
     let block1 = create_block(1, 1, 1000);
     state.execute(&block1);
 
-    let short1_before = state
-        .account("short1")
-        .unwrap()
-        .position("BTC-USDT")
-        .size;
+    let short1_before = state.account("short1").unwrap().position("BTC-USDT").size;
 
     let insurance_before = state.insurance_fund_balance();
 
@@ -321,11 +352,7 @@ fn test_no_adl_when_insurance_sufficient() {
     state.execute(&block2);
 
     // Short should NOT be ADL'd because insurance fund was sufficient
-    let short1_after = state
-        .account("short1")
-        .unwrap()
-        .position("BTC-USDT")
-        .size;
+    let short1_after = state.account("short1").unwrap().position("BTC-USDT").size;
 
     assert_eq!(
         short1_before, short1_after,

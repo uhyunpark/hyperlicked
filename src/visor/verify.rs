@@ -107,9 +107,7 @@ pub fn verify_binary_with_key(
 fn parse_public_key(data: &[u8]) -> Result<VerifyingKey, VerifyError> {
     // Try as raw 32 bytes first
     if data.len() == 32 {
-        let key_bytes: [u8; 32] = data
-            .try_into()
-            .map_err(|_| VerifyError::InvalidKeyLength)?;
+        let key_bytes: [u8; 32] = data.try_into().map_err(|_| VerifyError::InvalidKeyLength)?;
         return VerifyingKey::from_bytes(&key_bytes)
             .map_err(|e| VerifyError::KeyParseError(e.to_string()));
     }
@@ -119,8 +117,8 @@ fn parse_public_key(data: &[u8]) -> Result<VerifyingKey, VerifyError> {
     let hex_str = hex_str.trim();
 
     if hex_str.len() == 64 {
-        let key_bytes = hex::decode(hex_str)
-            .map_err(|e| VerifyError::KeyParseError(e.to_string()))?;
+        let key_bytes =
+            hex::decode(hex_str).map_err(|e| VerifyError::KeyParseError(e.to_string()))?;
         let key_array: [u8; 32] = key_bytes
             .try_into()
             .map_err(|_| VerifyError::InvalidKeyLength)?;
@@ -146,8 +144,8 @@ fn parse_signature(data: &[u8]) -> Result<Signature, VerifyError> {
     let hex_str = hex_str.trim();
 
     if hex_str.len() == 128 {
-        let sig_bytes = hex::decode(hex_str)
-            .map_err(|e| VerifyError::SignatureParseError(e.to_string()))?;
+        let sig_bytes =
+            hex::decode(hex_str).map_err(|e| VerifyError::SignatureParseError(e.to_string()))?;
         let sig_array: [u8; 64] = sig_bytes
             .try_into()
             .map_err(|_| VerifyError::InvalidSignatureLength)?;

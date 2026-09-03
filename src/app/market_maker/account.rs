@@ -36,7 +36,7 @@ impl MakerAccount {
     ///
     /// Uses SHA-256 hash of "mm:{seed}:{index}" to create 20-byte address
     pub fn generate_address(seed: u64, index: usize) -> Address {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let input = format!("mm:{}:{}", seed, index);
         let hash = Sha256::digest(input.as_bytes());
@@ -46,7 +46,11 @@ impl MakerAccount {
     }
 
     /// Generate multiple addresses for a strategy type
-    pub fn generate_addresses(seed: u64, strategy_type: StrategyType, count: usize) -> Vec<Address> {
+    pub fn generate_addresses(
+        seed: u64,
+        strategy_type: StrategyType,
+        count: usize,
+    ) -> Vec<Address> {
         // Offset by strategy type to ensure unique addresses per strategy
         let offset = match strategy_type {
             StrategyType::TightQuoter => 0,

@@ -5,9 +5,14 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```
+//! use hyperlicked::network::{MockNetwork, Network};
+//!
 //! let (net0, net1, net2) = MockNetwork::create_connected_trio();
-//! // Each network can send/receive messages to/from others
+//! assert_eq!(net0.node_id(), [1u8; 32]);
+//! assert_eq!(net1.node_id(), [2u8; 32]);
+//! assert_eq!(net2.node_id(), [3u8; 32]);
+//! assert_eq!(net0.all_node_ids().len(), 3);
 //! ```
 
 use std::collections::HashMap;
@@ -16,7 +21,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
-use super::Network;
+use super::{Network, UserTransactionPublisher};
+use crate::app::SignedEnvelope;
 use crate::types::{Message, NewView, NodeId, Prepare, Propose, ViewChange, Vote};
 
 /// Channel capacity for message queues
@@ -78,16 +84,16 @@ impl MockNetwork {
         assert!(n > 0, "Need at least one node");
 
         // Generate node IDs
-        let node_ids: Vec<NodeId> = (0..n).map(|i| {
-            let mut id = [0u8; 32];
-            id[0] = (i + 1) as u8; // Start from 1
-            id
-        }).collect();
+        let node_ids: Vec<NodeId> = (0..n)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[0] = (i + 1) as u8; // Start from 1
+                id
+            })
+            .collect();
 
         // Create channels
-        let channels: Vec<_> = (0..n)
-            .map(|_| mpsc::channel(CHANNEL_CAPACITY))
-            .collect();
+        let channels: Vec<_> = (0..n).map(|_| mpsc::channel(CHANNEL_CAPACITY)).collect();
 
         let senders: Vec<_> = channels.iter().map(|(tx, _)| tx.clone()).collect();
         let receivers: Vec<_> = channels.into_iter().map(|(_, rx)| rx).collect();
@@ -182,10 +188,27 @@ impl Network for MockNetwork {
     }
 }
 
+#[async_trait]
+impl UserTransactionPublisher for MockNetwork {
+    async fn publish_user_transaction(&self, envelope: SignedEnvelope) -> anyhow::Result<()> {
+        self.broadcast_internal(Message::UserTransaction(envelope))
+            .await
+    }
+
+    async fn rebroadcast_user_transaction(&self, envelope: SignedEnvelope) -> anyhow::Result<()> {
+        self.broadcast_internal(Message::UserTransaction(envelope))
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Block;
+    use crate::types::{Block, ConsensusContext};
+
+    fn test_context() -> ConsensusContext {
+        ConsensusContext::new(0, [7u8; 32])
+    }
 
     #[tokio::test]
     async fn test_create_connected_trio() {
@@ -205,7 +228,7 @@ mod tests {
         let (net0, net1, _net2) = MockNetwork::create_connected_trio();
 
         // Node 0 sends vote to Node 1
-        let vote = Vote::new(1, [0u8; 32], [0u8; 32], net0.node_id());
+        let vote = Vote::new(test_context(), 1, [0u8; 32], [0u8; 32], net0.node_id());
         net0.send_vote(net1.node_id(), vote.clone()).await.unwrap();
 
         // Node 1 receives it
@@ -219,9 +242,14 @@ mod tests {
         let (net0, net1, net2) = MockNetwork::create_connected_trio();
 
         // Node 0 broadcasts proposal
+        let context = test_context();
         let propose = Propose {
-            block: Block::genesis(),
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
+            block: Block::genesis(context),
             justify: None,
+            proposer_signature: vec![],
         };
         net0.broadcast_propose(propose).await.unwrap();
 

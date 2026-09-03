@@ -38,14 +38,22 @@ impl Eq for QueueEntry {}
 
 impl PartialEq for QueueEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.address == other.address && self.generation == other.generation
+        self.address == other.address
+            && self.health_bps == other.health_bps
+            && self.generation == other.generation
     }
 }
 
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering: lower health = higher priority
-        other.health_bps.cmp(&self.health_bps)
+        other
+            .health_bps
+            .cmp(&self.health_bps)
+            // For equal health, lower address is higher priority.  Without
+            // this tie-breaker BinaryHeap order depends on insertion order.
+            .then_with(|| other.address.cmp(&self.address))
+            .then_with(|| self.generation.cmp(&other.generation))
     }
 }
 
@@ -165,11 +173,7 @@ impl LiquidationQueue {
     }
 
     /// Rebuild the queue from scratch (e.g., after snapshot recovery)
-    pub fn rebuild(
-        &mut self,
-        accounts: &AccountManager,
-        mark_prices: &HashMap<Symbol, Price>,
-    ) {
+    pub fn rebuild(&mut self, accounts: &AccountManager, mark_prices: &HashMap<Symbol, Price>) {
         self.queue.clear();
         self.generations.clear();
         self.in_queue.clear();
@@ -291,6 +295,32 @@ mod tests {
         assert_eq!(to_check.len(), 3);
         assert_eq!(to_check[0], "risky"); // Lowest health first
         assert_eq!(to_check[2], "safe"); // Highest health last
+    }
+
+    #[test]
+    fn test_equal_health_accounts_are_address_ordered() {
+        fn build_queue(order: &[&str]) -> Vec<String> {
+            let mut queue = LiquidationQueue::new(10);
+            let mut accounts = AccountManager::new();
+            let mark_prices: HashMap<Symbol, Price> =
+                [("BTC-USDT".to_string(), 5_000_000)].into_iter().collect();
+
+            for address in order {
+                *accounts.get_or_create(address) =
+                    create_test_account(address, 500_000, 100_000_000);
+                queue.update_account(address, &accounts, &mark_prices);
+            }
+            queue.get_accounts_to_check()
+        }
+
+        assert_eq!(
+            build_queue(&["charlie", "alice", "bob"]),
+            vec!["alice", "bob", "charlie"]
+        );
+        assert_eq!(
+            build_queue(&["bob", "charlie", "alice"]),
+            vec!["alice", "bob", "charlie"]
+        );
     }
 
     #[test]

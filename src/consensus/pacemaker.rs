@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use crate::crypto::bls::BlsPublicKey;
-use crate::types::{Certificate, NewView, NodeId, View, ViewChange, ViewChangeCertificate};
+use crate::types::{
+    Certificate, Committee, ConsensusContext, NewView, NodeId, View, ViewChange,
+    ViewChangeCertificate,
+};
 
 use super::view_change::ViewChangeCollector;
 
@@ -44,6 +47,9 @@ pub struct Pacemaker {
 
     /// View for which we've already sent a ViewChange (prevent double-send)
     vc_sent_for_view: Option<View>,
+
+    /// Static consensus context used by all view-change messages.
+    context: Option<ConsensusContext>,
 }
 
 impl Pacemaker {
@@ -56,6 +62,7 @@ impl Pacemaker {
             max_backoff: 5, // Max 32x base timeout
             vc_collector: None,
             vc_sent_for_view: None,
+            context: None,
         }
     }
 
@@ -72,7 +79,42 @@ impl Pacemaker {
         quorum: usize,
         validator_pubkeys: HashMap<NodeId, BlsPublicKey>,
     ) {
-        self.vc_collector = Some(ViewChangeCollector::with_validators(quorum, validator_pubkeys));
+        self.vc_collector = Some(ViewChangeCollector::with_validators(
+            quorum,
+            validator_pubkeys,
+        ));
+    }
+
+    /// Enable view changes with the active committee's strict weighted
+    /// quorum and configured BLS keys.
+    pub fn with_view_change_committee(&mut self, committee: Committee) -> Result<(), String> {
+        let context = self.context.unwrap_or_else(|| committee.initial_context());
+        if let Some(existing) = self.context {
+            if existing != context {
+                return Err("cannot change pacemaker consensus context".to_string());
+            }
+        }
+        self.context = Some(context);
+        self.vc_collector = Some(ViewChangeCollector::with_committee_and_context(
+            committee, context,
+        )?);
+        Ok(())
+    }
+
+    /// Bind this pacemaker to a static consensus context.
+    pub fn set_context(&mut self, context: ConsensusContext) -> Result<(), String> {
+        if let Some(existing) = self.context {
+            if existing != context {
+                return Err("cannot change pacemaker consensus context".to_string());
+            }
+        }
+        self.context = Some(context);
+        Ok(())
+    }
+
+    /// Return the static consensus context, if configured.
+    pub fn context(&self) -> Option<ConsensusContext> {
+        self.context
     }
 
     /// Get current view
@@ -82,6 +124,14 @@ impl Pacemaker {
 
     /// Advance to next view (called when QC received)
     pub fn advance_view(&mut self, qc: &Certificate) {
+        if let Some(expected) = self.context {
+            if qc.context() != expected {
+                tracing::warn!("Ignoring QC from a mismatched consensus context");
+                return;
+            }
+        } else {
+            self.context = Some(qc.context());
+        }
         let new_view = qc.view + 1;
         if new_view > self.current_view {
             self.current_view = new_view;
@@ -184,7 +234,14 @@ impl Pacemaker {
 
         self.vc_sent_for_view = Some(current);
 
+        let context = self
+            .context
+            .unwrap_or_else(|| ConsensusContext::new(0, [0u8; 32]));
+
         Some(ViewChange {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             from_view: current,
             to_view: current + 1,
             high_qc,
@@ -211,7 +268,9 @@ impl Pacemaker {
 
         self.vc_sent_for_view = Some(current);
 
-        Some(super::view_change::create_signed_view_change(
+        Some(super::view_change::create_signed_view_change_with_context(
+            self.context
+                .unwrap_or_else(|| ConsensusContext::new(0, [0u8; 32])),
             current,
             current + 1,
             high_qc,
@@ -247,6 +306,20 @@ impl Pacemaker {
     ///
     /// Advances to the new view if it's higher than current.
     pub fn on_new_view(&mut self, nv: &NewView) {
+        let expected = self.context.unwrap_or_else(|| nv.context());
+        if nv.context() != expected
+            || nv.view_change_cert.context() != expected
+            || nv
+                .high_qc
+                .as_ref()
+                .is_some_and(|qc| qc.context() != expected)
+        {
+            tracing::warn!("Ignoring NewView from a mismatched consensus context");
+            return;
+        }
+        if self.context.is_none() {
+            self.context = Some(expected);
+        }
         if nv.view > self.current_view {
             self.current_view = nv.view;
             self.consecutive_timeouts = 0;
@@ -304,6 +377,9 @@ mod tests {
         let mut pm = Pacemaker::new(Duration::from_secs(1));
 
         let qc = Certificate {
+            epoch: 0,
+            committee_hash: [0u8; 32],
+            genesis_hash: [0u8; 32],
             view: 0,
             block_hash: [0u8; 32],
             app_hash: Some([0u8; 32]),
@@ -344,6 +420,9 @@ mod tests {
 
         // Success resets backoff
         let qc = Certificate {
+            epoch: 0,
+            committee_hash: [0u8; 32],
+            genesis_hash: [0u8; 32],
             view: pm.current_view(),
             block_hash: [0u8; 32],
             app_hash: Some([0u8; 32]),

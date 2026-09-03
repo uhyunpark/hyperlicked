@@ -13,10 +13,53 @@ use super::{AppError, AppState, DepositInfo, OrderUpdateInfo, MAX_TRADES_PER_SYM
 impl AppState {
     /// Execute a single transaction
     pub fn execute_tx(&mut self, tx: Transaction) -> Result<Vec<Fill>, AppError> {
+        let dirty = match &tx {
+            Transaction::Deposit { .. }
+            | Transaction::Withdraw { .. }
+            | Transaction::TransferHyck { .. } => super::full_state_hash::COMPONENT_DIRTY_ACCOUNTS,
+            Transaction::CancelOrder { .. } => {
+                super::full_state_hash::COMPONENT_DIRTY_ACCOUNTS
+                    | super::full_state_hash::COMPONENT_DIRTY_ORDERBOOKS
+            }
+            Transaction::PlaceOrder { .. } => {
+                super::full_state_hash::COMPONENT_DIRTY_ACCOUNTS
+                    | super::full_state_hash::COMPONENT_DIRTY_ORDERBOOKS
+                    | super::full_state_hash::COMPONENT_DIRTY_PRICES
+            }
+            Transaction::RegisterValidator { .. }
+            | Transaction::RotateValidatorKey { .. }
+            | Transaction::Delegate { .. }
+            | Transaction::Undelegate { .. }
+            | Transaction::ClaimUnstaked { .. }
+            | Transaction::ClaimRewards { .. }
+            | Transaction::Unjail { .. }
+            | Transaction::SubmitEvidence { .. } => {
+                super::full_state_hash::COMPONENT_DIRTY_ACCOUNTS
+                    | super::full_state_hash::COMPONENT_DIRTY_STAKING
+            }
+            Transaction::PlaceTriggerOrder { .. }
+            | Transaction::CancelTriggerOrder { .. }
+            | Transaction::CancelTriggerOrderByCloid { .. } => {
+                super::full_state_hash::COMPONENT_DIRTY_TRIGGERS
+            }
+            Transaction::OraclePriceUpdate { .. } => super::full_state_hash::COMPONENT_DIRTY_ORACLE,
+            Transaction::AddMarket { .. } => {
+                super::full_state_hash::COMPONENT_DIRTY_MARKET_CONFIGS
+                    | super::full_state_hash::COMPONENT_DIRTY_ORDERBOOKS
+                    | super::full_state_hash::COMPONENT_DIRTY_PRICES
+            }
+        };
+        self.mark_full_state_dirty(dirty);
         match tx {
             Transaction::Deposit { trader, amount } => self.execute_deposit(trader, amount),
             Transaction::Withdraw { trader, amount } => self.execute_withdraw(trader, amount),
-            Transaction::CancelOrder { trader: _, order_id } => self.execute_cancel(order_id),
+            Transaction::TransferHyck { from, to, amount } => {
+                self.execute_transfer_hyck(from, to, amount)
+            }
+            Transaction::CancelOrder {
+                trader: _,
+                order_id,
+            } => self.execute_cancel(order_id),
             Transaction::PlaceOrder {
                 trader,
                 symbol,
@@ -25,16 +68,33 @@ impl AppState {
                 size,
                 order_type,
                 reduce_only,
-            } => self.execute_place_order(trader, symbol, side, price, size, order_type, reduce_only),
+            } => {
+                self.execute_place_order(trader, symbol, side, price, size, order_type, reduce_only)
+            }
 
             // Staking transactions
             Transaction::RegisterValidator {
                 operator,
                 node_id,
                 bls_pubkey,
+                bls_proof_of_possession,
                 self_stake,
                 commission_bps,
-            } => self.execute_register_validator(operator, node_id, bls_pubkey, self_stake, commission_bps),
+            } => self.execute_register_validator(
+                operator,
+                node_id,
+                bls_pubkey,
+                bls_proof_of_possession,
+                self_stake,
+                commission_bps,
+            ),
+            Transaction::RotateValidatorKey {
+                operator,
+                new_bls_pubkey,
+                bls_proof_of_possession,
+            } => {
+                self.execute_rotate_validator_key(operator, new_bls_pubkey, bls_proof_of_possession)
+            }
             Transaction::Delegate {
                 delegator,
                 validator,
@@ -46,9 +106,10 @@ impl AppState {
                 amount,
             } => self.execute_undelegate(delegator, validator, amount),
             Transaction::ClaimUnstaked { delegator } => self.execute_claim_unstaked(delegator),
-            Transaction::ClaimRewards { claimant, validator } => {
-                self.execute_claim_rewards(claimant, validator)
-            }
+            Transaction::ClaimRewards {
+                claimant,
+                validator,
+            } => self.execute_claim_rewards(claimant, validator),
             Transaction::Unjail { operator } => self.execute_unjail(operator),
             Transaction::SubmitEvidence {
                 submitter: _,
@@ -114,11 +175,20 @@ impl AppState {
 
     fn execute_deposit(&mut self, trader: String, amount: i64) -> Result<Vec<Fill>, AppError> {
         self.accounts.deposit(&trader, amount)?;
-        self.mark_dirty_account(&trader);
         self.pending_deposits.push(DepositInfo {
             trader: trader.clone(),
             amount,
         });
+        Ok(vec![])
+    }
+
+    fn execute_transfer_hyck(
+        &mut self,
+        from: String,
+        to: String,
+        amount: i64,
+    ) -> Result<Vec<Fill>, AppError> {
+        self.accounts.transfer_hyck(&from, &to, amount)?;
         Ok(vec![])
     }
 
@@ -130,7 +200,8 @@ impl AppState {
             let has_positions = account.positions.values().any(|p| p.size != 0);
             if has_positions {
                 let equity = account.equity(&self.mark_prices);
-                let maint = account.maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
+                let maint = account
+                    .maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
                 if equity < maint {
                     // Rollback withdrawal
                     self.accounts.deposit(&trader, amount).ok();
@@ -139,7 +210,6 @@ impl AppState {
             }
         }
 
-        self.mark_dirty_account(&trader);
         Ok(vec![])
     }
 
@@ -148,7 +218,8 @@ impl AppState {
             if let Some(cancelled) = book.cancel(&order_id) {
                 // Unlock collateral for cancelled order
                 if cancelled.locked_margin > 0 {
-                    self.accounts.unlock_collateral(&cancelled.trader, cancelled.locked_margin);
+                    self.accounts
+                        .unlock_collateral(&cancelled.trader, cancelled.locked_margin);
                 }
                 // Emit order update with cancelled status
                 let side_str = match cancelled.side {
@@ -184,7 +255,11 @@ impl AppState {
         order_type: OrderType,
         reduce_only: bool,
     ) -> Result<Vec<Fill>, AppError> {
-        let config = self.configs.get(&symbol).ok_or(AppError::MarketNotFound)?.clone();
+        let config = self
+            .configs
+            .get(&symbol)
+            .ok_or(AppError::MarketNotFound)?
+            .clone();
 
         // Handle reduce_only validation
         if reduce_only {
@@ -207,12 +282,13 @@ impl AppState {
         // Check margin (simplified: require full notional)
         // SECURITY: Use i128 to prevent overflow with large orders.
         // Example: 1000 BTC ($200M) × $200,000 = 2×10^16 (overflows i64)
-        let notional = ((size as i128 * price as i128) / 100_000_000)
-            .clamp(0, i64::MAX as i128) as i64;
+        let notional =
+            ((size as i128 * price as i128) / 100_000_000).clamp(0, i64::MAX as i128) as i64;
         {
             let account = self.accounts.get_or_create(&trader);
             let equity = account.equity(&self.mark_prices);
-            let maint = account.maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
+            let maint = account
+                .maintenance_margin_required(&self.mark_prices, super::MAINTENANCE_MARGIN_BPS);
             let available = equity - maint - account.locked;
             if available < notional / 10 {
                 return Err(AppError::InsufficientMargin);
@@ -350,17 +426,21 @@ impl AppState {
                 }
             }
 
-            // Mark both accounts as dirty for incremental hashing
-            self.mark_dirty_account(&fill.maker);
-            self.mark_dirty_account(&fill.taker);
-
             // Update mark price using EMA to resist manipulation
-            let alpha = self.configs.get(symbol).map(|c| c.ema_alpha_bps).unwrap_or(100);
-            let old_ema = self.mark_price_ema.get(symbol).copied()
+            let alpha = self
+                .configs
+                .get(symbol)
+                .map(|c| c.ema_alpha_bps)
+                .unwrap_or(100);
+            let old_ema = self
+                .mark_price_ema
+                .get(symbol)
+                .copied()
                 .or_else(|| self.mark_prices.get(symbol).copied())
                 .unwrap_or(fill.price);
             let new_ema = ((alpha as i128 * fill.price as i128
-                + (10000 - alpha) as i128 * old_ema as i128) / 10000) as i64;
+                + (10000 - alpha) as i128 * old_ema as i128)
+                / 10000) as i64;
             self.mark_price_ema.insert(symbol.clone(), new_ema);
 
             // Blend with oracle price if available
@@ -370,8 +450,6 @@ impl AppState {
                 new_ema
             };
             self.mark_prices.insert(symbol.clone(), mark);
-            self.mark_globals_dirty();
-
             // Store fill in trade history
             let history = self.trade_history.entry(fill.symbol.clone()).or_default();
             history.push_back(fill.clone());
@@ -414,18 +492,11 @@ impl AppState {
             )));
         }
 
-        // Validate config sanity
-        if config.tick_size <= 0 {
-            return Err(AppError::Unauthorized("tick_size must be > 0".to_string()));
-        }
-        if config.lot_size <= 0 {
-            return Err(AppError::Unauthorized("lot_size must be > 0".to_string()));
-        }
-        if config.min_notional <= 0 {
-            return Err(AppError::Unauthorized("min_notional must be > 0".to_string()));
-        }
+        config.validate_primary_state()?;
         if initial_mark_price <= 0 {
-            return Err(AppError::Unauthorized("initial_mark_price must be > 0".to_string()));
+            return Err(AppError::Unauthorized(
+                "initial_mark_price must be > 0".to_string(),
+            ));
         }
 
         let symbol = config.symbol.clone();
@@ -435,9 +506,8 @@ impl AppState {
 
         // Override mark price and EMA with initial_mark_price
         self.mark_prices.insert(symbol.clone(), initial_mark_price);
-        self.mark_price_ema.insert(symbol.clone(), initial_mark_price);
-
-        self.mark_globals_dirty();
+        self.mark_price_ema
+            .insert(symbol.clone(), initial_mark_price);
 
         tracing::info!(
             symbol = %symbol,
@@ -456,23 +526,47 @@ impl AppState {
         operator: String,
         node_id: crate::types::NodeId,
         bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
         self_stake: i64,
         commission_bps: i64,
     ) -> Result<Vec<Fill>, AppError> {
         // Deduct self-stake from account
-        self.accounts.withdraw(&operator, self_stake)?;
-        self.mark_dirty_account(&operator);
-        self.staking.register_validator(
+        self.accounts.withdraw_hyck(&operator, self_stake)?;
+        let registration = self.staking.register_validator(
             operator.clone(),
             node_id,
             bls_pubkey,
+            bls_proof_of_possession,
+            self.chain_domain,
             self_stake,
             commission_bps,
-        )?;
-        self.mark_globals_dirty(); // Staking state changed
-        self.pending_staking_events.push(
-            staking::StakingTxResult::ValidatorRegistered { operator, node_id },
         );
+        if let Err(error) = registration {
+            // Registration is validated after the account debit so that the
+            // same staking path is used everywhere; invalid PoP must not
+            // consume funds.
+            self.accounts.deposit_hyck(&operator, self_stake).ok();
+            return Err(error.into());
+        }
+        self.pending_staking_events
+            .push(staking::StakingTxResult::ValidatorRegistered { operator, node_id });
+        Ok(vec![])
+    }
+
+    fn execute_rotate_validator_key(
+        &mut self,
+        operator: String,
+        new_bls_pubkey: Vec<u8>,
+        bls_proof_of_possession: Vec<u8>,
+    ) -> Result<Vec<Fill>, AppError> {
+        self.staking.rotate_validator_key(
+            &operator,
+            new_bls_pubkey,
+            bls_proof_of_possession,
+            self.chain_domain,
+        )?;
+        self.pending_staking_events
+            .push(staking::StakingTxResult::ValidatorKeyRotated { operator });
         Ok(vec![])
     }
 
@@ -487,11 +581,14 @@ impl AppState {
             return Err(AppError::from(staking::StakingError::ValidatorNotFound));
         }
         // Deduct delegation amount from account
-        self.accounts.withdraw(&delegator, amount)?;
-        self.mark_dirty_account(&delegator);
-        self.staking
-            .delegate(delegator.clone(), validator.clone(), amount)?;
-        self.mark_globals_dirty(); // Staking state changed
+        self.accounts.withdraw_hyck(&delegator, amount)?;
+        if let Err(error) = self
+            .staking
+            .delegate(delegator.clone(), validator.clone(), amount)
+        {
+            self.accounts.deposit_hyck(&delegator, amount).ok();
+            return Err(error.into());
+        }
         self.pending_staking_events
             .push(staking::StakingTxResult::Delegated {
                 delegator,
@@ -507,13 +604,8 @@ impl AppState {
         validator: String,
         amount: i64,
     ) -> Result<Vec<Fill>, AppError> {
-        self.staking.undelegate(
-            delegator.clone(),
-            validator.clone(),
-            amount,
-            self.timestamp,
-        )?;
-        self.mark_globals_dirty(); // Staking state changed
+        self.staking
+            .undelegate(delegator.clone(), validator.clone(), amount, self.timestamp)?;
         let completion_time = self.timestamp + staking::UNSTAKE_DELAY_MS;
         self.pending_staking_events
             .push(staking::StakingTxResult::Undelegated {
@@ -526,18 +618,18 @@ impl AppState {
     }
 
     fn execute_claim_unstaked(&mut self, delegator: String) -> Result<Vec<Fill>, AppError> {
-        let completions = self.staking.process_unstake_queue(self.timestamp);
-        let mut total_amount = 0i64;
-        for (d, amount) in completions {
-            if d == delegator {
-                // Return funds to account
-                self.accounts.deposit(&d, amount)?;
-                self.mark_dirty_account(&d);
-                total_amount += amount;
-            }
-        }
+        // Preview first. If the account cannot accept the amount, the queue
+        // must remain intact so the claim can be retried after remediation.
+        let total_amount = self
+            .staking
+            .completed_unstake_amount_for(&delegator, self.timestamp)?;
         if total_amount > 0 {
-            self.mark_globals_dirty(); // Staking state changed
+            // Return only this delegator's completed requests to their account.
+            self.accounts.deposit_hyck(&delegator, total_amount)?;
+            let processed_amount = self
+                .staking
+                .process_unstake_queue_for(&delegator, self.timestamp);
+            debug_assert_eq!(processed_amount, total_amount);
         }
         self.pending_staking_events
             .push(staking::StakingTxResult::UnstakeClaimed {
@@ -552,6 +644,15 @@ impl AppState {
         claimant: String,
         validator: Option<String>,
     ) -> Result<Vec<Fill>, AppError> {
+        // Check the destination before clearing staking rewards. This keeps
+        // an overflow from destroying the pending reward amount.
+        let pending_amount = match &validator {
+            Some(val) => self.staking.delegation_pending_rewards(&claimant, val),
+            None => self.staking.validator_pending_rewards(&claimant),
+        };
+        if pending_amount > 0 && self.accounts.hyck_balance(&claimant) > i64::MAX - pending_amount {
+            return Err(crate::app::accounts::AccountError::HyckBalanceOverflow.into());
+        }
         let amount = match &validator {
             Some(val) => {
                 let result = self.staking.claim_delegation_rewards(&claimant, val)?;
@@ -562,11 +663,11 @@ impl AppState {
                 result.amount
             }
         };
-        // Add rewards to account balance
+        // Add rewards to the separate native HYCK liquid balance. The claim
+        // amount was already part of staking state before this transfer, so
+        // this is a move between conservation buckets, not an issuance.
         if amount > 0 {
-            self.accounts.deposit(&claimant, amount)?;
-            self.mark_dirty_account(&claimant);
-            self.mark_globals_dirty(); // Staking state changed
+            self.accounts.deposit_hyck(&claimant, amount)?;
         }
         self.pending_staking_events
             .push(staking::StakingTxResult::RewardsClaimed { claimant, amount });
@@ -575,7 +676,6 @@ impl AppState {
 
     fn execute_unjail(&mut self, operator: String) -> Result<Vec<Fill>, AppError> {
         self.staking.unjail(&operator, self.timestamp)?;
-        self.mark_globals_dirty(); // Staking state changed
         self.pending_staking_events
             .push(staking::StakingTxResult::Unjailed { operator });
         Ok(vec![])
@@ -585,6 +685,7 @@ impl AppState {
         &mut self,
         evidence: staking::Evidence,
     ) -> Result<Vec<Fill>, AppError> {
+        self.staking.set_consensus_genesis_hash(self.chain_domain);
         let offender = evidence.offender;
         self.staking.submit_evidence(evidence)?;
         let results = self.staking.process_pending_evidence();
@@ -593,7 +694,12 @@ impl AppState {
             .filter(|r| r.offender == offender)
             .map(|r| r.total_slashed)
             .sum();
-        self.mark_globals_dirty(); // Staking state changed
+        if slashed_amount > 0 {
+            // Slashed stake is not burned in the fixed-supply ledger. Return
+            // it to the native treasury reserve so conservation is exact.
+            self.accounts
+                .deposit_hyck(staking::HYCK_TREASURY_ADDRESS, slashed_amount)?;
+        }
         self.pending_staking_events
             .push(staking::StakingTxResult::EvidenceProcessed {
                 offender,
@@ -611,6 +717,10 @@ impl AppState {
         sources: Vec<PriceSource>,
         signature: Vec<u8>,
     ) -> Result<Vec<Fill>, AppError> {
+        if !self.configs.contains_key(&symbol) {
+            return Err(AppError::MarketNotFound);
+        }
+
         // Check operator authorization (must be registered validator)
         // Skip check if signature verification is disabled (dev mode)
         // SECURITY: Use Config::global() instead of env var directly to ensure
@@ -635,7 +745,8 @@ impl AppState {
         let mark_price = self.mark_prices.get(&symbol).copied();
 
         // Process the oracle update
-        self.oracle.process_update(&symbol, sources, self.timestamp, mark_price)?;
+        self.oracle
+            .process_update(&symbol, sources, self.timestamp, mark_price)?;
 
         tracing::debug!(
             operator = %operator,
@@ -662,7 +773,9 @@ impl AppState {
         // Parse BLS public key
         if bls_pubkey.len() != 48 {
             return Err(AppError::Oracle(
-                crate::app::oracle::OracleError::InvalidSignature("Invalid BLS pubkey length".into()),
+                crate::app::oracle::OracleError::InvalidSignature(
+                    "Invalid BLS pubkey length".into(),
+                ),
             ));
         }
         let mut pk_arr = [0u8; 48];

@@ -5,17 +5,247 @@
 use crate::app::{
     orderbook::{Fill, Side},
     trigger::{
-        determine_trigger_condition, determine_trigger_side, validate_trigger_price,
-        Cloid, TriggerError, TriggerEvent, TriggerEventType, TriggerOrder, TriggerOrderId,
-        TriggerOrderStatus, TriggerType,
+        determine_trigger_condition, determine_trigger_side, validate_trigger_price, Cloid,
+        TriggerError, TriggerEvent, TriggerEventType, TriggerOrder, TriggerOrderId,
+        TriggerOrderStatus, TriggerOrderValidationError, TriggerType,
     },
     Address, OrderType, Symbol, Transaction,
 };
 use crate::types::Price;
 
-use super::AppState;
+use super::{AppState, CowMap, TriggerIndexError};
+
+type TriggerIndexes = (
+    CowMap<Address, Vec<TriggerOrderId>>,
+    CowMap<Symbol, Vec<TriggerOrderId>>,
+    CowMap<(Address, Symbol, Cloid), TriggerOrderId>,
+);
+
+fn sequence_from_trigger_id(id: &str) -> Option<u64> {
+    let suffix = id.strip_prefix('T')?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok()
+}
+
+fn strict_sequence_from_trigger_id(id: &str) -> Option<u64> {
+    let suffix = id.strip_prefix('T')?;
+    if suffix.is_empty()
+        || suffix == "0"
+        || suffix.starts_with('0')
+        || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    suffix.parse().ok()
+}
+
+fn compare_trigger_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (
+        sequence_from_trigger_id(left),
+        sequence_from_trigger_id(right),
+    ) {
+        (Some(left_sequence), Some(right_sequence)) => left_sequence
+            .cmp(&right_sequence)
+            .then_with(|| left.cmp(right)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
 
 impl AppState {
+    /// Validate the primary trigger-order records without changing state.
+    ///
+    /// Only pending trigger orders are retained in `trigger_orders`; triggered,
+    /// cancelled, and failed orders are removed by `cleanup_trigger_order`.
+    /// Position existence is intentionally not checked here because a position
+    /// may disappear between placement and trigger processing; that path is
+    /// handled deterministically by `execute_trigger`.
+    pub fn validate_trigger_orders(&self) -> Result<(), TriggerOrderValidationError> {
+        let mut seen_cloids = std::collections::HashSet::new();
+        let mut orders: Vec<_> = self.trigger_orders.iter().collect();
+        orders.sort_by(|left, right| compare_trigger_ids(left.0, right.0));
+
+        for (map_id, order) in orders {
+            if map_id != &order.id {
+                return Err(TriggerOrderValidationError::OrderIdMismatch {
+                    map_key: map_id.clone(),
+                    order_id: order.id.clone(),
+                });
+            }
+
+            let sequence = strict_sequence_from_trigger_id(&order.id).ok_or_else(|| {
+                TriggerOrderValidationError::InvalidId {
+                    order_id: order.id.clone(),
+                }
+            })?;
+            if sequence > self.trigger_seq {
+                return Err(TriggerOrderValidationError::SequenceBehind {
+                    order_id: order.id.clone(),
+                    sequence,
+                    trigger_seq: self.trigger_seq,
+                });
+            }
+
+            if order.trader.trim().is_empty() {
+                return Err(TriggerOrderValidationError::EmptyTrader {
+                    order_id: order.id.clone(),
+                });
+            }
+            if order.symbol.trim().is_empty() {
+                return Err(TriggerOrderValidationError::EmptySymbol {
+                    order_id: order.id.clone(),
+                });
+            }
+            if !self.configs.contains_key(&order.symbol) {
+                return Err(TriggerOrderValidationError::MarketNotFound {
+                    order_id: order.id.clone(),
+                    symbol: order.symbol.clone(),
+                });
+            }
+            if !self.orderbooks.contains_key(&order.symbol) {
+                return Err(TriggerOrderValidationError::OrderbookNotFound {
+                    order_id: order.id.clone(),
+                    symbol: order.symbol.clone(),
+                });
+            }
+
+            if let Some(cloid) = &order.cloid {
+                if cloid.trim().is_empty() {
+                    return Err(TriggerOrderValidationError::EmptyCloid {
+                        order_id: order.id.clone(),
+                    });
+                }
+                let key = (order.trader.clone(), order.symbol.clone(), cloid.clone());
+                if !seen_cloids.insert(key) {
+                    return Err(TriggerOrderValidationError::DuplicateCloid {
+                        trader: order.trader.clone(),
+                        symbol: order.symbol.clone(),
+                        cloid: cloid.clone(),
+                    });
+                }
+            }
+
+            if order.size <= 0 {
+                return Err(TriggerOrderValidationError::InvalidSize {
+                    order_id: order.id.clone(),
+                    size: order.size,
+                });
+            }
+            if order.trigger_price <= 0 {
+                return Err(TriggerOrderValidationError::InvalidTriggerPrice {
+                    order_id: order.id.clone(),
+                    price: order.trigger_price,
+                });
+            }
+            if let Some(limit_price) = order.limit_price {
+                if limit_price <= 0 {
+                    return Err(TriggerOrderValidationError::InvalidLimitPrice {
+                        order_id: order.id.clone(),
+                        price: limit_price,
+                    });
+                }
+            }
+            if !order.reduce_only {
+                return Err(TriggerOrderValidationError::NotReduceOnly {
+                    order_id: order.id.clone(),
+                });
+            }
+
+            let position_sign = match order.side {
+                Side::Ask => 1,
+                Side::Bid => -1,
+            };
+            let expected_condition = determine_trigger_condition(position_sign, order.trigger_type);
+            if order.condition != expected_condition {
+                return Err(TriggerOrderValidationError::ConditionMismatch {
+                    order_id: order.id.clone(),
+                    expected: expected_condition,
+                    actual: order.condition,
+                });
+            }
+            if order.status != TriggerOrderStatus::Pending {
+                return Err(TriggerOrderValidationError::InvalidStatus {
+                    order_id: order.id.clone(),
+                    status: order.status,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rebuild all transient trigger-order indexes from the primary order map.
+    ///
+    /// The indexes are replaced only after every order has passed validation,
+    /// so a malformed order cannot leave a partially rebuilt state behind.
+    pub fn rebuild_trigger_indexes(&mut self) -> Result<(), TriggerIndexError> {
+        let (by_trader, by_symbol, by_cloid) = self.build_trigger_indexes()?;
+        self.trigger_orders_by_trader.replace(by_trader);
+        self.trigger_orders_by_symbol.replace(by_symbol);
+        self.trigger_orders_by_cloid.replace(by_cloid);
+        Ok(())
+    }
+
+    /// Validate all trigger-order indexes without mutating application state.
+    pub fn validate_trigger_indexes(&self) -> Result<(), TriggerIndexError> {
+        let (expected_by_trader, expected_by_symbol, expected_by_cloid) =
+            self.build_trigger_indexes()?;
+
+        if self.trigger_orders_by_trader != expected_by_trader
+            || self.trigger_orders_by_symbol != expected_by_symbol
+            || self.trigger_orders_by_cloid != expected_by_cloid
+        {
+            return Err(TriggerIndexError::IndexMismatch);
+        }
+        Ok(())
+    }
+
+    fn build_trigger_indexes(&self) -> Result<TriggerIndexes, TriggerIndexError> {
+        let mut by_trader = CowMap::new();
+        let mut by_symbol = CowMap::new();
+        let mut by_cloid = CowMap::new();
+        let mut orders: Vec<_> = self.trigger_orders.iter().collect();
+        orders.sort_by(|left, right| compare_trigger_ids(left.0, right.0));
+
+        for (id, order) in orders {
+            if id != &order.id {
+                return Err(TriggerIndexError::OrderIdMismatch);
+            }
+
+            let id = id.clone();
+            by_trader
+                .entry(order.trader.clone())
+                .or_insert_with(Vec::new)
+                .push(id.clone());
+            by_symbol
+                .entry(order.symbol.clone())
+                .or_insert_with(Vec::new)
+                .push(id.clone());
+
+            if let Some(cloid) = &order.cloid {
+                let key = (order.trader.clone(), order.symbol.clone(), cloid.clone());
+                if by_cloid.insert(key, id).is_some() {
+                    return Err(TriggerIndexError::DuplicateCloid);
+                }
+            }
+        }
+
+        if self
+            .trigger_orders
+            .keys()
+            .filter_map(|id| sequence_from_trigger_id(id))
+            .max()
+            .is_some_and(|max_id| max_id > self.trigger_seq)
+        {
+            return Err(TriggerIndexError::TriggerSequenceBehind);
+        }
+
+        Ok((by_trader, by_symbol, by_cloid))
+    }
+
     /// Generate next trigger order ID
     fn next_trigger_id(&mut self) -> TriggerOrderId {
         self.trigger_seq += 1;
@@ -26,11 +256,26 @@ impl AppState {
     fn cleanup_trigger_order(&mut self, id: &str) -> Option<TriggerOrder> {
         let order = self.trigger_orders.remove(id)?;
 
-        if let Some(ids) = self.trigger_orders_by_trader.get_mut(&order.trader) {
-            ids.retain(|i| i != id);
+        let remove_trader_index =
+            if let Some(ids) = self.trigger_orders_by_trader.get_mut(&order.trader) {
+                ids.retain(|i| i != id);
+                ids.is_empty()
+            } else {
+                false
+            };
+        if remove_trader_index {
+            self.trigger_orders_by_trader.remove(&order.trader);
         }
-        if let Some(ids) = self.trigger_orders_by_symbol.get_mut(&order.symbol) {
-            ids.retain(|i| i != id);
+
+        let remove_symbol_index =
+            if let Some(ids) = self.trigger_orders_by_symbol.get_mut(&order.symbol) {
+                ids.retain(|i| i != id);
+                ids.is_empty()
+            } else {
+                false
+            };
+        if remove_symbol_index {
+            self.trigger_orders_by_symbol.remove(&order.symbol);
         }
         if let Some(ref cloid) = order.cloid {
             let key = (order.trader.clone(), order.symbol.clone(), cloid.clone());
@@ -54,6 +299,15 @@ impl AppState {
         // Validate market exists
         if !self.configs.contains_key(&symbol) {
             return Err(TriggerError::MarketNotFound);
+        }
+        if size <= 0 {
+            return Err(TriggerError::InvalidSize);
+        }
+        if limit_price.is_some_and(|price| price <= 0) {
+            return Err(TriggerError::InvalidLimitPrice);
+        }
+        if cloid.as_ref().is_some_and(|cloid| cloid.trim().is_empty()) {
+            return Err(TriggerError::InvalidCloid);
         }
 
         // Check for duplicate cloid
@@ -208,7 +462,10 @@ impl AppState {
         let mut all_fills = Vec::new();
 
         // Collect symbols to check (avoid borrow issues)
-        let symbols: Vec<Symbol> = self.mark_prices.keys().cloned().collect();
+        let mut symbols: Vec<Symbol> = self.mark_prices.keys().cloned().collect();
+        // Mark prices are stored in a HashMap.  Canonical symbol order keeps
+        // trigger-generated fills/events independent of insertion order.
+        symbols.sort();
 
         for symbol in symbols {
             let mark_price = match self.mark_prices.get(&symbol) {
@@ -217,7 +474,7 @@ impl AppState {
             };
 
             // Get trigger orders for this symbol that should fire
-            let trigger_ids: Vec<TriggerOrderId> = self
+            let mut trigger_ids: Vec<TriggerOrderId> = self
                 .trigger_orders_by_symbol
                 .get(&symbol)
                 .map(|ids| {
@@ -232,9 +489,14 @@ impl AppState {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Snapshot/recovery or equivalent state construction can rebuild
+            // this index in a different insertion order. Trigger IDs are
+            // stable protocol sequence identifiers, so sort before mutation.
+            trigger_ids.sort_by(|left, right| compare_trigger_ids(left, right));
 
             // Process each triggered order
             for trigger_id in trigger_ids {
+                self.mark_full_state_dirty(super::full_state_hash::COMPONENT_DIRTY_TRIGGERS);
                 if let Some(fills) = self.execute_trigger(&trigger_id, mark_price) {
                     all_fills.extend(fills);
                 }
@@ -245,7 +507,11 @@ impl AppState {
     }
 
     /// Execute a single triggered order
-    fn execute_trigger(&mut self, trigger_id: &TriggerOrderId, mark_price: Price) -> Option<Vec<Fill>> {
+    fn execute_trigger(
+        &mut self,
+        trigger_id: &TriggerOrderId,
+        mark_price: Price,
+    ) -> Option<Vec<Fill>> {
         // Get order details (clone to avoid borrow issues)
         let order = self.trigger_orders.get(trigger_id)?.clone();
 
@@ -334,7 +600,10 @@ impl AppState {
         }
 
         // Get the order ID from the fills (if any)
-        let order_id = fills.first().map(|f| f.maker_order_id.clone()).unwrap_or_default();
+        let order_id = fills
+            .first()
+            .map(|f| f.maker_order_id.clone())
+            .unwrap_or_default();
 
         // Emit triggered event
         self.pending_trigger_events.push(TriggerEvent {

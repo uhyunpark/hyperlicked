@@ -85,9 +85,9 @@ impl OracleFetcher {
         // "BTC-USDT" -> "BTCUSDT" (Binance), "BTC-USDT" (OKX), "BTCUSDT" (Bybit)
         let base = symbol.replace("-", "");
         (
-            base.clone(),           // Binance: BTCUSDT
-            symbol.to_string(),     // OKX: BTC-USDT
-            base,                   // Bybit: BTCUSDT
+            base.clone(),       // Binance: BTCUSDT
+            symbol.to_string(), // OKX: BTC-USDT
+            base,               // Bybit: BTCUSDT
         )
     }
 
@@ -133,10 +133,7 @@ impl OracleFetcher {
     /// Fetch from OKX
     async fn fetch_okx(&self, symbol: &str, timestamp: u64) -> Option<PriceSource> {
         // https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT
-        let url = format!(
-            "https://www.okx.com/api/v5/market/ticker?instId={}",
-            symbol
-        );
+        let url = format!("https://www.okx.com/api/v5/market/ticker?instId={}", symbol);
 
         match self.client.get(&url).send().await {
             Ok(resp) => {

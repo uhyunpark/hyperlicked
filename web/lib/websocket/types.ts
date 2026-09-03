@@ -32,6 +32,26 @@ export interface WSUserFill {
   timestamp: number
 }
 
+/** Durable receipt notification for a signed transaction. */
+export interface WSTransactionFinalized {
+  type: 'transactionFinalized'
+  tx_hash: string
+  block_height: number
+  block_hash: string
+  tx_index: number
+  tx_type: number
+  status: number
+  error_code: number
+  compute_units: number
+  storage_read_bytes: number
+  storage_write_bytes: number
+  events: Array<{
+    event_index: number
+    event_type: number
+    payload_hex: string
+  }>
+}
+
 export interface WSOrderUpdate {
   type: 'orderUpdate'
   orderId: string
@@ -160,10 +180,17 @@ export interface WSSubscribed {
   address: string
 }
 
+export interface WSSubscriptionError {
+  type: 'error'
+  code: string
+  message: string
+}
+
 export type WSMessage =
   | WSOrderbookUpdate
   | WSTradeUpdate
   | WSUserFill
+  | WSTransactionFinalized
   | WSOrderUpdate
   | WSPositionUpdate
   | WSBalanceUpdate
@@ -177,3 +204,4 @@ export type WSMessage =
   | WSMarkPriceUpdate
   | WSAssetCtx
   | WSSubscribed
+  | WSSubscriptionError

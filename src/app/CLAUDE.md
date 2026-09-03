@@ -8,7 +8,7 @@
 | `staking/` | Validator registration, delegation, epochs, slashing |
 | `oracle/` | Multi-source oracle, median aggregation, staleness checks |
 | `market_maker/` | Automated market maker for liquidity |
-| `state/` | AppState: consensus execution, incremental hashing |
+| `state/` | AppState: consensus execution, authenticated schema-v3 state root, and Commitment v2 artifacts |
 | `accounts.rs` | Account balances, nonces, margin calculations |
 | `positions.rs` | Position tracking, PnL, margin requirements |
 | `funding.rs` | Funding rate calculation and payments |

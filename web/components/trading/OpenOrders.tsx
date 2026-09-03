@@ -1,15 +1,27 @@
 'use client'
 
 import { useEffect, useCallback, memo } from 'react'
-import { useTradingStore, useWalletStore } from '@/lib/store'
-import { cancelOrder, getOrders, convertPrice, convertSize } from '@/lib/api'
+import { useTradingStore } from '@/lib/store'
+import { useWallet } from '@/lib/useWallet'
+import {
+  getNonce,
+  getOrders,
+  submitCancelOrder,
+  convertPrice,
+  convertSize,
+} from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
+import {
+  CANONICAL_SIGNATURE_SCHEME,
+  canonicalU64,
+  createCanonicalValidity,
+} from '@/lib/wallet/canonicalAction'
 
 function OpenOrdersInner() {
   const openOrders = useTradingStore((s) => s.openOrders)
   const setOpenOrders = useTradingStore((s) => s.setOpenOrders)
-  const address = useWalletStore((s) => s.address)
-  const isConnected = useWalletStore((s) => s.isConnected)
+  const wallet = useWallet()
+  const { address, isConnected } = wallet
 
   // Fetch orders via REST as fallback (in case WebSocket isn't working)
   const fetchOrders = useCallback(async () => {
@@ -53,19 +65,48 @@ function OpenOrdersInner() {
     return () => clearInterval(interval)
   }, [isConnected, address, fetchOrders])
 
-  const handleCancel = useCallback(async (orderId: string) => {
-    if (!address) {
+  const handleCancel = useCallback(async (orderId: string, symbol: string) => {
+    if (!isConnected || !address) {
       toast.error('Not Connected', 'Please connect your wallet first')
       return
     }
     try {
-      await cancelOrder(orderId, address)
-      toast.success('Order Cancelled', `Order ${orderId} cancelled`)
+      const nonceData = await getNonce(address)
+      const nonce = canonicalU64(nonceData.nonce, 'nonce')
+      const { validAfter, deadline } = createCanonicalValidity()
+      const cancelToSign = {
+        orderId,
+        symbol,
+        nonce,
+        owner: address,
+        validAfter,
+        deadline,
+      }
+      const signature = await wallet.signCanonicalCancel(cancelToSign)
+      const response = await submitCancelOrder({
+        type: 'cancel',
+        cancel: {
+          order_id: orderId,
+          symbol,
+          nonce,
+          owner: address,
+          validAfter,
+          deadline,
+        },
+        signature,
+        signatureScheme: CANONICAL_SIGNATURE_SCHEME,
+      })
+      if (response.status === 'pending') {
+        toast.success(
+          'Cancel Accepted',
+          `Transaction ${response.tx_hash.slice(0, 10)}… is pending`,
+        )
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error'
       toast.error('Cancel Failed', message)
     }
-  }, [address])
+  }, [address, isConnected, wallet.signCanonicalCancel])
 
   return (
     <div className="flex h-full flex-col bg-bg-secondary">
@@ -130,7 +171,7 @@ function OpenOrdersInner() {
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button
-                        onClick={() => handleCancel(order.id)}
+                        onClick={() => handleCancel(order.id, order.symbol)}
                         className="rounded border border-short/30 bg-short/10 px-2 py-1 text-short transition-colors hover:bg-short/20"
                       >
                         Cancel

@@ -51,8 +51,10 @@ export interface ApiPosition {
 }
 
 export interface ApiOrderResponse {
-  status: 'submitted' | 'rejected'
-  orderId: string
+  /** The transaction was admitted to the node and is awaiting finalization. */
+  status: 'pending'
+  /** Canonical signed-envelope hash used to query the finalized receipt. */
+  tx_hash: string
   message?: string
 }
 
@@ -67,16 +69,21 @@ export interface SignedTransaction {
     qty: string       // BigInt as string
     nonce: string     // BigInt as string
     deadline: string  // BigInt as string
+    validAfter?: string // BigInt as string (canonical envelope lower bound)
     leverage: number
     owner: string     // Address
+    reduce_only?: boolean
   }
   cancel?: {
     order_id: string  // Order ID to cancel
     symbol: string
     nonce: string     // BigInt as string
+    deadline?: string // BigInt as string (canonical envelope upper bound)
+    validAfter?: string // BigInt as string (canonical envelope lower bound)
     owner: string     // Address
   }
   signature: string   // Hex-encoded signature
+  signatureScheme?: 'eip712-v1'
   agent_mode?: boolean
   delegation_id?: string
 }
@@ -138,24 +145,8 @@ export async function getOrders(address: string): Promise<ApiOrder[]> {
   return res.json()
 }
 
-// Cancel order with signed transaction (deprecated - use submitSignedTransaction instead)
-export async function cancelOrder(orderId: string, address: string): Promise<{ status: string }> {
-  const res = await fetch(`${API_BASE}/orders/cancel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ orderId, address })
-  })
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(error.message || error.error || 'Failed to cancel order')
-  }
-
-  return res.json()
-}
-
-// Submit a signed cancel transaction (EIP-712 format)
-export async function submitCancelOrder(signedCancel: SignedTransaction): Promise<{ status: string; orderId: string }> {
+// Submit a canonical signed cancel transaction.
+export async function submitCancelOrder(signedCancel: SignedTransaction): Promise<ApiOrderResponse> {
   if (signedCancel.type !== 'cancel') {
     throw new Error('Transaction type must be "cancel"')
   }
@@ -361,7 +352,8 @@ export async function getInsuranceFund(): Promise<ApiInsuranceFund> {
 
 export interface ApiNonce {
   address: string
-  nonce: number
+  /** Nodes may encode u64 nonces as JSON numbers or decimal strings. */
+  nonce: number | string
 }
 
 export async function getNonce(address: string): Promise<ApiNonce> {
@@ -396,9 +388,12 @@ export interface PlaceTriggerOrderRequest {
     limitPrice: string    // BigInt as string (0 = no limit)
     nonce: string         // BigInt as string
     owner: string         // Address
+    deadline?: string     // BigInt as string (canonical envelope upper bound)
+    validAfter?: string   // BigInt as string (canonical envelope lower bound)
     cloid?: string
   }
   signature: string
+  signatureScheme?: 'eip712-v1'
   agent_mode?: boolean
   delegation_id?: string
 }
@@ -409,16 +404,21 @@ export interface CancelTriggerOrderRequest {
     symbol?: string
     nonce: string  // BigInt as string
     owner: string  // Address
+    deadline?: string // BigInt as string (canonical envelope upper bound)
+    validAfter?: string // BigInt as string (canonical envelope lower bound)
     cloid?: string
   }
   signature: string
+  signatureScheme?: 'eip712-v1'
   agent_mode?: boolean
   delegation_id?: string
 }
 
 export interface PlaceTriggerOrderResponse {
-  status: string
-  triggerOrderId: string
+  /** The transaction was admitted to the node and is awaiting finalization. */
+  status: 'pending'
+  /** Canonical signed-envelope hash used to query the finalized receipt. */
+  tx_hash: string
 }
 
 export async function getTriggerOrders(address: string): Promise<ApiTriggerOrder[]> {
@@ -442,7 +442,7 @@ export async function placeTriggerOrder(req: PlaceTriggerOrderRequest): Promise<
   return res.json()
 }
 
-export async function cancelTriggerOrder(req: CancelTriggerOrderRequest): Promise<{ status: string }> {
+export async function cancelTriggerOrder(req: CancelTriggerOrderRequest): Promise<PlaceTriggerOrderResponse> {
   const res = await fetch(`${API_BASE}/trigger-orders/cancel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -495,6 +495,44 @@ export interface ApiChainStatus {
   view: number
   validators: number
   epoch: number
+}
+
+/** Minimal block response needed to derive the canonical signing domain. */
+export interface ApiBlockDomain {
+  genesisHash: string
+}
+
+let canonicalChainDomainPromise: Promise<string> | null = null
+
+/**
+ * Fetch a committed block from the node's canonical sync API.
+ * The genesis hash is the application chain domain used by EIP-712 v1.
+ */
+export async function getBlockByHeight(height: number): Promise<ApiBlockDomain> {
+  const res = await fetch(`${API_BASE}/sync/block/${height}`)
+  if (!res.ok) throw new Error(`Failed to fetch block ${height}: ${res.statusText}`)
+  return res.json()
+}
+
+/** Return the live node's 32-byte chain domain as an EIP-712 bytes32 value. */
+export async function getCanonicalChainDomain(): Promise<string> {
+  if (!canonicalChainDomainPromise) {
+    canonicalChainDomainPromise = getBlockByHeight(0)
+      .then((block) => {
+        const genesisHash = block.genesisHash.trim()
+        if (!/^[0-9a-fA-F]{64}$/.test(genesisHash)) {
+          throw new Error('Node returned an invalid genesisHash; canonical signing is unavailable')
+        }
+        return `0x${genesisHash.toLowerCase()}`
+      })
+      .catch((error) => {
+        // A transient node/API failure must not permanently poison future
+        // signing attempts; a valid domain itself remains immutable.
+        canonicalChainDomainPromise = null
+        throw error
+      })
+  }
+  return canonicalChainDomainPromise
 }
 
 export async function getChainStatus(): Promise<ApiChainStatus | null> {

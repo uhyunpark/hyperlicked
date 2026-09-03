@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# PUBLIC DEVELOPMENT-ONLY market-maker fixture. Never use it with real funds.
+export MODE=dev
+export MM_NODE_URL="${MM_NODE_URL:-http://127.0.0.1:8080}"
+export MM_SEED="${MM_SEED:-12345}"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
+cd "${repo_root}"
+
+# Keep an explicit CLI value authoritative when callers provide one.
+has_node_url=false
+has_seed=false
+for arg in "$@"; do
+  case "${arg}" in
+    --node-url|--node-url=*)
+      has_node_url=true
+      break
+      ;;
+  esac
+  case "${arg}" in
+    --seed|--seed=*)
+      has_seed=true
+      ;;
+  esac
+done
+
+if [[ "${has_node_url}" == false ]]; then
+  set -- --node-url "${MM_NODE_URL}" "$@"
+fi
+if [[ "${has_seed}" == false ]]; then
+  set -- --seed "${MM_SEED}" "$@"
+fi
+
+exec env MODE=dev MM_NODE_URL="${MM_NODE_URL}" MM_SEED="${MM_SEED}" \
+  cargo run --locked --bin hl-mm -- "$@"

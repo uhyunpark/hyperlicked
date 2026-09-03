@@ -66,8 +66,7 @@ pub fn calculate_confidence(sources: &[PriceSource], median_price: Price) -> i64
         .map(|s| {
             let diff = (s.price - median_price).abs();
             // deviation_bps = (diff / median_price) * 10000
-            ((diff as i128 * 10000) / median_price as i128)
-                .clamp(0, i64::MAX as i128) as i64
+            ((diff as i128 * 10000) / median_price as i128).clamp(0, i64::MAX as i128) as i64
         })
         .max()
         .unwrap_or(0);
@@ -79,7 +78,11 @@ pub fn calculate_confidence(sources: &[PriceSource], median_price: Price) -> i64
 /// Filter out stale price sources.
 ///
 /// Returns only sources whose timestamp is within max_age_ms of current_time.
-pub fn filter_stale(sources: &[PriceSource], current_time: u64, max_age_ms: u64) -> Vec<PriceSource> {
+pub fn filter_stale(
+    sources: &[PriceSource],
+    current_time: u64,
+    max_age_ms: u64,
+) -> Vec<PriceSource> {
     sources
         .iter()
         .filter(|s| current_time.saturating_sub(s.timestamp) <= max_age_ms)
@@ -98,8 +101,8 @@ pub fn check_deviation(oracle_price: Price, reference_price: Price, max_bps: i64
     let diff = (oracle_price - reference_price).abs();
     // SECURITY: Use i128 to prevent overflow with large price differences
     // deviation_bps = (diff / reference_price) * 10000
-    let deviation_bps = ((diff as i128 * 10000) / reference_price as i128)
-        .clamp(0, i64::MAX as i128) as i64;
+    let deviation_bps =
+        ((diff as i128 * 10000) / reference_price as i128).clamp(0, i64::MAX as i128) as i64;
 
     deviation_bps > max_bps
 }
@@ -205,7 +208,7 @@ mod tests {
     fn test_check_deviation() {
         // 5% deviation (500 bps)
         assert!(!check_deviation(5_250_000, 5_000_000, 1000)); // Under 10% threshold
-        assert!(check_deviation(5_600_000, 5_000_000, 1000));  // Over 10% threshold
+        assert!(check_deviation(5_600_000, 5_000_000, 1000)); // Over 10% threshold
 
         // Edge case: zero prices
         assert!(!check_deviation(0, 5_000_000, 1000));

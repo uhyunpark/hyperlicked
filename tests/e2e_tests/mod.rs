@@ -22,21 +22,21 @@ pub mod helpers;
 
 // Phase 1: Core Trading
 pub mod accounts_test;
-pub mod orders_test;
 pub mod matching_test;
+pub mod orders_test;
 pub mod positions_test;
 
 // Phase 2: Risk Management
-pub mod liquidation_test;
 pub mod funding_test;
+pub mod liquidation_test;
 pub mod triggers_test;
 
 // Phase 3: Staking & Integration
-pub mod staking_test;
 pub mod integration_test;
 pub mod oracle_test;
+pub mod staking_test;
 
 // Phase 4: Advanced Features
 pub mod add_market_test;
-pub mod staking_advanced_test;
 pub mod risk_limits_test;
+pub mod staking_advanced_test;

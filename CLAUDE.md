@@ -26,12 +26,13 @@ src/
 ├── consensus/    # HotStuff-2 engine, pacemaker, safety, aggregator
 ├── app/          # Exchange logic: orderbook, accounts, staking, oracle, funding, liquidation
 ├── crypto/       # BLS, EIP-712, ECDSA, agent keys
+├── market_maker_service/ # Dev-only external signed transaction client
 ├── api/          # axum REST + WebSocket routes
 ├── network/      # TCP transport, gossip, sync
 ├── storage/      # RocksDB persistence, snapshots, recovery
 ├── types/        # Block, Vote, Certificate, config types
 ├── visor/        # Process supervisor: binary upgrades, health checks (hl-visor)
-└── bin/          # hl-server, hl-node, hl-visor, multinode
+└── bin/          # hl-node, hl-visor, multinode
 web/              # Next.js trading frontend
 tests/            # Integration + E2E tests
 docs/             # Architecture decisions, roadmap
@@ -40,7 +41,10 @@ docs/             # Architecture decisions, roadmap
 ## Commands
 
 ```bash
-cargo run --bin hl-server              # API server + consensus (port 8080)
+./scripts/local-node                    # Canonical local N=1 node: consensus + REST + WebSocket
+./scripts/local-mm                      # Optional separate dev/showcase liquidity service
+RUST_LOG=info ./scripts/local-node      # Same node with consensus progress logs
+curl -s http://127.0.0.1:8080/api/v1/chain/status  # Check committed height
 cargo test                             # All tests
 cargo test --test e2e                  # E2E integration tests
 cd web && bun run dev                  # Frontend dev server

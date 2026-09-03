@@ -23,9 +23,13 @@ use hyperlicked::crypto::bls::BlsSecretKey;
 use hyperlicked::network::{MockNetwork, Network, SyncClient, SyncHandler};
 use hyperlicked::storage::{ConsensusState, PersistentStore, RocksDbStore};
 use hyperlicked::types::{
-    hash_short, Block, Certificate, ConsensusConfig, Hash, Message, Prepare, Propose,
-    SyncRequest, Vote, View,
+    hash_short, Block, Certificate, ConsensusConfig, ConsensusContext, Hash, Message, Prepare,
+    Propose, SyncRequest, View, Vote,
 };
+
+fn test_context() -> ConsensusContext {
+    ConsensusContext::new(0, [0u8; 32])
+}
 
 // =============================================================================
 // Test Infrastructure
@@ -49,7 +53,8 @@ struct TestNode {
 impl TestNode {
     fn new(config: ConsensusConfig, network: MockNetwork) -> Self {
         let store = MemoryBlockStore::new();
-        let genesis = Block::genesis();
+        let context = config.context().expect("test config must have a context");
+        let genesis = Block::genesis(context);
         store.save(&genesis);
         store.set_committed(&genesis.hash());
 
@@ -84,7 +89,13 @@ impl TestNode {
                 return block;
             }
         }
-        self.store.get_by_height(0).unwrap_or_else(Block::genesis)
+        self.store.get_by_height(0).unwrap_or_else(|| {
+            Block::genesis(
+                self.config
+                    .context()
+                    .expect("test config must have a context"),
+            )
+        })
     }
 
     async fn run_leader_round(&mut self) -> anyhow::Result<Option<Block>> {
@@ -96,12 +107,20 @@ impl TestNode {
             .unwrap();
 
         let justify = self.safety.high_qc().cloned();
+        let context = self
+            .config
+            .context()
+            .expect("test config must have a context");
         let mut block = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view,
             height: parent.height + 1,
             parent: parent.hash(),
             payload,
             proposer: self.config.node_id,
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: now.as_millis() as u64,
             justify: justify.clone(),
@@ -114,13 +133,23 @@ impl TestNode {
 
         // Broadcast proposal
         let propose = Propose {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             block: block.clone(),
             justify,
+            proposer_signature: vec![],
         };
         self.network.broadcast_propose(propose).await?;
 
         // Self-vote
-        let self_vote = Vote::new(view, block_hash, block.app_hash, self.config.node_id);
+        let self_vote = Vote::new(
+            context,
+            view,
+            block_hash,
+            block.app_hash,
+            self.config.node_id,
+        );
         self.votes.entry(block_hash).or_default().push(self_vote);
 
         // Collect votes
@@ -130,8 +159,12 @@ impl TestNode {
             .await;
 
         if votes.len() >= quorum {
-            let qc = Certificate::new(view, block_hash, votes);
+            let qc =
+                Certificate::new(context, view, block_hash, votes).map_err(anyhow::Error::msg)?;
             let prepare = Prepare {
+                epoch: qc.epoch,
+                committee_hash: qc.committee_hash,
+                genesis_hash: qc.genesis_hash,
                 view,
                 qc: qc.clone(),
             };
@@ -162,7 +195,7 @@ impl TestNode {
 
         // Execute and vote
         if let Some(vote) = self.process_proposal(propose) {
-            let leader = self.config.leader_of(view);
+            let leader = self.config.leader_of_active(view);
             let _ = self.network.send_vote(leader, vote).await;
         }
 
@@ -263,7 +296,15 @@ impl TestNode {
             self.safety.update_high_qc(justify);
         }
 
-        Some(Vote::new(view, block.hash(), local_app_hash, self.config.node_id))
+        Some(Vote::new(
+            self.config
+                .context()
+                .expect("test config must have a context"),
+            view,
+            block.hash(),
+            local_app_hash,
+            self.config.node_id,
+        ))
     }
 
     fn process_prepare(&mut self, prepare: Prepare) {
@@ -355,8 +396,11 @@ fn create_test_configs(node_ids: &[[u8; 32]]) -> Vec<ConsensusConfig> {
     node_ids
         .iter()
         .map(|&node_id| ConsensusConfig {
+            epoch: 0,
+            genesis_hash: [0u8; 32],
             node_id,
             validators: node_ids.to_vec(),
+            voting_powers: vec![1; node_ids.len()],
             view_timeout_ms: 500,
             bls_pubkeys: vec![],
             bls_secret_key: None,
@@ -377,7 +421,10 @@ fn create_bls_configs(node_ids: &[[u8; 32]]) -> Vec<ConsensusConfig> {
         })
         .collect();
 
-    let pubkeys: Vec<Vec<u8>> = keys.iter().map(|k| k.public_key().to_bytes().to_vec()).collect();
+    let pubkeys: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|k| k.public_key().to_bytes().to_vec())
+        .collect();
 
     node_ids
         .iter()
@@ -388,8 +435,11 @@ fn create_bls_configs(node_ids: &[[u8; 32]]) -> Vec<ConsensusConfig> {
             seed[31] = 0xBE;
 
             ConsensusConfig {
+                epoch: 0,
+                genesis_hash: [0u8; 32],
                 node_id,
                 validators: node_ids.to_vec(),
+                voting_powers: vec![1; node_ids.len()],
                 view_timeout_ms: 500,
                 bls_pubkeys: pubkeys.clone(),
                 bls_secret_key: Some(seed),
@@ -451,7 +501,9 @@ async fn test_locked_qc_updates_on_qc_chain() {
             assert!(
                 locked_view < high_view,
                 "Node {}: locked_qc view ({}) should be less than high_qc view ({})",
-                i, locked_view, high_view
+                i,
+                locked_view,
+                high_view
             );
         }
     }
@@ -467,9 +519,13 @@ async fn test_locked_qc_updates_on_qc_chain() {
 async fn test_locking_prevents_conflicting_votes() {
     let node_id = [1u8; 32];
     let mut safety = Safety::new();
+    let context = test_context();
 
     // Create a "locked" QC at view 5
     let locked_qc = Certificate {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 5,
         block_hash: [1u8; 32],
         votes: vec![],
@@ -482,6 +538,9 @@ async fn test_locking_prevents_conflicting_votes() {
 
     // Create high_qc at view 6
     let high_qc = Certificate {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 6,
         block_hash: [2u8; 32],
         votes: vec![],
@@ -494,11 +553,15 @@ async fn test_locking_prevents_conflicting_votes() {
 
     // Try to vote for a block at view 4 (before lock) - should fail
     let bad_block = Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 4,
         height: 1,
         parent: [0u8; 32],
         payload: vec![],
         proposer: node_id,
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 0,
         justify: None,
@@ -512,11 +575,15 @@ async fn test_locking_prevents_conflicting_votes() {
 
     // Try to vote for a block at view 7 (after lock, extends high_qc) - should succeed
     let good_block = Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 7,
         height: 2,
         parent: high_qc.block_hash,
         payload: vec![],
         proposer: node_id,
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 0,
         justify: Some(high_qc),
@@ -555,6 +622,9 @@ async fn test_voted_views_persistence_prevents_double_vote() {
     safety.record_vote(7);
 
     let state = ConsensusState {
+        epoch: 0,
+        committee_hash: [0u8; 32],
+        genesis_hash: [0u8; 32],
         high_qc: None,
         locked_qc: None,
         voted_views: safety.voted_views(),
@@ -573,14 +643,19 @@ async fn test_voted_views_persistence_prevents_double_vote() {
         loaded_state.locked_qc,
         &loaded_state.voted_views,
     );
+    let context = test_context();
 
     // Phase 3: Try to vote in views we already voted in - should fail
     let block_v5 = Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 5,
         height: 1,
         parent: [0u8; 32],
         payload: vec![],
         proposer: [1u8; 32],
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 0,
         justify: None,
@@ -593,8 +668,14 @@ async fn test_voted_views_persistence_prevents_double_vote() {
     );
 
     // Should also reject view 6 and 7
-    let block_v6 = Block { view: 6, ..block_v5.clone() };
-    let block_v7 = Block { view: 7, ..block_v5.clone() };
+    let block_v6 = Block {
+        view: 6,
+        ..block_v5.clone()
+    };
+    let block_v7 = Block {
+        view: 7,
+        ..block_v5.clone()
+    };
 
     assert!(
         recovered_safety.safe_to_vote(&block_v6, [0u8; 32]).is_err(),
@@ -606,7 +687,10 @@ async fn test_voted_views_persistence_prevents_double_vote() {
     );
 
     // But should allow voting in a new view
-    let block_v8 = Block { view: 8, ..block_v5.clone() };
+    let block_v8 = Block {
+        view: 8,
+        ..block_v5.clone()
+    };
     assert!(
         recovered_safety.safe_to_vote(&block_v8, [0u8; 32]).is_ok(),
         "Should allow vote in new view 8"
@@ -622,7 +706,11 @@ async fn test_full_consensus_state_recovery() {
     let store = RocksDbStore::open(temp_dir.path()).unwrap();
 
     // Create state with high_qc and locked_qc
+    let context = test_context();
     let high_qc = Certificate {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 10,
         block_hash: [1u8; 32],
         votes: vec![],
@@ -632,6 +720,9 @@ async fn test_full_consensus_state_recovery() {
         app_hash: Some([0u8; 32]),
     };
     let locked_qc = Certificate {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 9,
         block_hash: [2u8; 32],
         votes: vec![],
@@ -642,6 +733,9 @@ async fn test_full_consensus_state_recovery() {
     };
 
     let state = ConsensusState {
+        epoch: 0,
+        committee_hash: [0u8; 32],
+        genesis_hash: [0u8; 32],
         high_qc: Some(high_qc.clone()),
         locked_qc: Some(locked_qc.clone()),
         voted_views: vec![8, 9, 10],
@@ -663,11 +757,7 @@ async fn test_full_consensus_state_recovery() {
     assert_eq!(loaded.committed_height, 5);
 
     // Recover Safety and verify
-    let safety = Safety::with_state(
-        loaded.high_qc,
-        loaded.locked_qc,
-        &loaded.voted_views,
-    );
+    let safety = Safety::with_state(loaded.high_qc, loaded.locked_qc, &loaded.voted_views);
 
     assert_eq!(safety.high_qc().map(|q| q.view), Some(10));
     assert_eq!(safety.locked_qc().map(|q| q.view), Some(9));
@@ -743,7 +833,10 @@ async fn test_duplicate_timeout_rejected() {
 
     // Try to add same timeout again
     let result2 = collector.add(timeout1);
-    assert!(result2.is_err(), "Should reject duplicate timeout from same sender");
+    assert!(
+        result2.is_err(),
+        "Should reject duplicate timeout from same sender"
+    );
 
     println!("Duplicate timeout rejection test passed!");
 }
@@ -803,12 +896,21 @@ async fn test_sync_handler_responds_to_requests() {
 
     // Store some blocks
     for i in 0..5 {
+        let context = test_context();
         let block = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: i * 2,
             height: i,
-            parent: if i == 0 { [0u8; 32] } else { [(i - 1) as u8; 32] },
+            parent: if i == 0 {
+                [0u8; 32]
+            } else {
+                [(i - 1) as u8; 32]
+            },
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: [0u8; 32],
             app_hash: [i as u8; 32],
             timestamp: 1000 + i,
             justify: None,
@@ -832,7 +934,10 @@ async fn test_sync_handler_responds_to_requests() {
     assert_eq!(response.request_id, 1);
     assert_eq!(response.peer_height, 4);
     // Should return blocks 2, 3, 4
-    assert!(response.blocks.len() >= 1, "Should return at least one block");
+    assert!(
+        response.blocks.len() >= 1,
+        "Should return at least one block"
+    );
 
     println!(
         "SyncHandler returned {} blocks, peer_height={}",
@@ -872,7 +977,10 @@ async fn test_sync_client_progress_tracking() {
         peer_height: 150,
         has_more: false,
     };
-    assert!(!client.needs_more(&response_done), "Should not need more when caught up");
+    assert!(
+        !client.needs_more(&response_done),
+        "Should not need more when caught up"
+    );
 
     let response_more = hyperlicked::types::SyncResponse {
         request_id: 0,
@@ -880,7 +988,10 @@ async fn test_sync_client_progress_tracking() {
         peer_height: 200,
         has_more: false,
     };
-    assert!(client.needs_more(&response_more), "Should need more when behind peer");
+    assert!(
+        client.needs_more(&response_more),
+        "Should need more when behind peer"
+    );
 
     println!("SyncClient progress tracking test passed!");
 }
@@ -904,12 +1015,17 @@ async fn test_late_node_catches_up_via_sync() {
             h
         };
 
+        let context = test_context();
         let block = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: i * 2,
             height: i,
             parent,
             payload: vec![],
             proposer: [1u8; 32],
+            commitment_root: [0u8; 32],
             app_hash: [i as u8; 32],
             timestamp: 1000 + i,
             justify: None,
@@ -941,7 +1057,10 @@ async fn test_late_node_catches_up_via_sync() {
     // Check if we need more
     if client.needs_more(&response) {
         let request2 = client.create_sync_request();
-        println!("Need more blocks, requesting from height {}", request2.from_height);
+        println!(
+            "Need more blocks, requesting from height {}",
+            request2.from_height
+        );
     }
 
     println!("Late node catchup test passed!");
@@ -983,7 +1102,10 @@ async fn test_full_consensus_with_all_gaps() {
     {
         let node0 = nodes[0].lock().await;
         let voted = node0.safety.voted_views();
-        assert!(!voted.is_empty(), "Gap 2 failed: Should have recorded votes");
+        assert!(
+            !voted.is_empty(),
+            "Gap 2 failed: Should have recorded votes"
+        );
         println!("Node 0 voted in {} views", voted.len());
     }
 

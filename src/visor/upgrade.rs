@@ -163,7 +163,11 @@ impl UpgradeManager {
 
         let binary_path = version_dir.join(&self.config.daemon_name);
 
-        info!("Downloading {} to {}", binary_info.url, binary_path.display());
+        info!(
+            "Downloading {} to {}",
+            binary_info.url,
+            binary_path.display()
+        );
 
         // Download the binary
         let response = reqwest::get(&binary_info.url)
@@ -232,7 +236,10 @@ impl UpgradeManager {
             .unwrap_or_else(|| self.config.daemon_home.join("visor/pub_key.asc"));
 
         if !pubkey_path.exists() {
-            warn!("No public key found at {}, skipping verification", pubkey_path.display());
+            warn!(
+                "No public key found at {}, skipping verification",
+                pubkey_path.display()
+            );
             return Ok(());
         }
 

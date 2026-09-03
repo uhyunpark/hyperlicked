@@ -1,5 +1,61 @@
 # Blockchain Roadmap
 
+> **Audited status — not mainnet readiness:** The historical ✅ marks below record feature
+> presence in this development repository. They are not production assurance, independent
+> audit results, or launch approval. See [Mainnet readiness](MAINNET_READINESS.md) for the
+> current architecture audit and required gates. This roadmap's history is intentionally
+> preserved.
+
+## 2026-08-11 P0 current-state override
+
+The historical checkmarks below are feature-history markers, not claims about the current
+canonical runtime or launch readiness. The current P0 implementation has added chain/genesis
+domain binding, EIP-712 canonical envelopes, schema-v2 BLS PoP and next-epoch key-rotation
+recording, RocksDB atomic durable commit/recovery, gossip pre-relay admission with proposer BLS,
+and verified-download-only ActiveSync. The runner remains `MODE=dev` only and is **NOT MAINNET
+READY**. Verified import/snapshot, indexer proof serving, epoch transition/historical
+committee, bridge proof, operations, and independent audits remain launch gates; see
+[P0 worklog](WORKLOG_2026-08-11_P0_MAINNET_HARDENING.md).
+
+The local runtime now authenticates the deterministic Commitment v2 artifact containing ordered
+receipts and transaction/system events. Its combined root is the dedicated
+`Block.commitment_root`, which is covered by the block hash, proposer signature, votes, and QCs
+without changing the state-root meaning of `app_hash`. See the
+[activation worklog](WORKLOG_2026-08-21_COMMITMENT_V2_CONSENSUS_ACTIVATION.md).
+
+The consensus-authenticated full-state root now uses a fixed nine-component schema v5 tree.
+`Block.app_hash`, the V5 block hash, proposer signatures, votes, and QCs bind this root.
+Orderbook/staking/
+trigger derived indexes are rebuilt atomically at snapshot/import boundaries and validated after
+block execution, so the root commits only their authoritative primary records. See the
+[derived-index invariant worklog](WORKLOG_2026-08-13_DERIVED_INDEX_INVARIANTS.md) and
+[component-tree worklog](WORKLOG_2026-08-13_COMPONENT_TREE_SHADOW.md).
+
+Primary semantic validation now covers market/orderbook/account/staking/trigger/oracle/funding
+records at snapshot import, speculative execution, and private replay boundaries. Invalid state
+cannot become a candidate, and snapshot validator PoP is rechecked against the trusted node chain
+domain. See the [primary-state invariant worklog](WORKLOG_2026-08-13_PRIMARY_STATE_INVARIANTS.md).
+
+Snapshot storage/import and HTTP/P2P block sync now have explicit byte budgets. Sync responders
+read only the requested committed height window, page before exceeding the 32 MiB wire/HTTP cap,
+and TCP rejects oversized frames before allocation. Snapshot fast-sync remains disabled until a
+verified chunk manifest/proof protocol replaces the current bounded single JSON object. See the
+[resource-limit worklog](WORKLOG_2026-08-13_SNAPSHOT_SYNC_RESOURCE_LIMITS.md).
+
+The divergent legacy `incremental_hash` Cargo feature and its incomplete dirty cache have been
+removed. Every build now uses the schema-v3 component root as `Block.app_hash`; the block hash
+domain is V5 and genesis domain V3 additionally binds Commitment v2 schema/version. See the
+[legacy incremental-hash removal worklog](WORKLOG_2026-08-13_LEGACY_INCREMENTAL_HASH_REMOVAL.md).
+The component layout and domains are recorded in the
+[component-tree shadow worklog](WORKLOG_2026-08-13_COMPONENT_TREE_SHADOW.md).
+The canonical candidate path derives only invalidated leaves from a sealed parent
+tree; new, unknown, chain-domain-mismatched, and recovery states fall back to all nine leaves.
+Preflight and direct commit independently recompute the complete tree and fail closed on any
+candidate mismatch. Dirty derivation remains only an optimization; fresh preflight/commit
+verification is the safety oracle before the authenticated root is voted or persisted.
+Speculative restart replay also requires the exact trusted committed-head hash and stages the
+whole branch before publishing candidates, preventing anchor substitution and partial recovery.
+
 ## Current Status
 
 ### Completed
@@ -117,7 +173,7 @@ Additional improvements from comprehensive blockchain expert review:
 - **RPC Node Sync** ✅ - Observer mode with QC verification, sync API endpoints
 - **Staking Foundation** ✅ - Epoch transitions, validator sets, jailing, slashing
 - **Real-time Streaming** ✅ - Trigger order events, enhanced position updates, order history streaming
-- **Market Maker** ✅ - Dev mode artificial liquidity with multiple strategies
+- **Market Maker** ✅ - Separate dev-only `hl-mm` service submitting canonical signed transactions
 - **Oracle Fetcher** ✅ - Background CEX price fetching (Binance, etc.)
 - **Trigger Orders (TP/SL)** ✅ - Stop-loss and take-profit with real-time events
 - **ADL System** ✅ - Auto-deleverage when insurance fund insufficient
@@ -152,7 +208,7 @@ Additional improvements from comprehensive blockchain expert review:
 - ✅ Persist blocks and consensus state on every commit
 - ✅ Periodic app state snapshots (configurable interval)
 - ✅ Recovery from snapshot + block replay on startup
-- Set `DATA_DIR=/path` to enable persistence
+- `hl-node` uses RocksDB by default; use `--data-dir /path` to select an isolated directory
 
 ### P1: Consensus Hardening ✅
 
@@ -245,8 +301,10 @@ External price fetching service:
 Artificial liquidity for development:
 - ✅ Configurable intensity presets (low/medium/high)
 - ✅ Multiple trading strategies (market making, trend following, mean reversion)
-- ✅ Deterministic account generation from seed
-- ✅ Oracle price reference for realistic spreads
+- ✅ Deterministic signer-derived secp256k1 development accounts
+- ✅ Canonical EIP-712 order/cancel submission through one validator API
+- ✅ Finalized-receipt waiting, nonce refresh, bounded rate/retry/open-order limits
+- ✅ Oracle price reference with local mark-price fallback
 
 #### Real-time WebSocket Streaming ✅
 Enhanced event streaming:

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# PUBLIC DEVELOPMENT-ONLY validator0 fixture seed. Never use this seed in production.
+export HL_LOCAL_BLS_SEED_1=01000000000000000000000000000000000000000000000000000000000000be
+export RUST_LOG=${RUST_LOG:-warn}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
+cd "${repo_root}"
+
+exec env MODE=dev cargo run --locked --bin hl-node -- \
+  --genesis "${repo_root}/config/local/single-genesis.json" \
+  --config "${repo_root}/config/local/host-single/node.json" \
+  "$@"

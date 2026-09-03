@@ -131,7 +131,9 @@ impl ProcessManager {
 
         // Add validator flag if needed
         if self.is_validator {
-            // The actual validator flag will depend on hl-server implementation
+            // The canonical hl-node runtime receives validator configuration via
+            // its node config and daemon_args; retain the supervisor marker for
+            // compatibility with existing local configurations.
             cmd.env("VALIDATOR_MODE", "true");
         }
 

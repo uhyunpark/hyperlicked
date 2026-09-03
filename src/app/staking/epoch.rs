@@ -33,18 +33,30 @@ impl StakingState {
     /// It processes:
     /// 1. Liveness-based jailing
     /// 2. Reward distribution
-    /// 3. Unstake queue processing
+    /// 3. Active-set computation
     /// 4. New active set computation
-    pub fn transition_epoch(
-        &mut self,
-        view: u64,
-        timestamp: u64,
-    ) -> EpochTransitionResult {
+    pub fn transition_epoch(&mut self, view: u64, timestamp: u64) -> EpochTransitionResult {
+        // `transition_epoch` predates the fallible reward API.  Preserve its
+        // public result type while making a timestamp regression fail closed:
+        // no liveness, reward, stake, or epoch fields are changed.
+        if self.reward_clock_initialized && timestamp < self.last_reward_accrual_timestamp {
+            return EpochTransitionResult {
+                epoch: self.current_epoch,
+                new_active_set: Vec::new(),
+                jailed: Vec::new(),
+                rewards: Vec::new(),
+                unstake_completions: Vec::new(),
+                validator_set_update: None,
+            };
+        }
         let new_epoch = self.current_epoch + 1;
         let mut result = EpochTransitionResult {
             epoch: new_epoch,
             new_active_set: Vec::new(),
             jailed: Vec::new(),
+            // Reward ticks are invoked once per committed block by the
+            // application execution path; keeping epoch rotation free of a
+            // second tick prevents duplicate accounting.
             rewards: Vec::new(),
             unstake_completions: Vec::new(),
             validator_set_update: None,
@@ -55,12 +67,13 @@ impl StakingState {
             result.jailed = self.process_liveness(timestamp);
         }
 
-        // 2. Distribute rewards
-        result.rewards = self.distribute_rewards();
-
-        // 3. Process unstake queue
-        let completions = self.process_unstake_queue(timestamp);
-        result.unstake_completions = completions;
+        // 3. Matured unstakes remain in the per-delegator queue until the
+        // delegator explicitly submits `ClaimUnstaked`.  Claiming is an
+        // application-level liquid HYCK transfer and must be atomic with the
+        // account credit; draining the queue here would make an account
+        // overflow (or any other credit failure) burn the unbonded funds.
+        // Keep `unstake_completions` empty for compatibility with the result
+        // type; no epoch transition owns those funds.
 
         // 4. Compute new active set
         result.new_active_set = self.compute_active_set(timestamp);
@@ -109,46 +122,6 @@ impl StakingState {
         }
 
         jailed
-    }
-
-    /// Distribute rewards from the pool
-    fn distribute_rewards(&mut self) -> Vec<(NodeId, i64)> {
-        if self.rewards_pool == 0 {
-            return Vec::new();
-        }
-
-        let active_validators: Vec<_> = self
-            .validators
-            .values()
-            .filter(|v| v.status == ValidatorStatus::Active)
-            .map(|v| (v.node_id, v.total_stake))
-            .collect();
-
-        if active_validators.is_empty() {
-            return Vec::new();
-        }
-
-        let total_active_stake: i64 = active_validators.iter().map(|(_, s)| s).sum();
-        if total_active_stake == 0 {
-            return Vec::new();
-        }
-
-        let mut rewards = Vec::new();
-        let pool = self.rewards_pool;
-        self.rewards_pool = 0;
-
-        for (node_id, stake) in active_validators {
-            // Proportional reward based on stake
-            let reward = (pool as i128 * stake as i128 / total_active_stake as i128) as i64;
-            if reward > 0 {
-                if let Some(validator) = self.get_validator_by_node_mut(&node_id) {
-                    validator.pending_rewards += reward;
-                    rewards.push((node_id, reward));
-                }
-            }
-        }
-
-        rewards
     }
 
     /// Compute new active validator set
@@ -298,7 +271,8 @@ impl StakingState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::staking::types::MIN_SELF_STAKE;
+    use crate::app::staking::types::{UnstakeRequest, MIN_SELF_STAKE};
+    use crate::crypto::bls::BlsSecretKey;
 
     fn test_node_id(n: u8) -> NodeId {
         let mut id = [0u8; 32];
@@ -306,8 +280,23 @@ mod tests {
         id
     }
 
-    fn test_bls_key() -> Vec<u8> {
-        vec![0u8; 48]
+    fn test_bls_key_for(n: u8) -> Vec<u8> {
+        let mut seed = [0u8; 32];
+        seed[0] = n;
+        BlsSecretKey::from_seed(&seed)
+            .public_key()
+            .to_bytes()
+            .to_vec()
+    }
+
+    fn test_bls_proof(n: u8) -> Vec<u8> {
+        let mut seed = [0u8; 32];
+        seed[0] = n;
+        let node_id = test_node_id(n);
+        BlsSecretKey::from_seed(&seed)
+            .create_proof_of_possession(&[0u8; 32], &node_id)
+            .to_bytes()
+            .to_vec()
     }
 
     #[test]
@@ -316,10 +305,26 @@ mod tests {
 
         // Register some validators
         state
-            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v1".into(),
+                test_node_id(1),
+                test_bls_key_for(1),
+                test_bls_proof(1),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
         state
-            .register_validator("v2".into(), test_node_id(2), test_bls_key(), MIN_SELF_STAKE * 2, 500)
+            .register_validator(
+                "v2".into(),
+                test_node_id(2),
+                test_bls_key_for(2),
+                test_bls_proof(2),
+                [0u8; 32],
+                MIN_SELF_STAKE * 2,
+                500,
+            )
             .unwrap();
 
         // First epoch transition
@@ -336,14 +341,49 @@ mod tests {
     }
 
     #[test]
+    fn epoch_transition_does_not_drain_matured_unstakes() {
+        let mut state = StakingState::new();
+        state.unstake_queue.insert(
+            "alice".into(),
+            vec![UnstakeRequest {
+                delegator: "alice".into(),
+                validator: None,
+                amount: 7,
+                completion_time: 1,
+            }],
+        );
+
+        let result = state.transition_epoch(0, 2);
+
+        assert!(result.unstake_completions.is_empty());
+        assert_eq!(state.total_unbonding(&"alice".into()), 7);
+    }
+
+    #[test]
     fn test_liveness_jailing() {
         let mut state = StakingState::new();
 
         state
-            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v1".into(),
+                test_node_id(1),
+                test_bls_key_for(1),
+                test_bls_proof(1),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
         state
-            .register_validator("v2".into(), test_node_id(2), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v2".into(),
+                test_node_id(2),
+                test_bls_key_for(2),
+                test_bls_proof(2),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
 
         // First epoch to make validators active
@@ -372,13 +412,37 @@ mod tests {
 
         // Register validators with different stakes
         state
-            .register_validator("v1".into(), test_node_id(1), test_bls_key(), MIN_SELF_STAKE, 500)
+            .register_validator(
+                "v1".into(),
+                test_node_id(1),
+                test_bls_key_for(1),
+                test_bls_proof(1),
+                [0u8; 32],
+                MIN_SELF_STAKE,
+                500,
+            )
             .unwrap();
         state
-            .register_validator("v2".into(), test_node_id(2), test_bls_key(), MIN_SELF_STAKE * 3, 500)
+            .register_validator(
+                "v2".into(),
+                test_node_id(2),
+                test_bls_key_for(2),
+                test_bls_proof(2),
+                [0u8; 32],
+                MIN_SELF_STAKE * 3,
+                500,
+            )
             .unwrap();
         state
-            .register_validator("v3".into(), test_node_id(3), test_bls_key(), MIN_SELF_STAKE * 2, 500)
+            .register_validator(
+                "v3".into(),
+                test_node_id(3),
+                test_bls_key_for(3),
+                test_bls_proof(3),
+                [0u8; 32],
+                MIN_SELF_STAKE * 2,
+                500,
+            )
             .unwrap();
 
         // First epoch transition
@@ -402,8 +466,8 @@ mod tests {
 
         // Stakes should be correct
         assert_eq!(update.stakes.len(), 3);
-        assert_eq!(update.stakes[0].1, (MIN_SELF_STAKE * 3) as u64);
-        assert_eq!(update.stakes[1].1, (MIN_SELF_STAKE * 2) as u64);
-        assert_eq!(update.stakes[2].1, MIN_SELF_STAKE as u64);
+        assert_eq!(update.stakes[0].1, 3);
+        assert_eq!(update.stakes[1].1, 2);
+        assert_eq!(update.stakes[2].1, 1);
     }
 }

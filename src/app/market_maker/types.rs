@@ -61,9 +61,7 @@ pub enum MarketMakerAction {
         order_type: OrderType,
     },
     /// Cancel an existing order
-    CancelOrder {
-        order_id: String,
-    },
+    CancelOrder { order_id: String },
     /// Place multiple orders
     PlaceMultiple {
         orders: Vec<(Side, Price, i64, OrderType)>,
@@ -77,15 +75,16 @@ pub enum MarketMakerAction {
 
 impl MarketMakerAction {
     /// Convert action to transactions for a given trader
-    pub fn to_transactions(
-        &self,
-        trader: &str,
-        symbol: &str,
-    ) -> Vec<Transaction> {
+    pub fn to_transactions(&self, trader: &str, symbol: &str) -> Vec<Transaction> {
         match self {
             MarketMakerAction::None => vec![],
 
-            MarketMakerAction::PlaceOrder { side, price, size, order_type } => {
+            MarketMakerAction::PlaceOrder {
+                side,
+                price,
+                size,
+                order_type,
+            } => {
                 vec![Transaction::PlaceOrder {
                     trader: trader.to_string(),
                     symbol: symbol.to_string(),
@@ -104,27 +103,30 @@ impl MarketMakerAction {
                 }]
             }
 
-            MarketMakerAction::PlaceMultiple { orders } => {
-                orders.iter().map(|(side, price, size, order_type)| {
-                    Transaction::PlaceOrder {
-                        trader: trader.to_string(),
-                        symbol: symbol.to_string(),
-                        side: *side,
-                        price: *price,
-                        size: *size,
-                        order_type: *order_type,
-                        reduce_only: false,
-                    }
-                }).collect()
-            }
+            MarketMakerAction::PlaceMultiple { orders } => orders
+                .iter()
+                .map(|(side, price, size, order_type)| Transaction::PlaceOrder {
+                    trader: trader.to_string(),
+                    symbol: symbol.to_string(),
+                    side: *side,
+                    price: *price,
+                    size: *size,
+                    order_type: *order_type,
+                    reduce_only: false,
+                })
+                .collect(),
 
-            MarketMakerAction::ReplaceOrders { cancel_ids, new_orders } => {
-                let mut txs: Vec<Transaction> = cancel_ids.iter().map(|id| {
-                    Transaction::CancelOrder {
+            MarketMakerAction::ReplaceOrders {
+                cancel_ids,
+                new_orders,
+            } => {
+                let mut txs: Vec<Transaction> = cancel_ids
+                    .iter()
+                    .map(|id| Transaction::CancelOrder {
                         trader: trader.to_string(),
                         order_id: id.clone(),
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 txs.extend(new_orders.iter().map(|(side, price, size, order_type)| {
                     Transaction::PlaceOrder {
@@ -175,7 +177,13 @@ impl MarketSnapshot {
         if self.price_history.len() < 2 {
             return 0;
         }
-        let recent = self.price_history.iter().rev().take(lookback).copied().collect::<Vec<_>>();
+        let recent = self
+            .price_history
+            .iter()
+            .rev()
+            .take(lookback)
+            .copied()
+            .collect::<Vec<_>>();
         if recent.len() < 2 {
             return 0;
         }

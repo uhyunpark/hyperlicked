@@ -29,13 +29,20 @@
 //! - `ttl`: Initial time-to-live for messages (default: 5 hops)
 //! - `cache_size`: Maximum seen message IDs to track (default: 10000)
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::consensus::EquivocationProof;
 use crate::types::{Hash, Message, NodeId};
+
+/// Maximum number of authenticated equivocation keys retained for fast
+/// duplicate suppression.  This is intentionally bounded independently of
+/// the payload seen cache: an attacker must not be able to fill the stable
+/// evidence set with arbitrary message IDs or proof variants.
+const MAX_EQUIVOCATION_KEYS: usize = 256;
 
 /// Configuration for the gossip protocol
 #[derive(Debug, Clone)]
@@ -62,6 +69,14 @@ impl Default for GossipConfig {
 }
 
 impl GossipConfig {
+    /// Validate resource-sensitive gossip settings before constructing state.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cache_size == 0 {
+            return Err("gossip cache_size must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+
     /// Load gossip config from environment variables
     pub fn from_env() -> Self {
         Self {
@@ -131,8 +146,11 @@ impl GossipMessage {
     }
 }
 
-/// Compute a unique ID for a message based on its content
-fn compute_message_id(msg: &Message) -> MessageId {
+/// Compute a unique ID for a message based on its content.
+///
+/// The ID intentionally excludes gossip metadata.  Relays therefore retain
+/// one stable identity while the TTL changes on each hop.
+pub fn compute_message_id(msg: &Message) -> MessageId {
     let mut hasher = Sha256::new();
     // Serialize message to bytes for hashing
     if let Ok(bytes) = bincode::serialize(msg) {
@@ -144,6 +162,34 @@ fn compute_message_id(msg: &Message) -> MessageId {
     result
 }
 
+/// Validate the untrusted gossip envelope without changing the seen cache.
+/// Cryptographic/committee validation of the inner consensus message belongs
+/// to the transport admission gate, which calls this check first.
+pub fn validate_gossip_envelope(gossip_msg: &GossipMessage, initial_ttl: u8) -> Result<(), String> {
+    if gossip_msg.ttl == 0 {
+        return Err("gossip TTL must be greater than zero".to_string());
+    }
+    if initial_ttl == 0 {
+        return Err("gossip is configured with an invalid zero initial TTL".to_string());
+    }
+    if gossip_msg.ttl > initial_ttl {
+        return Err("gossip TTL exceeds the configured initial TTL".to_string());
+    }
+    if gossip_msg.msg_id != compute_message_id(&gossip_msg.message) {
+        return Err("gossip message ID does not match its payload".to_string());
+    }
+    match &gossip_msg.message {
+        Message::Gossip(_) => Err("nested gossip envelopes are forbidden".to_string()),
+        Message::SyncRequest(_)
+        | Message::SyncResponse(_)
+        | Message::SnapshotRequest(_)
+        | Message::SnapshotResponse(_) => {
+            Err("sync messages cannot be propagated through gossip".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// State for the gossip protocol
 ///
 /// Thread-safe tracking of seen messages to prevent duplicate processing
@@ -153,15 +199,29 @@ pub struct GossipState {
     config: GossipConfig,
     /// Set of recently seen message IDs
     seen: Arc<RwLock<SeenCache>>,
+    /// Authenticated `(context, offender)` keys for evidence already
+    /// admitted.  This cache is populated only after committee/BLS
+    /// validation, unlike the payload cache which tracks message IDs.
+    equivocation_keys: Arc<RwLock<EquivocationKeyCache>>,
 }
 
 impl GossipState {
     /// Create new gossip state with given config
     pub fn new(config: GossipConfig) -> Self {
-        Self {
+        Self::try_new(config).expect("invalid gossip configuration")
+    }
+
+    /// Fallible constructor used by network initialization so invalid
+    /// resource limits fail closed instead of panicking a node task.
+    pub fn try_new(config: GossipConfig) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self {
             seen: Arc::new(RwLock::new(SeenCache::new(config.cache_size))),
+            equivocation_keys: Arc::new(RwLock::new(EquivocationKeyCache::new(
+                MAX_EQUIVOCATION_KEYS,
+            ))),
             config,
-        }
+        })
     }
 
     /// Check if we've seen this message before, and mark it as seen
@@ -207,6 +267,12 @@ impl GossipState {
     /// Returns `Some(message)` if this is a new message that should be delivered,
     /// `None` if it's a duplicate.
     pub fn receive(&self, gossip_msg: &GossipMessage) -> Option<Message> {
+        // Never mark a claimed ID before validating the bytes that produced
+        // it.  This is the important cache-poisoning boundary: malformed
+        // envelopes must have zero seen-cache side effects.
+        if validate_gossip_envelope(gossip_msg, self.config.ttl).is_err() {
+            return None;
+        }
         if self.mark_seen(&gossip_msg.msg_id) {
             Some(gossip_msg.message.clone())
         } else {
@@ -222,11 +288,97 @@ impl GossipState {
             cache_capacity: self.config.cache_size,
         }
     }
+
+    /// Return whether a proof's authenticated context/offender key was
+    /// already admitted.  This check is safe before expensive BLS work: a
+    /// key only enters the cache through `validate_and_mark_equivocation`.
+    pub(crate) fn has_equivocation_key(&self, proof: &EquivocationProof) -> bool {
+        let key = EquivocationKey::from(proof);
+        self.equivocation_keys
+            .read()
+            .expect("lock poisoned")
+            .contains(&key)
+    }
+
+    /// Validate one evidence proof and atomically mark its stable key.  The
+    /// validation callback runs while the write lock is held so concurrent
+    /// alternate payloads cannot all repeat BLS validation and delivery.
+    /// Invalid proofs never mutate the cache.
+    pub(crate) fn validate_and_mark_equivocation<F, E>(
+        &self,
+        proof: &EquivocationProof,
+        validate: F,
+    ) -> Result<bool, E>
+    where
+        F: FnOnce() -> Result<(), E>,
+    {
+        let key = EquivocationKey::from(proof);
+        let mut keys = self.equivocation_keys.write().expect("lock poisoned");
+        if keys.contains(&key) {
+            return Ok(false);
+        }
+        validate()?;
+        Ok(keys.insert(key))
+    }
 }
 
 impl Default for GossipState {
     fn default() -> Self {
         Self::new(GossipConfig::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct EquivocationKey {
+    epoch: u64,
+    committee_hash: Hash,
+    genesis_hash: Hash,
+    offender: NodeId,
+}
+
+impl From<&EquivocationProof> for EquivocationKey {
+    fn from(proof: &EquivocationProof) -> Self {
+        Self {
+            epoch: proof.context.epoch,
+            committee_hash: proof.context.committee_hash,
+            genesis_hash: proof.context.genesis_hash,
+            offender: proof.offender,
+        }
+    }
+}
+
+/// Bounded FIFO cache for authenticated evidence keys.
+struct EquivocationKeyCache {
+    set: HashSet<EquivocationKey>,
+    queue: VecDeque<EquivocationKey>,
+    capacity: usize,
+}
+
+impl EquivocationKeyCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            set: HashSet::with_capacity(capacity),
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn contains(&self, key: &EquivocationKey) -> bool {
+        self.set.contains(key)
+    }
+
+    fn insert(&mut self, key: EquivocationKey) -> bool {
+        if self.set.contains(&key) {
+            return false;
+        }
+        if self.queue.len() >= self.capacity {
+            if let Some(old) = self.queue.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        self.set.insert(key);
+        self.queue.push_back(key);
+        true
     }
 }
 
@@ -338,12 +490,17 @@ pub fn select_gossip_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Block;
+    use crate::types::{Block, ConsensusContext};
 
     fn test_message() -> Message {
+        let context = ConsensusContext::new(0, [7u8; 32]);
         Message::Propose(crate::types::Propose {
-            block: Block::genesis(),
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
+            block: Block::genesis(context),
             justify: None,
+            proposer_signature: vec![],
         })
     }
 
@@ -464,10 +621,65 @@ mod tests {
     }
 
     #[test]
+    fn zero_cache_capacity_is_rejected_before_state_creation() {
+        let config = GossipConfig {
+            cache_size: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(GossipState::try_new(config).is_err());
+    }
+
+    #[test]
     fn test_message_id_deterministic() {
         let msg = test_message();
         let id1 = compute_message_id(&msg);
         let id2 = compute_message_id(&msg);
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn malformed_envelopes_do_not_poison_seen_cache() {
+        let state = GossipState::default();
+        let message = test_message();
+        let origin = test_node_id(1);
+
+        let mut forged_id = GossipMessage::new(message.clone(), 5, origin);
+        forged_id.msg_id = [0xabu8; 32];
+        assert!(state.receive(&forged_id).is_none());
+        assert_eq!(state.stats().seen_count, 0);
+
+        let zero_ttl = GossipMessage::new(message.clone(), 0, origin);
+        assert!(state.receive(&zero_ttl).is_none());
+        assert_eq!(state.stats().seen_count, 0);
+
+        let excessive_ttl = GossipMessage::new(message, 6, origin);
+        assert!(state.receive(&excessive_ttl).is_none());
+        assert_eq!(state.stats().seen_count, 0);
+    }
+
+    #[test]
+    fn gossip_rejects_nested_and_sync_messages() {
+        let state = GossipState::default();
+        let origin = test_node_id(1);
+        let nested = GossipMessage::new(
+            Message::Gossip(Box::new(GossipMessage::new(test_message(), 5, origin))),
+            5,
+            origin,
+        );
+        assert!(state.receive(&nested).is_none());
+
+        let sync = GossipMessage::new(
+            Message::SyncRequest(crate::types::SyncRequest {
+                from_height: 0,
+                to_height: None,
+                max_blocks: 1,
+                request_id: 1,
+            }),
+            5,
+            origin,
+        );
+        assert!(state.receive(&sync).is_none());
+        assert_eq!(state.stats().seen_count, 0);
     }
 }

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use hyperlicked::network::{select_gossip_peers, GossipConfig, GossipMessage, GossipState};
-use hyperlicked::types::{Block, Message, NodeId, Propose};
+use hyperlicked::types::{Block, ConsensusContext, Message, NodeId, Propose};
 
 /// Create a test node ID from an index
 fn test_node_id(n: u8) -> NodeId {
@@ -18,18 +18,27 @@ fn test_node_id(n: u8) -> NodeId {
 
 /// Create a test propose message
 fn test_message(view: u64) -> Message {
+    let context = ConsensusContext::new(0, [0u8; 32]);
     Message::Propose(Propose {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         block: Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view,
             height: view,
             parent: [0u8; 32],
             payload: vec![],
             proposer: [0u8; 32],
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: 0,
             justify: None,
         },
         justify: None,
+        proposer_signature: vec![],
     })
 }
 
@@ -318,5 +327,8 @@ fn test_gossip_peer_selection_edge_cases() {
     // Only one peer and it's excluded
     let single = vec![test_node_id(1)];
     let selected = select_gossip_peers(&single, &msg_id, 1, Some(&test_node_id(1)));
-    assert!(selected.is_empty(), "Excluding only peer should return empty");
+    assert!(
+        selected.is_empty(),
+        "Excluding only peer should return empty"
+    );
 }

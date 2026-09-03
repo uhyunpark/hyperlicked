@@ -20,8 +20,8 @@ impl Signer {
 
     /// Create signer from private key bytes
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, SignerError> {
-        let signing_key = SigningKey::from_bytes(bytes.into())
-            .map_err(|_| SignerError::InvalidKey)?;
+        let signing_key =
+            SigningKey::from_bytes(bytes.into()).map_err(|_| SignerError::InvalidKey)?;
         Ok(Self { signing_key })
     }
 
@@ -56,7 +56,8 @@ impl Signer {
     /// Sign a 32-byte message hash
     /// Returns 65-byte signature (r || s || v)
     pub fn sign(&self, message_hash: &[u8; 32]) -> [u8; 65] {
-        let (signature, recovery_id) = self.signing_key
+        let (signature, recovery_id) = self
+            .signing_key
             .sign_prehash_recoverable(message_hash)
             .expect("signing should not fail");
 
@@ -81,15 +82,22 @@ pub fn recover_address(message_hash: &[u8; 32], signature: &[u8]) -> Result<Addr
         return Err(SignerError::InvalidSignature);
     }
 
-    let sig = Signature::try_from(&signature[..64])
-        .map_err(|_| SignerError::InvalidSignature)?;
+    let sig = Signature::try_from(&signature[..64]).map_err(|_| SignerError::InvalidSignature)?;
+    // Canonical signatures use the low-s form required by Ethereum.  Accepting
+    // the mathematically equivalent high-s form would let the same signed
+    // action produce a second envelope hash.
+    if sig.normalize_s().is_some() {
+        return Err(SignerError::InvalidSignature);
+    }
 
     let v = signature[64];
-    let recovery_id = if v >= 27 {
-        RecoveryId::try_from(v - 27).map_err(|_| SignerError::InvalidSignature)?
-    } else {
-        RecoveryId::try_from(v).map_err(|_| SignerError::InvalidSignature)?
+    let recovery_byte = match v {
+        0 | 1 => v,
+        27 | 28 => v - 27,
+        _ => return Err(SignerError::InvalidSignature),
     };
+    let recovery_id =
+        RecoveryId::try_from(recovery_byte).map_err(|_| SignerError::InvalidSignature)?;
 
     let verifying_key = VerifyingKey::recover_from_prehash(message_hash, &sig, recovery_id)
         .map_err(|_| SignerError::RecoveryFailed)?;

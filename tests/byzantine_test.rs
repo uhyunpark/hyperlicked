@@ -18,7 +18,8 @@ use hyperlicked::consensus::{AppHook, BlockStore, MemoryBlockStore, Pacemaker, S
 use hyperlicked::crypto::bls::{aggregate_signatures, BlsSecretKey};
 use hyperlicked::network::{MockNetwork, Network};
 use hyperlicked::types::{
-    hash_short, Block, Certificate, ConsensusConfig, Hash, Message, Prepare, Propose, Vote,
+    hash_short, Block, Certificate, ConsensusConfig, ConsensusContext, Hash, Message, Prepare,
+    Propose, Vote,
 };
 
 // =============================================================================
@@ -42,7 +43,10 @@ struct BlsTestNode {
 impl BlsTestNode {
     fn new(config: ConsensusConfig, network: MockNetwork, bls_key: BlsSecretKey) -> Self {
         let store = MemoryBlockStore::new();
-        let genesis = Block::genesis();
+        let context = config
+            .context()
+            .expect("BLS test config must have a canonical context");
+        let genesis = Block::genesis(context);
         store.save(&genesis);
         store.set_committed(&genesis.hash());
 
@@ -73,7 +77,9 @@ impl BlsTestNode {
                 return block;
             }
         }
-        self.store.get_by_height(0).unwrap_or_else(Block::genesis)
+        self.store
+            .get_by_height(0)
+            .unwrap_or_else(|| Block::genesis(self.config.context().expect("valid context")))
     }
 
     /// Run a leader round with BLS signatures
@@ -87,11 +93,15 @@ impl BlsTestNode {
 
         let justify = self.safety.high_qc().cloned();
         let mut block = Block {
+            epoch: self.config.epoch,
+            committee_hash: self.config.context().expect("valid context").committee_hash,
+            genesis_hash: self.config.context().expect("valid context").genesis_hash,
             view,
             height: parent.height + 1,
             parent: parent.hash(),
             payload,
             proposer: self.config.node_id,
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: now.as_millis() as u64,
             justify: justify.clone(),
@@ -103,13 +113,18 @@ impl BlsTestNode {
         self.pending.insert(block_hash, block.clone());
 
         let propose = Propose {
+            epoch: block.epoch,
+            committee_hash: block.committee_hash,
+            genesis_hash: block.genesis_hash,
             block: block.clone(),
             justify,
+            proposer_signature: vec![],
         };
         self.network.broadcast_propose(propose).await?;
 
         // BLS self-vote
         let self_vote = Vote::new_bls(
+            self.config.context().expect("valid context"),
             view,
             block_hash,
             block.app_hash,
@@ -134,9 +149,18 @@ impl BlsTestNode {
                 .collect();
 
             if let Ok(agg_sig) = aggregate_signatures(&sigs) {
-                let qc =
-                    Certificate::new_bls(view, block_hash, votes, agg_sig.to_bytes().to_vec());
+                let qc = Certificate::new_bls(
+                    self.config.context().expect("valid context"),
+                    view,
+                    block_hash,
+                    votes,
+                    agg_sig.to_bytes().to_vec(),
+                )
+                .map_err(anyhow::Error::msg)?;
                 let prepare = Prepare {
+                    epoch: qc.epoch,
+                    committee_hash: qc.committee_hash,
+                    genesis_hash: qc.genesis_hash,
                     view,
                     qc: qc.clone(),
                 };
@@ -167,7 +191,7 @@ impl BlsTestNode {
         };
 
         if let Some(vote) = self.process_proposal(propose) {
-            let leader = self.config.leader_of(view);
+            let leader = self.config.leader_of_active(view);
             let _ = self.network.send_vote(leader, vote).await;
         }
 
@@ -248,27 +272,19 @@ impl BlsTestNode {
 
         // SECURITY: Verify QC before any state mutation
         if height > 1 {
-            let justify = propose
-                .justify
-                .as_ref()
-                .or(block.justify.as_ref());
+            let justify = propose.justify.as_ref().or(block.justify.as_ref());
 
             if let Some(cert) = justify {
                 // Verify QC certifies parent
                 if cert.block_hash != block.parent {
-                    eprintln!(
-                        "Rejecting proposal: QC block_hash doesn't match parent"
-                    );
+                    eprintln!("Rejecting proposal: QC block_hash doesn't match parent");
                     return None;
                 }
 
                 // Verify BLS signature if present
                 if cert.is_bls() {
                     if let Err(e) = cert.verify_bls() {
-                        eprintln!(
-                            "Rejecting proposal at view {}: invalid BLS QC: {}",
-                            view, e
-                        );
+                        eprintln!("Rejecting proposal at view {}: invalid BLS QC: {}", view, e);
                         return None;
                     }
                 }
@@ -300,6 +316,7 @@ impl BlsTestNode {
         }
 
         Some(Vote::new_bls(
+            self.config.context().expect("valid context"),
             view,
             block.hash(),
             local_app_hash,
@@ -385,10 +402,7 @@ fn create_bls_keys(count: usize) -> Vec<BlsSecretKey> {
         .collect()
 }
 
-fn create_bls_configs(
-    node_ids: &[[u8; 32]],
-    keys: &[BlsSecretKey],
-) -> Vec<ConsensusConfig> {
+fn create_bls_configs(node_ids: &[[u8; 32]], keys: &[BlsSecretKey]) -> Vec<ConsensusConfig> {
     let pubkeys: Vec<Vec<u8>> = keys
         .iter()
         .map(|k| k.public_key().to_bytes().to_vec())
@@ -403,8 +417,11 @@ fn create_bls_configs(
             seed[31] = 0xBE;
 
             ConsensusConfig {
+                epoch: 0,
+                genesis_hash: [0u8; 32],
                 node_id,
                 validators: node_ids.to_vec(),
+                voting_powers: vec![1; node_ids.len()],
                 view_timeout_ms: 500,
                 bls_pubkeys: pubkeys.clone(),
                 bls_secret_key: Some(seed),
@@ -458,9 +475,21 @@ async fn test_byzantine_leader_fabricated_qc_rejected() {
     let (net0, net1, net2) = MockNetwork::create_connected_trio();
 
     let mut nodes: Vec<Arc<Mutex<BlsTestNode>>> = vec![
-        Arc::new(Mutex::new(BlsTestNode::new(configs[0].clone(), net0, keys[0].clone()))),
-        Arc::new(Mutex::new(BlsTestNode::new(configs[1].clone(), net1, keys[1].clone()))),
-        Arc::new(Mutex::new(BlsTestNode::new(configs[2].clone(), net2, keys[2].clone()))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[0].clone(),
+            net0,
+            keys[0].clone(),
+        ))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[1].clone(),
+            net1,
+            keys[1].clone(),
+        ))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[2].clone(),
+            net2,
+            keys[2].clone(),
+        ))),
     ];
 
     // Run 3 honest rounds to establish state
@@ -481,9 +510,13 @@ async fn test_byzantine_leader_fabricated_qc_rejected() {
         let node = nodes[0].lock().await;
         let parent = node.get_proposal_parent();
         let parent_hash = parent.hash();
+        let context = node.config.context().expect("valid context");
 
         // Fabricated QC: valid structure, but random 96-byte signature
         Certificate {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 99,
             block_hash: parent_hash,
             app_hash: Some([0u8; 32]),
@@ -510,20 +543,29 @@ async fn test_byzantine_leader_fabricated_qc_rejected() {
     let byzantine_propose = {
         let node = nodes[0].lock().await;
         let parent = node.get_proposal_parent();
+        let context = node.config.context().expect("valid context");
         let block = Block {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             view: 100,
             height: parent.height + 1,
             parent: parent.hash(),
             payload: vec![],
             proposer: node_ids[0],
+            commitment_root: [0u8; 32],
             app_hash: [0u8; 32],
             timestamp: 999999,
             justify: Some(fabricated_qc.clone()),
         };
 
         Propose {
+            epoch: context.epoch,
+            committee_hash: context.committee_hash,
+            genesis_hash: context.genesis_hash,
             block,
             justify: Some(fabricated_qc),
+            proposer_signature: vec![],
         }
     };
 
@@ -581,11 +623,12 @@ async fn test_byzantine_leader_corrupted_bls_aggregate_rejected() {
     let block_hash = [0xABu8; 32];
     let app_hash = [0u8; 32];
     let view = 1u64;
+    let context = ConsensusContext::new(0, [9u8; 32]);
 
     let votes: Vec<Vote> = keys
         .iter()
         .zip(node_ids.iter())
-        .map(|(key, &node_id)| Vote::new_bls(view, block_hash, app_hash, node_id, key))
+        .map(|(key, &node_id)| Vote::new_bls(context, view, block_hash, app_hash, node_id, key))
         .collect();
 
     let sigs: Vec<_> = votes
@@ -594,7 +637,14 @@ async fn test_byzantine_leader_corrupted_bls_aggregate_rejected() {
         .collect();
 
     let agg_sig = aggregate_signatures(&sigs).expect("aggregation should succeed");
-    let valid_qc = Certificate::new_bls(view, block_hash, votes, agg_sig.to_bytes().to_vec());
+    let valid_qc = Certificate::new_bls(
+        context,
+        view,
+        block_hash,
+        votes,
+        agg_sig.to_bytes().to_vec(),
+    )
+    .expect("valid BLS QC");
 
     // Valid QC should verify
     assert!(
@@ -621,26 +671,37 @@ async fn test_byzantine_leader_corrupted_bls_aggregate_rejected() {
     let mut follower = BlsTestNode::new(configs[1].clone(), net1, keys[1].clone());
 
     // Craft proposal with corrupted QC
-    let parent = Block::genesis();
+    let parent = Block::genesis(context);
     let block = Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 2,
         height: 1,
         parent: parent.hash(),
         payload: vec![],
         proposer: node_ids[0],
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
         justify: Some(corrupted_qc.clone()),
     };
 
     let _propose = Propose {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         block,
         justify: Some(corrupted_qc),
+        proposer_signature: vec![],
     };
 
     // Height 1 is exempt from QC check in our test node (matching engine.rs behavior)
     // But the prepare path should still reject corrupted QC
     let prepare = Prepare {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 2,
         qc: {
             let mut bad_qc = valid_qc.clone();
@@ -678,9 +739,21 @@ async fn test_multivalidator_determinism_identical_state() {
     let (net0, net1, net2) = MockNetwork::create_connected_trio();
 
     let mut nodes: Vec<Arc<Mutex<BlsTestNode>>> = vec![
-        Arc::new(Mutex::new(BlsTestNode::new(configs[0].clone(), net0, keys[0].clone()))),
-        Arc::new(Mutex::new(BlsTestNode::new(configs[1].clone(), net1, keys[1].clone()))),
-        Arc::new(Mutex::new(BlsTestNode::new(configs[2].clone(), net2, keys[2].clone()))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[0].clone(),
+            net0,
+            keys[0].clone(),
+        ))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[1].clone(),
+            net1,
+            keys[1].clone(),
+        ))),
+        Arc::new(Mutex::new(BlsTestNode::new(
+            configs[2].clone(),
+            net2,
+            keys[2].clone(),
+        ))),
     ];
 
     // Submit transactions to the leader node
@@ -715,7 +788,8 @@ async fn test_multivalidator_determinism_identical_state() {
         assert!(
             height >= 1,
             "Node {} should have committed at least 1 block, got {}",
-            i, height
+            i,
+            height
         );
     }
 
@@ -737,7 +811,8 @@ async fn test_multivalidator_determinism_identical_state() {
             let first = hashes_at_height[0];
             for (i, hash) in hashes_at_height.iter().enumerate().skip(1) {
                 assert_eq!(
-                    first, *hash,
+                    first,
+                    *hash,
                     "Block hash mismatch at height {}: node 0 has {}, node {} has {}",
                     h,
                     hash_short(&first),
@@ -766,9 +841,12 @@ async fn test_multivalidator_determinism_identical_state() {
         let first = non_none_balances[0];
         for (i, &bal) in non_none_balances.iter().enumerate().skip(1) {
             assert_eq!(
-                first, bal,
+                first,
+                bal,
                 "Balance mismatch: node 0 has {}, node {} has {}",
-                first, i + 1, bal
+                first,
+                i + 1,
+                bal
             );
         }
     }
@@ -789,13 +867,18 @@ async fn test_state_hash_divergence_prevents_quorum() {
     let keys = create_bls_keys(3);
 
     // Create a block that all nodes will execute
-    let genesis = Block::genesis();
+    let context = ConsensusContext::new(0, [9u8; 32]);
+    let genesis = Block::genesis(context);
     let block = Block {
+        epoch: context.epoch,
+        committee_hash: context.committee_hash,
+        genesis_hash: context.genesis_hash,
         view: 0,
         height: 1,
         parent: genesis.hash(),
         payload: vec![],
         proposer: node_ids[0],
+        commitment_root: [0u8; 32],
         app_hash: [0u8; 32],
         timestamp: 1000,
         justify: None,
@@ -810,12 +893,33 @@ async fn test_state_hash_divergence_prevents_quorum() {
     let divergent_app_hash = [0xFFu8; 32];
 
     // Create votes
-    let honest_vote_0 = Vote::new_bls(0, block_hash, honest_app_hash, node_ids[0], &keys[0]);
-    let honest_vote_1 = Vote::new_bls(0, block_hash, honest_app_hash, node_ids[1], &keys[1]);
-    let divergent_vote = Vote::new_bls(0, block_hash, divergent_app_hash, node_ids[2], &keys[2]);
+    let honest_vote_0 = Vote::new_bls(
+        context,
+        0,
+        block_hash,
+        honest_app_hash,
+        node_ids[0],
+        &keys[0],
+    );
+    let honest_vote_1 = Vote::new_bls(
+        context,
+        0,
+        block_hash,
+        honest_app_hash,
+        node_ids[1],
+        &keys[1],
+    );
+    let divergent_vote = Vote::new_bls(
+        context,
+        0,
+        block_hash,
+        divergent_app_hash,
+        node_ids[2],
+        &keys[2],
+    );
 
-    // Attempt to form QC with divergent vote: votes sign different messages,
-    // so aggregate signature won't verify
+    // Attempt to form QC with divergent vote: the constructor must reject
+    // votes that disagree on the application state hash.
     let all_sigs: Vec<_> = [&honest_vote_0, &honest_vote_1, &divergent_vote]
         .iter()
         .filter_map(|v| hyperlicked::crypto::bls::BlsSignature::from_slice(&v.signature).ok())
@@ -823,21 +927,22 @@ async fn test_state_hash_divergence_prevents_quorum() {
 
     let agg_sig = aggregate_signatures(&all_sigs).expect("aggregation should succeed");
 
-    // Try to form a QC with all 3 votes (including divergent)
-    // The QC stores one app_hash, but the divergent voter signed a different message
+    // Try to form a QC with all 3 votes (including divergent).
     let mixed_qc = Certificate::new_bls(
+        context,
         0,
         block_hash,
-        vec![honest_vote_0.clone(), honest_vote_1.clone(), divergent_vote.clone()],
+        vec![
+            honest_vote_0.clone(),
+            honest_vote_1.clone(),
+            divergent_vote.clone(),
+        ],
         agg_sig.to_bytes().to_vec(),
     );
 
-    // This QC should FAIL verification because the divergent node signed a different message
-    let result = mixed_qc.verify_bls();
     assert!(
-        result.is_err(),
-        "QC with divergent app_hash vote should fail BLS verification: {:?}",
-        result
+        mixed_qc.is_err(),
+        "QC construction must reject votes with divergent app hashes"
     );
 
     // However, honest majority (2 of 3) can still form a valid QC
@@ -848,11 +953,14 @@ async fn test_state_hash_divergence_prevents_quorum() {
 
     let honest_agg = aggregate_signatures(&honest_sigs).expect("aggregation should succeed");
     let honest_qc = Certificate::new_bls(
+        context,
         0,
         block_hash,
         vec![honest_vote_0, honest_vote_1],
         honest_agg.to_bytes().to_vec(),
     );
+
+    let honest_qc = honest_qc.expect("honest BLS QC");
 
     // Honest QC should verify
     assert!(
@@ -863,8 +971,11 @@ async fn test_state_hash_divergence_prevents_quorum() {
     // Verify quorum: with n=3, quorum=2, honest majority is sufficient
     assert_eq!(honest_qc.vote_count(), 2);
     let config = ConsensusConfig {
+        epoch: 0,
+        genesis_hash: [0u8; 32],
         node_id: node_ids[0],
         validators: node_ids.to_vec(),
+        voting_powers: vec![1; node_ids.len()],
         view_timeout_ms: 500,
         bls_pubkeys: vec![],
         bls_secret_key: None,

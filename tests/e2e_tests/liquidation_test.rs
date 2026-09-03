@@ -48,10 +48,18 @@ fn test_underwater_long_liquidated() {
 
     // Alice deposits only $5,000 (small margin)
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(SMALL_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(SMALL_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -102,10 +110,18 @@ fn test_underwater_short_liquidated() {
 
     // Alice deposits only $5,000 (small margin)
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(SMALL_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(SMALL_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -151,10 +167,18 @@ fn test_liquidation_to_insurance() {
 
     // Setup: Alice with minimal margin
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(SMALL_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_ALICE)
+                .amount(SMALL_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -203,7 +227,11 @@ fn test_multiple_liquidations_same_block() {
 
     // Need a counterparty with lots of funds
     ctx.state
-        .submit_tx(DepositBuilder::new("market_maker").amount(10 * DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new("market_maker")
+                .amount(10 * DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
@@ -264,7 +292,11 @@ fn test_not_liquidated_at_maintenance_boundary() {
         .submit_tx(DepositBuilder::new(TRADER_ALICE).amount(deposit).build())
         .unwrap();
     ctx.state
-        .submit_tx(DepositBuilder::new(TRADER_BOB).amount(DEFAULT_DEPOSIT).build())
+        .submit_tx(
+            DepositBuilder::new(TRADER_BOB)
+                .amount(DEFAULT_DEPOSIT)
+                .build(),
+        )
         .unwrap();
     ctx.execute_block();
 
